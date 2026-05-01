@@ -1,0 +1,10 @@
+.reference/
+.vibe/
+.vibeloop/
+.DS_Store
+
+out/
+**/.zig-cache/
+**/zig-cache/
+**/zig-out/
+**/.build/
