@@ -21,11 +21,18 @@ SUPPORTED_EXAMPLES := \
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 
-.PHONY: bootstrap examples clean
+.PHONY: bootstrap test-bootstrap examples clean
 
 bootstrap:
 	@mkdir -p "$(OUT_DIR)"
 	@cd "$(BOOTSTRAP_DIR)" && zig build \
+		--prefix "../$(BOOTSTRAP_PREFIX)" \
+		--cache-dir "../$(BOOTSTRAP_CACHE_DIR)" \
+		--global-cache-dir "../$(ZIG_GLOBAL_CACHE_DIR)"
+
+test-bootstrap:
+	@mkdir -p "$(OUT_DIR)"
+	@cd "$(BOOTSTRAP_DIR)" && zig build test \
 		--prefix "../$(BOOTSTRAP_PREFIX)" \
 		--cache-dir "../$(BOOTSTRAP_CACHE_DIR)" \
 		--global-cache-dir "../$(ZIG_GLOBAL_CACHE_DIR)"

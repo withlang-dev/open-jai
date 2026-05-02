@@ -13,7 +13,12 @@ pub const Type = struct {
     pub fn isBool(t: Type) bool { return t.index == InternPool.well_known.bool_type; }
     pub fn isString(t: Type) bool { return t.index == InternPool.well_known.string_type; }
     pub fn isInteger(t: Type) bool { return t.index >= InternPool.well_known.s8_type and t.index <= InternPool.well_known.u128_type; }
-    pub fn isPointer(t: Type) bool { _ = t; return false; }
+    pub fn isPointer(t: Type) bool { return t.index > InternPool.well_known.any_type and t.index != InternPool.well_known.vector3_type; }
+    pub fn isFloat(t: Type) bool { return t.index == InternPool.well_known.float32_type or t.index == InternPool.well_known.float64_type; }
+    pub fn isProcedure(t: Type) bool {
+        const ip = @import("Sema.zig").activeInternPoolForTypeQueries() orelse return false;
+        return switch (ip.key(t.index)) { .type_proc => true, else => false };
+    }
 
     pub fn sizeOf(t: Type) u64 {
         return switch (t.index) {
@@ -25,6 +30,7 @@ pub const Type = struct {
             InternPool.well_known.s64_type, InternPool.well_known.u64_type, InternPool.well_known.float64_type => 8,
             InternPool.well_known.s128_type, InternPool.well_known.u128_type => 16,
             InternPool.well_known.string_type => 16,
+            InternPool.well_known.vector3_type => 12,
             else => 8,
         };
     }

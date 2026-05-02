@@ -13,6 +13,9 @@ pub const Node = struct {
     pub const Tag = enum(u8) {
         root,
         import_decl,
+        load_decl,
+        scope_decl,
+        add_context_decl,
         proc_decl,
         const_decl,
         param_list,
@@ -20,18 +23,32 @@ pub const Node = struct {
         expr_stmt,
         var_decl,
         return_stmt,
+        stmt_list,
         type_expr,
+        pointer_type,
+        proc_type,
+        if_stmt,
+        ifx_expr,
+        for_stmt,
+        aggregate_literal,
+        typed_aggregate_literal,
+        field_access,
         call_expr,
         assign_stmt,
         char_literal,
         type_of_expr,
         size_of_expr,
+        run_expr,
+        is_constant_expr,
+        unary_expr,
         binary_expr,
         identifier,
         string_literal,
         integer_literal,
         float_literal,
         bool_literal,
+        null_literal,
+        undefined_literal,
         unsupported,
     };
 
@@ -91,6 +108,7 @@ pub const Ast = struct {
     pub fn stringTokenContents(ast: *const Ast, token_index: Token.Index) []const u8 {
         const text = ast.tokenSlice(token_index);
         if (text.len >= 2 and text[0] == '"') return text[1 .. text.len - 1];
+        if (text.len > 0 and text[text.len - 1] == '\n') return text[0 .. text.len - 1];
         return text;
     }
 };

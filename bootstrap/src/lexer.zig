@@ -64,7 +64,8 @@ const Lexer = struct {
                 '^' => try l.add(.caret, start),
                 '~' => try l.add(.tilde, start),
                 '.' => {
-                    if (l.match('.')) try l.add(.dot_dot, start)
+                    if (l.index < l.source.len and std.ascii.isDigit(l.source[l.index])) try l.leadingDotFloat(start)
+                    else if (l.match('.')) try l.add(.dot_dot, start)
                     else if (l.match('*')) try l.add(.dot_star, start)
                     else try l.add(.dot, start);
                 },
@@ -121,7 +122,18 @@ const Lexer = struct {
     }
 
     fn identifier(l: *Lexer, start: usize) !void {
-        while (l.index < l.source.len and isIdentContinue(l.source[l.index])) l.index += 1;
+        while (l.index < l.source.len) {
+            if (l.source[l.index] == '\\') {
+                var j = l.index + 1;
+                while (j < l.source.len and l.source[j] == ' ') j += 1;
+                if (j < l.source.len and isIdentContinue(l.source[j])) {
+                    l.index = j + 1;
+                    continue;
+                }
+                break;
+            }
+            if (isIdentContinue(l.source[l.index])) l.index += 1 else break;
+        }
         try l.add(token_mod.keywordOrIdentifier(l.source[start..l.index]), start);
     }
 
@@ -131,6 +143,37 @@ const Lexer = struct {
         const tag = token_mod.directiveOrInvalid(l.source[start..l.index]);
         if (tag == .invalid) return l.diag.failAt(start, "unknown directive '{s}'", .{l.source[start..l.index]});
         try l.add(tag, start);
+        if (tag == .directive_string) try l.multilineStringPayload(start);
+    }
+
+    fn multilineStringPayload(l: *Lexer, directive_start: usize) !void {
+        while (l.index < l.source.len and (l.source[l.index] == ' ' or l.source[l.index] == '\t')) l.index += 1;
+        if (l.index >= l.source.len or !isIdentStart(l.source[l.index])) return l.diag.failAt(directive_start, "#string requires a delimiter identifier", .{});
+        const delim_start = l.index;
+        while (l.index < l.source.len and isIdentContinue(l.source[l.index])) l.index += 1;
+        const delimiter = l.source[delim_start..l.index];
+        while (l.index < l.source.len and (l.source[l.index] == ' ' or l.source[l.index] == '\t' or l.source[l.index] == '\r')) l.index += 1;
+        if (l.index >= l.source.len or l.source[l.index] != '\n') return l.diag.failAt(delim_start, "#string delimiter must be followed by a newline", .{});
+        l.index += 1;
+        const payload_start = l.index;
+        while (l.index < l.source.len) {
+            const line_start = l.index;
+            var line_end = line_start;
+            while (line_end < l.source.len and l.source[line_end] != '\n' and l.source[line_end] != '\r') line_end += 1;
+            var trimmed_end = line_end;
+            while (trimmed_end > line_start and (l.source[trimmed_end - 1] == ' ' or l.source[trimmed_end - 1] == '\t')) trimmed_end -= 1;
+            if (std.mem.eql(u8, l.source[line_start..trimmed_end], delimiter)) {
+                try l.tokens.append(l.allocator, .{ .tag = .string_literal, .start = @intCast(payload_start), .end = @intCast(line_start) });
+                l.index = line_end;
+                if (l.index < l.source.len and l.source[l.index] == '\r') l.index += 1;
+                if (l.index < l.source.len and l.source[l.index] == '\n') l.index += 1;
+                return;
+            }
+            l.index = line_end;
+            if (l.index < l.source.len and l.source[l.index] == '\r') l.index += 1;
+            if (l.index < l.source.len and l.source[l.index] == '\n') l.index += 1;
+        }
+        return l.diag.failAt(directive_start, "unterminated #string payload; expected delimiter '{s}'", .{delimiter});
     }
 
     fn number(l: *Lexer, start: usize) !void {
@@ -188,6 +231,22 @@ const Lexer = struct {
         }
         if (l.index < l.source.len and std.ascii.isAlphabetic(l.source[l.index])) return l.diag.failAt(l.index, "invalid numeric literal suffix", .{});
         try l.add(if (is_float) .float_literal else .integer_literal, start);
+    }
+
+    fn leadingDotFloat(l: *Lexer, start: usize) !void {
+        while (l.index < l.source.len and (std.ascii.isDigit(l.source[l.index]) or l.source[l.index] == '_')) l.index += 1;
+        if (l.index < l.source.len and (l.source[l.index] == 'e' or l.source[l.index] == 'E')) {
+            l.index += 1;
+            if (l.index < l.source.len and (l.source[l.index] == '+' or l.source[l.index] == '-')) l.index += 1;
+            var exp_digits: usize = 0;
+            while (l.index < l.source.len and (std.ascii.isDigit(l.source[l.index]) or l.source[l.index] == '_')) {
+                if (std.ascii.isDigit(l.source[l.index])) exp_digits += 1;
+                l.index += 1;
+            }
+            if (exp_digits == 0) return l.diag.failAt(start, "float exponent requires at least one digit", .{});
+        }
+        if (l.index < l.source.len and std.ascii.isAlphabetic(l.source[l.index])) return l.diag.failAt(l.index, "invalid numeric literal suffix", .{});
+        try l.add(.float_literal, start);
     }
 
     fn string(l: *Lexer, start: usize) !void {
@@ -258,6 +317,20 @@ test "lexer tokenizes Phase 2 numeric literal formats" {
         .eof,
     };
     try std.testing.expectEqualSlices(Tag, expected, tags);
+}
+
+test "lexer tokenizes #string multiline payload and reports unterminated payload" {
+    const source = "INFO :: #string STRING\n<?xml version=\"1.0\" ?>\nSTRING\n";
+    const diag = Diagnostic.init(std.testing.allocator, "multiline_string.jai", source);
+    var tokens = try tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const tags = tokens.items(.tag);
+    const expected = &[_]Tag{ .identifier, .colon_colon, .directive_string, .string_literal, .eof };
+    try std.testing.expectEqualSlices(Tag, expected, tags);
+
+    const bad = "INFO :: #string STRING\n<?xml version=\"1.0\" ?>\n";
+    const bad_diag = Diagnostic.init(std.testing.allocator, "bad_multiline_string.jai", bad);
+    try std.testing.expectError(error.CompilationFailed, tokenize(std.testing.allocator, bad, bad_diag));
 }
 
 test "lexer tokenizes nested block comments and char directive" {

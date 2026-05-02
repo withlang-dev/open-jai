@@ -21,6 +21,7 @@ pub const InternPool = struct {
         pub const string_type: Index = 14;
         pub const type_type: Index = 15;
         pub const any_type: Index = 16;
+        pub const vector3_type: Index = 17;
     };
 
     allocator: std.mem.Allocator,
@@ -35,12 +36,16 @@ pub const InternPool = struct {
         type_string,
         type_type,
         type_any,
+        type_vector3,
+        type_proc: ProcType,
+        type_pointer: Index,
         value_string: u32,
         value_int: i128,
         value_bool: bool,
     };
 
     pub const IntType = struct { signed: bool, bits: u16 };
+    pub const ProcType = struct { sig_node: u32 };
 
     pub fn init(allocator: std.mem.Allocator) !InternPool {
         var ip = InternPool{ .allocator = allocator };
@@ -74,10 +79,31 @@ pub const InternPool = struct {
             .type_string,
             .type_type,
             .type_any,
+            .type_vector3,
         });
     }
 
     pub fn key(ip: *const InternPool, idx: Index) Key { return ip.keys.items[idx]; }
+
+    pub fn internPointerType(ip: *InternPool, child: Index) !Index {
+        for (ip.keys.items, 0..) |existing_key, i| switch (existing_key) {
+            .type_pointer => |existing| if (existing == child) return @intCast(i),
+            else => {},
+        };
+        const idx: Index = @intCast(ip.keys.items.len);
+        try ip.keys.append(ip.allocator, .{ .type_pointer = child });
+        return idx;
+    }
+
+    pub fn internProcType(ip: *InternPool, sig_node: u32) !Index {
+        for (ip.keys.items, 0..) |existing_key, i| switch (existing_key) {
+            .type_proc => |existing| if (existing.sig_node == sig_node) return @intCast(i),
+            else => {},
+        };
+        const idx: Index = @intCast(ip.keys.items.len);
+        try ip.keys.append(ip.allocator, .{ .type_proc = .{ .sig_node = sig_node } });
+        return idx;
+    }
 
     pub fn internStringValue(ip: *InternPool, value: []const u8) !Index {
         const owned = try ip.allocator.dupe(u8, value);
