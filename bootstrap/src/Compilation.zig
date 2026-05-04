@@ -61,10 +61,11 @@ pub const Compilation = struct {
         const object_path = try std.fmt.allocPrint(comp.allocator, "{s}.o", .{comp.options.output_path});
         defer comp.allocator.free(object_path);
         if (std.fs.path.dirname(object_path)) |object_dir| {
-            std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, object_dir) catch |err| {
-                std.debug.print("{s}: error: unable to create output directory: {s}\n", .{ object_dir, @errorName(err) });
-                return error.OutputDirectoryFailed;
-            };
+            // Attempt to create the output directory. Silently ignore errors when the
+            // directory already exists (e.g. macOS /tmp is a symlink and createDirPath
+            // returns NotDir). If the path is genuinely inaccessible, emitObject below
+            // will produce a diagnostic.
+            std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, object_dir) catch {};
         }
         try llvm.emitObject(comp.allocator, &bytecode, object_path, diag);
 

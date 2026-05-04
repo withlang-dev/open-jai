@@ -67,21 +67,48 @@ pub fn build(b: *std.Build) void {
     const install_runtime = b.addInstallFile(runtime_obj.getEmittedBin(), "lib/openjai_runtime.o");
     b.getInstallStep().dependOn(&install_runtime.step);
 
+    // Unit tests use a dedicated test root (test_main.zig) that imports every
+    // module with test blocks except Compilation.zig, which transitively imports
+    // codegen/llvm.zig and requires LLVM static libs that Zig's linker cannot
+    // consume. The test binary is compiled with use_lld=false to avoid that path.
+    // LLVM headers are still needed for @cImport declarations in modules that
+    // reference LLVM types (even if the functions aren't called in tests).
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/test_main.zig"),
         .target = target,
         .optimize = optimize,
     });
     configureLlvmImports(test_mod);
 
-    // Unit tests currently compile/link through Zig because the referenced LLVM C API
-    // calls are not exercised by the test binary. The installed compiler executable uses
-    // the external clang++/ld64.lld path above for full static LLVM linkage.
     const unit_tests = b.addTest(.{ .root_module = test_mod, .use_llvm = true, .use_lld = false });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run bootstrap compiler unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // Integration test runner: compiles each annotated example and checks stdout.
+    const test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("tools/test_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const test_runner_exe = b.addExecutable(.{
+        .name = "test_runner",
+        .root_module = test_runner_mod,
+    });
+
+    const run_test_examples = b.addRunArtifact(test_runner_exe);
+    // Arg 1: path to the compiled openjai binary.
+    run_test_examples.addFileArg(linked_exe);
+    // Arg 2: path to the runtime object file.
+    run_test_examples.addFileArg(runtime_obj.getEmittedBin());
+    // Arg 3: path to the examples directory (relative to repo root, one level up from bootstrap/).
+    run_test_examples.addArg(b.pathFromRoot("../examples"));
+    // Forward any extra args (e.g. --filter) passed after `--` on the command line.
+    if (b.args) |extra_args| run_test_examples.addArgs(extra_args);
+
+    const test_examples_step = b.step("test-examples", "Run integration tests against examples/");
+    test_examples_step.dependOn(&run_test_examples.step);
 }
 
 fn configureLlvmImports(mod: *std.Build.Module) void {
