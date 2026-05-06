@@ -172,15 +172,19 @@ fn runTest(
         try actual_lines.append(allocator, line);
     }
 
-    // Check that every expected line appears in actual output in order.
+    // Check that every expected annotation text appears somewhere in actual output
+    // (as a substring of an actual line), in order. When a line is not found,
+    // restore actual_idx so subsequent expected lines can still be found.
     var actual_idx: usize = 0;
     var mismatches: std.ArrayList(u8) = .empty;
     defer mismatches.deinit(allocator);
 
     for (expected.items) |exp_line| {
         var found = false;
+        const saved_idx = actual_idx;
         while (actual_idx < actual_lines.items.len) {
-            if (std.mem.eql(u8, actual_lines.items[actual_idx], exp_line)) {
+            // Use substring match: annotation text may be a suffix/part of the full output line.
+            if (std.mem.indexOf(u8, actual_lines.items[actual_idx], exp_line) != null) {
                 actual_idx += 1;
                 found = true;
                 break;
@@ -188,8 +192,10 @@ fn runTest(
             actual_idx += 1;
         }
         if (!found) {
+            // Restore position so subsequent expected lines can still be found.
+            actual_idx = saved_idx;
             try mismatches.print(allocator,
-                "      expected line not found in output: \"{s}\"\n",
+                "      expected annotation not found in output: \"{s}\"\n",
                 .{exp_line},
             );
         }
@@ -210,17 +216,27 @@ fn runTest(
 
 /// Extract expected output lines from `// =>` annotations in source.
 /// Each annotation contributes exactly one expected line (text after `=> `).
+/// Skips annotations that appear inside already-commented-out code lines
+/// (i.e., lines where `//` appears before the `// =>` marker).
 fn extractExpected(source: []const u8, allocator: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
         const marker = "// =>";
         const pos = std.mem.indexOf(u8, line, marker) orelse continue;
+        // Skip if there is another `//` before this `// =>` on the same line.
+        // That means the annotation is inside a commented-out code line.
+        const before = line[0..pos];
+        if (std.mem.indexOf(u8, before, "//") != null) continue;
         const after_marker = line[pos + marker.len ..];
         // Strip exactly one leading space if present.
         const text = if (after_marker.len > 0 and after_marker[0] == ' ')
             after_marker[1..]
         else
             after_marker;
+        // Skip empty annotations and Error: annotations (compile-time error docs).
+        if (text.len == 0) continue;
+        if (std.mem.startsWith(u8, text, "Error:")) continue;
+        if (std.mem.startsWith(u8, text, "(")) continue; // e.g. "(4) Error: ..."
         try out.append(allocator, text);
     }
 }

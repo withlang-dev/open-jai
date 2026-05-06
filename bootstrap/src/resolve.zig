@@ -18,6 +18,17 @@ pub const Symbol = union(enum) {
     builtin_memcpy,
     builtin_assert,
     builtin_sin,
+    builtin_current_time_consensus,
+    builtin_current_time_monotonic,
+    builtin_to_calendar,
+    builtin_calendar_to_string,
+    builtin_random_seed,
+    builtin_random_get,
+    builtin_random_get_zero_to_one,
+    builtin_random_get_within_range,
+    builtin_format_int,
+    builtin_format_float,
+    builtin_get_type_table,
     const_value: NodeIndex,
 };
 
@@ -25,13 +36,21 @@ pub const Resolved = struct {
     allocator: std.mem.Allocator,
     symbols: std.StringHashMapUnmanaged(Symbol) = .empty,
     local_values: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex) = .empty,
+    loop_value_types: std.AutoHashMapUnmanaged(NodeIndex, u32) = .empty,
+    loop_indexes: std.AutoHashMapUnmanaged(NodeIndex, u32) = .empty,
     owned_names: std.ArrayList([]u8) = .empty,
+    proc_overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(NodeIndex)) = .empty,
     imports_basic: bool = false,
     main_proc: ?NodeIndex = null,
 
     pub fn deinit(r: *Resolved) void {
+        var it = r.proc_overloads.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(r.allocator);
+        r.proc_overloads.deinit(r.allocator);
         r.symbols.deinit(r.allocator);
         r.local_values.deinit(r.allocator);
+        r.loop_value_types.deinit(r.allocator);
+        r.loop_indexes.deinit(r.allocator);
         for (r.owned_names.items) |name| r.allocator.free(name);
         r.owned_names.deinit(r.allocator);
     }
@@ -53,6 +72,33 @@ pub const Resolved = struct {
             len += 1;
         }
         return r.symbols.get(buf[0..len]);
+    }
+
+    pub fn overloads(r: *const Resolved, name: []const u8) ?[]const NodeIndex {
+        if (r.proc_overloads.get(name)) |list| return list.items;
+        if (std.mem.indexOfScalar(u8, name, '\\') == null) return null;
+        var buf: [256]u8 = undefined;
+        var len: usize = 0;
+        var i: usize = 0;
+        while (i < name.len) : (i += 1) {
+            if (name[i] == '\\') {
+                i += 1;
+                while (i < name.len and name[i] == ' ') i += 1;
+                if (i >= name.len) break;
+            }
+            if (len >= buf.len) return null;
+            buf[len] = name[i];
+            len += 1;
+        }
+        if (r.proc_overloads.get(buf[0..len])) |list| return list.items;
+        return null;
+    }
+
+    fn addProc(r: *Resolved, name: []const u8, proc: NodeIndex) !void {
+        var entry = try r.proc_overloads.getOrPut(r.allocator, name);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        try entry.value_ptr.append(r.allocator, proc);
+        if (!r.symbols.contains(name)) try r.symbols.put(r.allocator, name, .{ .proc = proc });
     }
 
     fn scopedName(r: *Resolved, file_id: u32, raw: []const u8) ![]u8 {
@@ -115,11 +161,14 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic) 
                     const raw = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
                     const scoped = try r.scopedName(current_file, raw);
                     try r.owned_names.append(allocator, scoped);
-                    try r.symbols.put(allocator, scoped, switch (ast.tag(decl)) {
-                        .proc_decl => .{ .proc = decl },
-                        .var_decl => .{ .const_value = ast.data(decl).rhs },
-                        else => .{ .const_value = ast.data(decl).lhs },
-                    });
+                    if (ast.tag(decl) == .proc_decl) {
+                        try r.addProc(scoped, decl);
+                    } else {
+                        try r.symbols.put(allocator, scoped, switch (ast.tag(decl)) {
+                            .var_decl => .{ .const_value = ast.data(decl).rhs },
+                            else => .{ .const_value = ast.data(decl).lhs },
+                        });
+                    }
                 } else if (current_file == 0) {
                     main_scope_started = true;
                 }
@@ -144,12 +193,26 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic) 
                     try r.symbols.put(allocator, "memcpy", .builtin_memcpy);
                     try r.symbols.put(allocator, "assert", .builtin_assert);
                     try r.symbols.put(allocator, "swap", .builtin_swap);
+                    try r.symbols.put(allocator, "formatInt", .builtin_format_int);
+                    try r.symbols.put(allocator, "formatFloat", .builtin_format_float);
+                    try r.symbols.put(allocator, "current_time_consensus", .builtin_current_time_consensus);
+                    try r.symbols.put(allocator, "current_time_monotonic", .builtin_current_time_monotonic);
+                    try r.symbols.put(allocator, "to_calendar", .builtin_to_calendar);
+                    try r.symbols.put(allocator, "calendar_to_string", .builtin_calendar_to_string);
+                    try r.symbols.put(allocator, "write_string", .builtin_write_string);
+                } else if (std.mem.eql(u8, module_name, "Random")) {
+                    try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
+                    try r.symbols.put(allocator, "random_get", .builtin_random_get);
+                    try r.symbols.put(allocator, "random_get_zero_to_one", .builtin_random_get_zero_to_one);
+                    try r.symbols.put(allocator, "random_get_within_range", .builtin_random_get_within_range);
                 } else if (std.mem.eql(u8, module_name, "Math")) {
                     try r.symbols.put(allocator, "sin", .builtin_sin);
                     try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);
+                } else if (std.mem.eql(u8, module_name, "Compiler")) {
+                    try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
             .load_decl => {
@@ -166,8 +229,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic) 
             .proc_decl => {
                 if (file_scope and !global_main_scope_started) continue;
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
-                if (r.symbols.contains(name)) continue;
-                try r.symbols.put(allocator, name, .{ .proc = decl });
+                try r.addProc(name, decl);
                 if (std.mem.eql(u8, name, "main")) r.main_proc = decl;
             },
             .run_expr => {},
@@ -253,17 +315,19 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
 
     for (stmts) |stmt_idx| {
         const stmt: NodeIndex = @intCast(stmt_idx);
-        if (ast.tag(stmt) == .proc_decl) {
-            const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
-            if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "duplicate local procedure declaration '{s}'", .{name});
+            if (ast.tag(stmt) == .proc_decl) {
+                const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
+                if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+                if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "duplicate local procedure declaration '{s}'", .{name});
             try r.symbols.put(r.allocator, name, .{ .proc = stmt });
             try declared.append(r.allocator, name);
         } else if (ast.tag(stmt) == .stmt_list) {
             for (ast.extraSlice(ast.data(stmt).lhs)) |child_idx| {
                 const child: NodeIndex = @intCast(child_idx);
-                if (ast.tag(child) == .proc_decl) {
-                    const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
-                    if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(child)].start, "duplicate local procedure declaration '{s}'", .{name});
+                    if (ast.tag(child) == .proc_decl) {
+                        const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
+                        if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+                        if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(child)].start, "duplicate local procedure declaration '{s}'", .{name});
                     try r.symbols.put(r.allocator, name, .{ .proc = child });
                     try declared.append(r.allocator, name);
                 }
@@ -280,6 +344,10 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                     switch (ast.tag(child)) {
                         .var_decl, .const_decl => {
                             const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
+                            if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) {
+                                try resolveNode(ast, r, child, file_id, diag);
+                                continue;
+                            }
                             if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(child)].start, "duplicate local declaration '{s}'", .{name});
                             if (ast.tag(child) == .var_decl) {
                                 if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
@@ -297,6 +365,10 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
             },
             .var_decl, .const_decl => {
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
+                if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) {
+                    try resolveNode(ast, r, stmt, file_id, diag);
+                    continue;
+                }
                 if (r.symbols.contains(name)) return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "duplicate local declaration '{s}'", .{name});
                 if (ast.tag(stmt) == .var_decl) {
                     if (ast.data(stmt).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
@@ -341,7 +413,10 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         .type_of_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .is_constant_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .size_of_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
-        .run_expr => if (ast.tag(ast.data(node).lhs) == .block) try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag) else try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
+        .run_expr => if (ast.tokens[ast.mainToken(node)].tag == .keyword_push_context) {
+            try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
+            try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag);
+        } else if (ast.tag(ast.data(node).lhs) == .block) try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag) else try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .unary_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .binary_expr => {
             try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
@@ -357,11 +432,64 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
             for (ast.extraSlice(ast.data(node).rhs)) |arm| try resolveNode(ast, r, @intCast(arm), file_id, diag);
         },
+        .while_stmt => {
+            const cond_node = ast.data(node).lhs;
+            if (ast.tag(cond_node) == .var_decl) {
+                // Named while: "while name := expr { }" — resolve the init, bind name for body.
+                if (ast.data(cond_node).rhs != @import("Ast.zig").null_node)
+                    try resolveNode(ast, r, ast.data(cond_node).rhs, file_id, diag);
+                const name = ast.tokenSlice(ast.mainToken(cond_node));
+                const old = r.symbols.fetchPut(r.allocator, name, .{ .const_value = cond_node }) catch |err| return err;
+                defer {
+                    if (old) |entry| r.symbols.put(r.allocator, name, entry.value) catch unreachable else _ = r.symbols.remove(name);
+                }
+                try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+            } else {
+                try resolveNode(ast, r, cond_node, file_id, diag);
+                try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+            }
+        },
+        .defer_stmt => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
+        .break_stmt, .continue_stmt => {},
         .for_stmt => {
             const range = ast.extraSlice(ast.data(node).lhs);
-            try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
-            try resolveNode(ast, r, @intCast(range[1]), file_id, diag);
-            try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+            if (range.len == 1) {
+                try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
+                const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
+                const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
+                defer {
+                    if (old_it_index) |entry| r.symbols.put(r.allocator, "it_index", entry.value) catch unreachable else _ = r.symbols.remove("it_index");
+                    if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
+                }
+                try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+            } else if (range.len == 4 or range.len == 2) {
+                // Range for: [start, end] or [start, end, iterator_tok, is_reverse]
+                try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
+                try resolveNode(ast, r, @intCast(range[1]), file_id, diag);
+                if (range.len == 4 and range[2] != 0) {
+                    // Named iterator: bind it in scope for the body.
+                    const iter_name = ast.tokenSlice(range[2]);
+                    const old_iter = r.symbols.fetchPut(r.allocator, iter_name, .{ .const_value = node }) catch |err| return err;
+                    // Also bind "it" as an alias.
+                    const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
+                    defer {
+                        if (old_iter) |entry| r.symbols.put(r.allocator, iter_name, entry.value) catch unreachable else _ = r.symbols.remove(iter_name);
+                        if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
+                    }
+                    try r.loop_indexes.put(r.allocator, node, 1);
+                    try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+                } else {
+                    // No named iterator: bind 'it' and 'it_index' as the loop index.
+                    try r.loop_indexes.put(r.allocator, node, 1);
+                    const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
+                    const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
+                    defer {
+                        if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
+                        if (old_it_index) |entry| r.symbols.put(r.allocator, "it_index", entry.value) catch unreachable else _ = r.symbols.remove("it_index");
+                    }
+                    try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+                }
+            } else return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal error: for statement has invalid operand count", .{});
         },
         .aggregate_literal => {
             for (ast.extraSlice(ast.data(node).lhs)) |elem| try resolveNode(ast, r, @intCast(elem), file_id, diag);
@@ -375,7 +503,11 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 try resolveNode(ast, r, ast.data(field).rhs, file_id, diag);
             }
         },
-        .field_access => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
+        .field_access => {
+            if (ast.data(node).lhs == @import("Ast.zig").null_node) return;
+            if (ast.tag(ast.data(node).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(node).lhs)), "Type_Info_Tag")) return;
+            try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
+        },
         .call_expr => {
             if (ast.tag(ast.data(node).lhs) == .identifier) {
                 const callee_name = ast.tokenSlice(ast.mainToken(ast.data(node).lhs));
@@ -402,15 +534,21 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             } else r.lookup(name);
             if (sym_opt) |sym| {
                 switch (sym) {
-                    .const_value => |value_node| try r.local_values.put(r.allocator, node, value_node),
+                    .const_value => |value_node| {
+                        if (value_node == node and std.mem.eql(u8, name, "it_index")) try r.loop_indexes.put(r.allocator, node, 1);
+                        if (value_node == node and std.mem.eql(u8, name, "it")) try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.type_info_type);
+                        try r.local_values.put(r.allocator, node, value_node);
+                    },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_format_int, .builtin_format_float, .builtin_get_type_table => {},
                 }
             } else if (isBuiltinTypeName(name)) {
                 // Builtin type names can appear as first-class Type values in expressions,
                 // e.g. type_of(n) == int. Leave them for Sema/codegen as identifiers.
             } else return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unresolved identifier '{s}'", .{name});
         },
+        // Bare block: anonymous scope — resolve all statements inside.
+        .block => try resolveBlock(ast, r, node, file_id, diag),
         else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported AST node in resolver", .{}),
     }
 }

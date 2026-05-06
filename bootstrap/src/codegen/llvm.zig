@@ -30,6 +30,10 @@ const LlvmEnv = struct {
     print_type_fn: c.LLVMValueRef,
     print_return_int_fn_ty: c.LLVMTypeRef,
     print_return_int_fn: c.LLVMValueRef,
+    print_format_int_fn_ty: c.LLVMTypeRef,
+    print_format_int_fn: c.LLVMValueRef,
+    print_format_float_fn_ty: c.LLVMTypeRef,
+    print_format_float_fn: c.LLVMValueRef,
     alloc_fn_ty: c.LLVMTypeRef,
     alloc_fn: c.LLVMValueRef,
     free_fn_ty: c.LLVMTypeRef,
@@ -40,6 +44,24 @@ const LlvmEnv = struct {
     assert_fail_fn: c.LLVMValueRef,
     exit_fn_ty: c.LLVMTypeRef,
     exit_fn: c.LLVMValueRef,
+    current_time_consensus_low_fn_ty: c.LLVMTypeRef,
+    current_time_consensus_low_fn: c.LLVMValueRef,
+    current_time_monotonic_low_fn_ty: c.LLVMTypeRef,
+    current_time_monotonic_low_fn: c.LLVMValueRef,
+    to_calendar_fn_ty: c.LLVMTypeRef,
+    to_calendar_fn: c.LLVMValueRef,
+    calendar_get_i64_fn_ty: c.LLVMTypeRef,
+    calendar_get_i64_fn: c.LLVMValueRef,
+    calendar_to_string_fn_ty: c.LLVMTypeRef,
+    calendar_to_string_fn: c.LLVMValueRef,
+    random_seed_fn_ty: c.LLVMTypeRef,
+    random_seed_fn: c.LLVMValueRef,
+    random_get_fn_ty: c.LLVMTypeRef,
+    random_get_fn: c.LLVMValueRef,
+    random_get_zero_to_one_fn_ty: c.LLVMTypeRef,
+    random_get_zero_to_one_fn: c.LLVMValueRef,
+    random_get_within_range_fn_ty: c.LLVMTypeRef,
+    random_get_within_range_fn: c.LLVMValueRef,
     llvm_i32: c.LLVMTypeRef,
     llvm_i64: c.LLVMTypeRef,
     llvm_f64: c.LLVMTypeRef,
@@ -92,6 +114,12 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const print_return_int_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
     const print_return_int_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&print_return_int_params), print_return_int_params.len, 0);
     const print_return_int_fn = c.LLVMAddFunction(module, "__openjai_print_return_int", print_return_int_fn_ty);
+    const print_format_int_params = [_]c.LLVMTypeRef{ llvm_i64, llvm_i64, llvm_i64 };
+    const print_format_int_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&print_format_int_params), print_format_int_params.len, 0);
+    const print_format_int_fn = c.LLVMAddFunction(module, "__openjai_print_format_int", print_format_int_fn_ty);
+    const print_format_float_params = [_]c.LLVMTypeRef{ llvm_f64, llvm_i64, llvm_i64, llvm_i64, llvm_i64 };
+    const print_format_float_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&print_format_float_params), print_format_float_params.len, 0);
+    const print_format_float_fn = c.LLVMAddFunction(module, "__openjai_print_format_float", print_format_float_fn_ty);
     const alloc_params = [_]c.LLVMTypeRef{llvm_i64};
     const alloc_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&alloc_params), alloc_params.len, 0);
     const alloc_fn = c.LLVMAddFunction(module, "__openjai_alloc", alloc_fn_ty);
@@ -106,6 +134,29 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const exit_params = [_]c.LLVMTypeRef{llvm_i32};
     const exit_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&exit_params), exit_params.len, 0);
     const exit_fn = c.LLVMAddFunction(module, "__openjai_exit", exit_fn_ty);
+    const current_time_consensus_low_fn_ty = c.LLVMFunctionType(llvm_i64, null, 0, 0);
+    const current_time_consensus_low_fn = c.LLVMAddFunction(module, "__openjai_current_time_consensus_low", current_time_consensus_low_fn_ty);
+    const current_time_monotonic_low_fn_ty = c.LLVMFunctionType(llvm_i64, null, 0, 0);
+    const current_time_monotonic_low_fn = c.LLVMAddFunction(module, "__openjai_current_time_monotonic_low", current_time_monotonic_low_fn_ty);
+    const to_calendar_params = [_]c.LLVMTypeRef{ llvm_i64, llvm_i64 };
+    const to_calendar_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&to_calendar_params), to_calendar_params.len, 0);
+    const to_calendar_fn = c.LLVMAddFunction(module, "__openjai_to_calendar", to_calendar_fn_ty);
+    const calendar_get_i64_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const calendar_get_i64_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&calendar_get_i64_params), calendar_get_i64_params.len, 0);
+    const calendar_get_i64_fn = c.LLVMAddFunction(module, "__openjai_calendar_get_i64", calendar_get_i64_fn_ty);
+    const calendar_to_string_params = [_]c.LLVMTypeRef{ptr_ty};
+    const calendar_to_string_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&calendar_to_string_params), calendar_to_string_params.len, 0);
+    const calendar_to_string_fn = c.LLVMAddFunction(module, "__openjai_calendar_to_string", calendar_to_string_fn_ty);
+    const random_seed_params = [_]c.LLVMTypeRef{llvm_i64};
+    const random_seed_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&random_seed_params), random_seed_params.len, 0);
+    const random_seed_fn = c.LLVMAddFunction(module, "__openjai_random_seed", random_seed_fn_ty);
+    const random_get_fn_ty = c.LLVMFunctionType(llvm_i64, null, 0, 0);
+    const random_get_fn = c.LLVMAddFunction(module, "__openjai_random_get", random_get_fn_ty);
+    const random_get_zero_to_one_fn_ty = c.LLVMFunctionType(llvm_f64, null, 0, 0);
+    const random_get_zero_to_one_fn = c.LLVMAddFunction(module, "__openjai_random_get_zero_to_one", random_get_zero_to_one_fn_ty);
+    const random_get_within_range_params = [_]c.LLVMTypeRef{ llvm_f64, llvm_f64 };
+    const random_get_within_range_fn_ty = c.LLVMFunctionType(llvm_f64, @constCast(&random_get_within_range_params), random_get_within_range_params.len, 0);
+    const random_get_within_range_fn = c.LLVMAddFunction(module, "__openjai_random_get_within_range", random_get_within_range_fn_ty);
 
     const main_fn_ty = c.LLVMFunctionType(llvm_i32, null, 0, 0);
     const main_fn = c.LLVMAddFunction(module, "main", main_fn_ty);
@@ -122,7 +173,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         proc_functions[i] = c.LLVMAddFunction(module, fn_name_z.ptr, proc_void_ty);
     }
 
-    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
+    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
 
     for (program.procs.items, 0..) |*helper_proc, i| {
         if (i == program.main_proc) continue;
@@ -243,7 +294,9 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .mul_float => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend fmul register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFMul(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "fmul"), .kind = .float };
+                const lhs_float = try valueAsFloat(env, registers[inst.arg1], diag);
+                const rhs_float = try valueAsFloat(env, registers[inst.arg2], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFMul(env.builder, lhs_float, rhs_float, "fmul"), .kind = .float };
             },
             .rem_int => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend rem register out of range", .{});
@@ -257,7 +310,9 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .add_float => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend fadd register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFAdd(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "fadd"), .kind = .float };
+                const lhs_float = try valueAsFloat(env, registers[inst.arg1], diag);
+                const rhs_float = try valueAsFloat(env, registers[inst.arg2], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFAdd(env.builder, lhs_float, rhs_float, "fadd"), .kind = .float };
             },
             .sub_int => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend sub register out of range", .{});
@@ -265,11 +320,21 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .sub_float => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend fsub register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFSub(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "fsub"), .kind = .float };
+                const lhs_float = try valueAsFloat(env, registers[inst.arg1], diag);
+                const rhs_float = try valueAsFloat(env, registers[inst.arg2], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFSub(env.builder, lhs_float, rhs_float, "fsub"), .kind = .float };
             },
             .div_float => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend fdiv register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFDiv(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "fdiv"), .kind = .float };
+                const lhs_float = try valueAsFloat(env, registers[inst.arg1], diag);
+                const rhs_float = try valueAsFloat(env, registers[inst.arg2], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFDiv(env.builder, lhs_float, rhs_float, "fdiv"), .kind = .float };
+            },
+            .div_int => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend div register out of range", .{});
+                const lhs_int = try valueAsInt(env, registers[inst.arg1], diag);
+                const rhs_int = try valueAsInt(env, registers[inst.arg2], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSDiv(env.builder, lhs_int, rhs_int, "div"), .kind = .int };
             },
             .store => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend store source register out of range", .{});
@@ -293,6 +358,16 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             .format_print => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend format_print register out of range", .{});
                 try emitPrintValue(env, registers[inst.arg1], diag);
+            },
+            .format_int_value => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend format_int_value register out of range", .{});
+                const source = try valueAsInt(env, registers[inst.arg1], diag);
+                registers[inst.dest] = .{ .llvm_value = source, .kind = .{ .format_int = .{ .base = inst.arg2, .minimum_digits = inst.arg3 } } };
+            },
+            .format_float_value => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend format_float_value register out of range", .{});
+                const source = try valueAsFloat(env, registers[inst.arg1], diag);
+                registers[inst.dest] = .{ .llvm_value = source, .kind = .{ .format_float = .{ .width = inst.arg2, .trailing_width = inst.arg3, .zero_removal = inst.arg4, .mode = inst.arg5 } } };
             },
             .addr_of_local => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend addr_of_local register out of range", .{});
@@ -330,11 +405,27 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .int_trunc_cast => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend int_trunc_cast register out of range", .{});
-                registers[inst.dest] = switch (registers[inst.arg1].kind) {
-                    .int, .int_addr, .bool => .{ .llvm_value = try valueAsInt(env, registers[inst.arg1], diag), .kind = .int },
-                    .float => .{ .llvm_value = c.LLVMBuildFPToSI(env.builder, registers[inst.arg1].llvm_value, env.llvm_i64, "fptosi"), .kind = .int },
+                const int_value = switch (registers[inst.arg1].kind) {
+                    .int, .int_addr, .bool => try valueAsInt(env, registers[inst.arg1], diag),
+                    .float => c.LLVMBuildFPToSI(env.builder, registers[inst.arg1].llvm_value, env.llvm_i64, "fptosi"),
                     else => return diag.failAt(0, "LLVM backend int_trunc_cast requires numeric or bool source", .{}),
                 };
+                registers[inst.dest] = switch (inst.arg2) {
+                    7 => .{ .llvm_value = c.LLVMBuildZExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt8TypeInContext(env.context), "trunc_u8"), env.llvm_i64, "zext_u8"), .kind = .int },
+                    8 => .{ .llvm_value = c.LLVMBuildZExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt16TypeInContext(env.context), "trunc_u16"), env.llvm_i64, "zext_u16"), .kind = .int },
+                    4 => .{ .llvm_value = c.LLVMBuildSExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt32TypeInContext(env.context), "trunc_s32"), env.llvm_i64, "sext_s32"), .kind = .int },
+                    else => .{ .llvm_value = int_value, .kind = .int },
+                };
+            },
+            .bool_to_int_cast => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend bool_to_int_cast register out of range", .{});
+                if (registers[inst.arg1].kind != .bool) return diag.failAt(0, "LLVM backend bool_to_int_cast requires bool source", .{});
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildZExt(env.builder, registers[inst.arg1].llvm_value, env.llvm_i64, "booltoint"), .kind = .int };
+            },
+            .int_to_bool_cast => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend int_to_bool_cast register out of range", .{});
+                const int_value = try valueAsInt(env, registers[inst.arg1], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildICmp(env.builder, c.LLVMIntNE, int_value, c.LLVMConstInt(env.llvm_i64, 0, 0), "inttobool"), .kind = .bool };
             },
             .float_cast => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend float_cast register out of range", .{});
@@ -345,6 +436,57 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 };
             },
             .sin_float => return diag.failAt(0, "LLVM backend Math.sin intrinsic is not implemented yet", .{}),
+            .current_time_consensus_low => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend current_time_consensus_low destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.current_time_consensus_low_fn_ty, env.current_time_consensus_low_fn, null, 0, "time_consensus_low");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .int };
+            },
+            .current_time_monotonic_low => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend current_time_monotonic_low destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.current_time_monotonic_low_fn_ty, env.current_time_monotonic_low_fn, null, 0, "time_low");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .int };
+            },
+            .to_calendar => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend to_calendar register out of range", .{});
+                var args = [_]c.LLVMValueRef{ try valueAsInt(env, registers[inst.arg1], diag), c.LLVMConstInt(env.llvm_i64, inst.arg2, 0) };
+                const result = c.LLVMBuildCall2(env.builder, env.to_calendar_fn_ty, env.to_calendar_fn, &args, args.len, "calendar");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .calendar };
+            },
+            .load_calendar_field => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend load_calendar_field register out of range", .{});
+                if (registers[inst.arg1].kind != .calendar) return diag.failAt(0, "Calendar field access requires Calendar value", .{});
+                var args = [_]c.LLVMValueRef{ registers[inst.arg1].llvm_value, c.LLVMConstInt(env.llvm_i64, inst.arg2, 0) };
+                const result = c.LLVMBuildCall2(env.builder, env.calendar_get_i64_fn_ty, env.calendar_get_i64_fn, &args, args.len, "calendar_field");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .int };
+            },
+            .calendar_to_string => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend calendar_to_string register out of range", .{});
+                if (registers[inst.arg1].kind != .calendar) return diag.failAt(0, "calendar_to_string requires Calendar value", .{});
+                var args = [_]c.LLVMValueRef{registers[inst.arg1].llvm_value};
+                const result = c.LLVMBuildCall2(env.builder, env.calendar_to_string_fn_ty, env.calendar_to_string_fn, &args, args.len, "calendar_string");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .runtime_string };
+            },
+            .random_seed => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend random_seed seed register out of range", .{});
+                var args = [_]c.LLVMValueRef{try valueAsInt(env, registers[inst.arg1], diag)};
+                _ = c.LLVMBuildCall2(env.builder, env.random_seed_fn_ty, env.random_seed_fn, &args, args.len, "");
+            },
+            .random_get => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend random_get destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.random_get_fn_ty, env.random_get_fn, null, 0, "random_u64");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .int };
+            },
+            .random_get_zero_to_one => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend random_get_zero_to_one destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.random_get_zero_to_one_fn_ty, env.random_get_zero_to_one_fn, null, 0, "random_f64");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .float };
+            },
+            .random_get_within_range => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend random_get_within_range register out of range", .{});
+                var args = [_]c.LLVMValueRef{ try valueAsFloat(env, registers[inst.arg1], diag), try valueAsFloat(env, registers[inst.arg2], diag) };
+                const result = c.LLVMBuildCall2(env.builder, env.random_get_within_range_fn_ty, env.random_get_within_range_fn, &args, args.len, "random_range");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .float };
+            },
             .free_heap => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend free_heap register out of range", .{});
                 var args = [_]c.LLVMValueRef{registers[inst.arg1].llvm_value};
@@ -366,11 +508,33 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .ret_void => return,
             .ret => return,
-            .cmp_lt_int => {
-                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend cmp_lt_int register out of range", .{});
-                const lhs_int = try valueAsInt(env, registers[inst.arg1], diag);
-                const rhs_int = try valueAsInt(env, registers[inst.arg2], diag);
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildICmp(env.builder, c.LLVMIntSLT, lhs_int, rhs_int, "cmplt"), .kind = .bool };
+            .cmp_lt_int, .cmp_le_int, .cmp_gt_int, .cmp_ge_int => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend comparison register out of range", .{});
+                const lhs_val = registers[inst.arg1];
+                const rhs_val = registers[inst.arg2];
+                const pred: c.LLVMIntPredicate = switch (inst.opcode) {
+                    .cmp_lt_int => c.LLVMIntSLT,
+                    .cmp_le_int => c.LLVMIntSLE,
+                    .cmp_gt_int => c.LLVMIntSGT,
+                    .cmp_ge_int => c.LLVMIntSGE,
+                    else => unreachable,
+                };
+                if (lhs_val.kind == .float or rhs_val.kind == .float) {
+                    const fpred: c.LLVMRealPredicate = switch (inst.opcode) {
+                        .cmp_lt_int => c.LLVMRealOLT,
+                        .cmp_le_int => c.LLVMRealOLE,
+                        .cmp_gt_int => c.LLVMRealOGT,
+                        .cmp_ge_int => c.LLVMRealOGE,
+                        else => unreachable,
+                    };
+                    const lhs_float = try valueAsFloat(env, lhs_val, diag);
+                    const rhs_float = try valueAsFloat(env, rhs_val, diag);
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildFCmp(env.builder, fpred, lhs_float, rhs_float, "fcmp"), .kind = .bool };
+                } else {
+                    const lhs_int = try valueAsInt(env, lhs_val, diag);
+                    const rhs_int = try valueAsInt(env, rhs_val, diag);
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildICmp(env.builder, pred, lhs_int, rhs_int, "icmp"), .kind = .bool };
+                }
             },
             .cmp_eq, .cmp_ne => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend equality register out of range", .{});
@@ -399,6 +563,19 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (registers[inst.arg1].kind != .bool or registers[inst.arg2].kind != .bool) return diag.failAt(0, "LLVM backend logical op requires bool operands", .{});
                 const value = if (inst.opcode == .bool_and) c.LLVMBuildAnd(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "and") else c.LLVMBuildOr(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "or");
                 registers[inst.dest] = .{ .llvm_value = value, .kind = .bool };
+            },
+            .bit_and, .bit_or, .shl_int, .shr_int, .rotl_int => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend bitwise register out of range", .{});
+                const lhs_int = try valueAsInt(env, registers[inst.arg1], diag);
+                const rhs_int = try valueAsInt(env, registers[inst.arg2], diag);
+                const value = switch (inst.opcode) {
+                    .bit_and => c.LLVMBuildAnd(env.builder, lhs_int, rhs_int, "band"),
+                    .bit_or => c.LLVMBuildOr(env.builder, lhs_int, rhs_int, "bor"),
+                    .shl_int, .rotl_int => c.LLVMBuildShl(env.builder, lhs_int, rhs_int, "shl"),
+                    .shr_int => c.LLVMBuildAShr(env.builder, lhs_int, rhs_int, "shr"),
+                    else => unreachable,
+                };
+                registers[inst.dest] = .{ .llvm_value = value, .kind = .int };
             },
             .select_value => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend select register out of range", .{});
@@ -449,10 +626,14 @@ const RegisterValue = struct {
     const Kind = union(enum) {
         unset,
         string: Bytecode.StringIndex,
+        runtime_string,
         undefined_string: u32,
+        format_int: struct { base: u32, minimum_digits: u32 },
+        format_float: struct { width: u32, trailing_width: u32, zero_removal: u32, mode: u32 },
         int,
         int_addr: u32,
         pointer,
+        calendar,
         float,
         bool,
         void_value,
@@ -487,9 +668,28 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
             _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &args, args.len, "");
         },
         .undefined_string => return diag.failAt(0, "cannot print explicitly uninitialized string value", .{}),
+        .runtime_string => {
+            var len_indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 0, 0)};
+            const len_ptr = c.LLVMBuildGEP2(env.builder, env.llvm_i64, arg.llvm_value, &len_indices, len_indices.len, "runtime_strlen_ptr");
+            const len = c.LLVMBuildLoad2(env.builder, env.llvm_i64, len_ptr, "runtime_strlen");
+            var data_indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 1, 0)};
+            const data_ptr_ptr = c.LLVMBuildGEP2(env.builder, env.llvm_i64, arg.llvm_value, &data_indices, data_indices.len, "runtime_strdata_slot");
+            const data_ptr_int = c.LLVMBuildLoad2(env.builder, env.llvm_i64, data_ptr_ptr, "runtime_strdata_int");
+            const data = c.LLVMBuildIntToPtr(env.builder, data_ptr_int, env.ptr_ty, "runtime_strdata");
+            var args = [_]c.LLVMValueRef{ data, len };
+            _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &args, args.len, "");
+        },
         .int => {
             var args = [_]c.LLVMValueRef{arg.llvm_value};
             _ = c.LLVMBuildCall2(env.builder, env.print_int_fn_ty, env.print_int_fn, &args, args.len, "");
+        },
+        .format_int => |fmt| {
+            var args = [_]c.LLVMValueRef{ arg.llvm_value, c.LLVMConstInt(env.llvm_i64, fmt.base, 0), c.LLVMConstInt(env.llvm_i64, fmt.minimum_digits, 0) };
+            _ = c.LLVMBuildCall2(env.builder, env.print_format_int_fn_ty, env.print_format_int_fn, &args, args.len, "");
+        },
+        .format_float => |fmt| {
+            var args = [_]c.LLVMValueRef{ arg.llvm_value, c.LLVMConstInt(env.llvm_i64, fmt.width, 0), c.LLVMConstInt(env.llvm_i64, fmt.trailing_width, 0), c.LLVMConstInt(env.llvm_i64, fmt.zero_removal, 0), c.LLVMConstInt(env.llvm_i64, fmt.mode, 0) };
+            _ = c.LLVMBuildCall2(env.builder, env.print_format_float_fn_ty, env.print_format_float_fn, &args, args.len, "");
         },
         .int_addr => {
             const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_i64, arg.llvm_value, "print_load_int_addr");
@@ -500,6 +700,11 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
             const as_int = c.LLVMBuildPtrToInt(env.builder, arg.llvm_value, env.llvm_i64, "ptrtoint");
             var args = [_]c.LLVMValueRef{as_int};
             _ = c.LLVMBuildCall2(env.builder, env.print_int_fn_ty, env.print_int_fn, &args, args.len, "");
+        },
+        .calendar => {
+            var cal_args = [_]c.LLVMValueRef{arg.llvm_value};
+            const runtime_string = c.LLVMBuildCall2(env.builder, env.calendar_to_string_fn_ty, env.calendar_to_string_fn, &cal_args, cal_args.len, "calendar_print_string");
+            try emitPrintValue(env, .{ .llvm_value = runtime_string, .kind = .runtime_string }, diag);
         },
         .float => {
             var args = [_]c.LLVMValueRef{arg.llvm_value};

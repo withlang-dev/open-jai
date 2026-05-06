@@ -55,8 +55,9 @@ const Parser = struct {
     fn parseTopLevelIdentifierDecl(p: *Parser) !NodeIndex {
         const name_tok = try p.expect(.identifier, "expected top-level declaration name", .{});
         if (p.matchDiscard(.colon_colon)) {
+            if (p.check(.keyword_inline) or p.check(.keyword_no_inline)) return p.parseProcDeclAfterName(name_tok);
             if (p.check(.l_paren)) return p.parseProcDeclAfterName(name_tok);
-            const value = try p.parseExpr();
+            const value = try p.parseTypeOrExpr();
             if (astValueIsRunBlock(&p.ast, value)) {
                 _ = p.matchDiscard(.semicolon);
             } else {
@@ -86,14 +87,19 @@ const Parser = struct {
     }
 
     fn parseProcDeclAfterName(p: *Parser, name_tok: Token.Index) !NodeIndex {
+        _ = p.matchDiscard(.keyword_inline) or p.matchDiscard(.keyword_no_inline);
         _ = try p.expect(.l_paren, "expected opening paren in procedure declaration", .{});
         var params = std.ArrayList(u32).empty;
         defer params.deinit(p.allocator);
         if (!p.check(.r_paren)) {
             while (true) {
                 const param_name = try p.expect(.identifier, "expected parameter name", .{});
-                const param_type = if (p.matchDiscard(.colon)) try p.parseTypeExpr() else null_node;
-                const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = null_node });
+                var is_variadic_param = false;
+                const param_type = if (p.matchDiscard(.colon)) blk: {
+                    is_variadic_param = p.matchDiscard(.dot_dot);
+                    break :blk try p.parseTypeExpr();
+                } else null_node;
+                const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = if (is_variadic_param) 1 else null_node });
                 try params.append(p.allocator, param);
                 if (!p.matchDiscard(.comma)) break;
             }
@@ -173,6 +179,11 @@ const Parser = struct {
 
     fn parseStmt(p: *Parser) !NodeIndex {
         if (p.match(.directive_run)) |tok| return p.parseRunStatement(tok);
+        if (p.match(.keyword_push_context)) |tok| {
+            const ctx_expr = try p.parseExpr();
+            const body = try p.parseBlock();
+            return p.ast.addNode(.run_expr, tok, .{ .lhs = body, .rhs = ctx_expr });
+        }
         if (p.match(.keyword_return)) |tok| {
             const expr = if (p.check(.semicolon)) null_node else try p.parseExpr();
             _ = try p.expect(.semicolon, "expected semicolon after return statement", .{});
@@ -180,6 +191,34 @@ const Parser = struct {
         }
         if (p.check(.keyword_if)) return p.parseIfStmt();
         if (p.check(.keyword_for)) return p.parseForStmt();
+        if (p.check(.keyword_while)) return p.parseWhileStmt();
+        if (p.check(.l_brace)) {
+            // Bare block: anonymous scope.
+            const block = try p.parseBlock();
+            return block;
+        }
+        if (p.match(.keyword_defer)) |tok| {
+            const deferred = try p.parseStmt();
+            return p.ast.addNode(.defer_stmt, tok, .{ .lhs = deferred });
+        }
+        if (p.match(.keyword_break)) |tok| {
+            const label: u32 = if (p.check(.identifier)) blk: {
+                const t = p.index;
+                p.index += 1;
+                break :blk t;
+            } else 0;
+            _ = try p.expect(.semicolon, "expected semicolon after break", .{});
+            return p.ast.addNode(.break_stmt, tok, .{ .lhs = label });
+        }
+        if (p.match(.keyword_continue)) |tok| {
+            const label: u32 = if (p.check(.identifier)) blk: {
+                const t = p.index;
+                p.index += 1;
+                break :blk t;
+            } else 0;
+            _ = try p.expect(.semicolon, "expected semicolon after continue", .{});
+            return p.ast.addNode(.continue_stmt, tok, .{ .lhs = label });
+        }
         if (p.check(.identifier)) {
             if (p.peekTag(1) == .comma) return p.parseMultiNameStmt();
             if (p.peekTag(1) == .colon) return p.parseLocalTypedDecl();
@@ -196,6 +235,25 @@ const Parser = struct {
         return p.ast.addNode(.expr_stmt, p.ast.mainToken(expr), .{ .lhs = expr });
     }
 
+    fn parseWhileStmt(p: *Parser) !NodeIndex {
+        const while_tok = try p.expect(.keyword_while, "expected while", .{});
+        // Named condition: "while name := expr { }" — bind name as loop label.
+        var cond_node: NodeIndex = undefined;
+        if (p.check(.identifier) and p.peekTag(1) == .colon_equal) {
+            const name_tok = p.index;
+            p.index += 2; // consume name and :=
+            const init_expr = try p.parseBinaryExpr(3);
+            // Encode as var_decl so the name token is accessible.
+            cond_node = try p.ast.addNode(.var_decl, name_tok, .{ .lhs = null_node, .rhs = init_expr });
+        } else {
+            cond_node = try p.parseBinaryExpr(3);
+        }
+        // Optional 'then' before single-statement body.
+        _ = p.matchDiscard(.keyword_then);
+        const body = try p.parseStmtAsBlock();
+        return p.ast.addNode(.while_stmt, while_tok, .{ .lhs = cond_node, .rhs = body });
+    }
+
     fn parseStmtAsBlock(p: *Parser) !NodeIndex {
         if (p.check(.l_brace)) return p.parseBlock();
         const stmt = try p.parseStmt();
@@ -206,7 +264,30 @@ const Parser = struct {
 
     fn parseIfStmt(p: *Parser) !NodeIndex {
         const if_tok = try p.expect(.keyword_if, "expected if", .{});
-        const cond = try p.parseExpr();
+        // Parse the condition stopping before == so we can detect if-case syntax.
+        // parseBinaryExpr(6) handles <, <=, >, >=, +, -, *, /, %, &, |, ^, shifts,
+        // and parenthesized expressions (which may contain ==).
+        var cond = try p.parseBinaryExpr(6);
+        if (p.match(.equal_equal)) |eq_tok| {
+            if (p.matchDiscard(.l_brace)) return p.parseIfCaseStmt(if_tok, cond);
+            const rhs = try p.parseBinaryExpr(6);
+            cond = try p.ast.addNode(.binary_expr, eq_tok, .{ .lhs = cond, .rhs = rhs });
+        }
+        // Handle remaining low-precedence operators (!=, &&, ||) after == check.
+        while (true) {
+            if (p.match(.bang_equal)) |op_tok| {
+                const rhs = try p.parseBinaryExpr(6);
+                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
+            } else if (p.match(.ampersand_ampersand)) |op_tok| {
+                const rhs = try p.parseBinaryExpr(6);
+                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
+            } else if (p.match(.pipe_pipe)) |op_tok| {
+                const rhs = try p.parseBinaryExpr(6);
+                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
+            } else break;
+        }
+        // Optional 'then' keyword before single-statement body.
+        _ = p.matchDiscard(.keyword_then);
         const then_block = try p.parseStmtAsBlock();
         const else_block = if (p.matchDiscard(.keyword_else)) try p.parseStmtAsBlock() else null_node;
         const blocks = [_]u32{ then_block, else_block };
@@ -214,13 +295,74 @@ const Parser = struct {
         return p.ast.addNode(.if_stmt, if_tok, .{ .lhs = cond, .rhs = blocks_extra });
     }
 
+    fn parseIfCaseStmt(p: *Parser, if_tok: Token.Index, cond: NodeIndex) !NodeIndex {
+        var stmts = std.ArrayList(u32).empty;
+        defer stmts.deinit(p.allocator);
+        while (!p.check(.r_brace) and !p.check(.eof)) {
+            // Handle optional #complete before case
+            _ = p.matchDiscard(.directive_complete);
+            const case_tok = try p.expect(.keyword_case, "expected 'case' in if-case block", .{});
+            // Default case: "case;" has no value
+            const is_default = p.check(.semicolon);
+            var case_value: NodeIndex = null_node;
+            if (!is_default) {
+                case_value = try p.parseExpr();
+            }
+            _ = try p.expect(.semicolon, "expected ';' after case value", .{});
+            // Collect all statements for this case until next 'case', '}', or #through
+            var case_stmts = std.ArrayList(u32).empty;
+            defer case_stmts.deinit(p.allocator);
+            var has_through = false;
+            while (!p.check(.r_brace) and !p.check(.keyword_case) and !p.check(.eof)) {
+                if (p.check(.directive_through)) {
+                    p.index += 1;
+                    _ = p.matchDiscard(.semicolon);
+                    has_through = true;
+                    break;
+                }
+                try case_stmts.append(p.allocator, try p.parseStmt());
+            }
+            const case_block_extra = try p.ast.addExtraSlice(case_stmts.items);
+            const case_block = try p.ast.addNode(.block, case_tok, .{ .lhs = case_block_extra, .rhs = @intCast(case_stmts.items.len) });
+            if (is_default) {
+                // Default case: emit block unconditionally
+                try stmts.append(p.allocator, case_block);
+            } else {
+                const cmp = try p.ast.addNode(.binary_expr, case_tok, .{ .lhs = cond, .rhs = case_value });
+                const if_blocks = [_]u32{ case_block, null_node };
+                const if_blocks_extra = try p.ast.addExtraSlice(&if_blocks);
+                try stmts.append(p.allocator, try p.ast.addNode(.if_stmt, case_tok, .{ .lhs = cmp, .rhs = if_blocks_extra }));
+            }
+            // #through: fall-through handled by not having an else (has_through noted but not emitted yet)
+        }
+        _ = try p.expect(.r_brace, "expected '}}' after if-case block", .{});
+        const extra = try p.ast.addExtraSlice(stmts.items);
+        return p.ast.addNode(.stmt_list, if_tok, .{ .lhs = extra });
+    }
+
     fn parseForStmt(p: *Parser) !NodeIndex {
         const for_tok = try p.expect(.keyword_for, "expected for", .{});
+        // Reverse for: "for < i: 5..0 { }"
+        const is_reverse: u32 = if (p.matchDiscard(.less_than)) 1 else 0;
+        // Named iterator: "for i: 0..5 { }" or "for number: 1..5 print(...)"
+        var iterator_tok: u32 = 0;
+        if (p.check(.identifier) and p.peekTag(1) == .colon) {
+            iterator_tok = p.index;
+            p.index += 2; // consume name and ':'
+        }
         const start_expr = try p.parseExpr();
-        _ = try p.expect(.dot_dot, "expected '..' in range for statement", .{});
+        if (!p.matchDiscard(.dot_dot)) {
+            // Iterable-form: "for collection { }"
+            const iterable_values = [_]u32{start_expr};
+            const iterable_extra = try p.ast.addExtraSlice(&iterable_values);
+            const iterable_body = try p.parseBlock();
+            return p.ast.addNode(.for_stmt, for_tok, .{ .lhs = iterable_extra, .rhs = iterable_body });
+        }
         const end_expr = try p.parseExpr();
-        const body = try p.parseBlock();
-        const range_values = [_]u32{ start_expr, end_expr };
+        // Single-statement or block body.
+        const body = try p.parseStmtAsBlock();
+        // Encode: [start, end, iterator_tok, is_reverse]
+        const range_values = [_]u32{ start_expr, end_expr, iterator_tok, is_reverse };
         const range_extra = try p.ast.addExtraSlice(&range_values);
         return p.ast.addNode(.for_stmt, for_tok, .{ .lhs = range_extra, .rhs = body });
     }
@@ -486,22 +628,26 @@ const Parser = struct {
                 continue;
             }
             if (p.match(.l_paren)) |lparen| {
-            var args = std.ArrayList(u32).empty;
-            defer args.deinit(p.allocator);
-            if (!p.check(.r_paren)) {
-                while (true) {
-                    if (p.check(.identifier) and p.peekTag(1) == .equal) {
-                        const name_tok = p.index;
-                        p.index += 2;
-                        const value = try p.parseExpr();
-                        try args.append(p.allocator, try p.ast.addNode(.assign_stmt, name_tok, .{ .lhs = try p.ast.addNode(.identifier, name_tok, .{}), .rhs = value }));
-                    } else if (astNodeIsIdentifierName(&p.ast, expr, "New")) try args.append(p.allocator, try p.parseTypeExpr()) else try args.append(p.allocator, try p.parseExpr());
-                    if (!p.matchDiscard(.comma)) break;
+                var args = std.ArrayList(u32).empty;
+                defer args.deinit(p.allocator);
+                if (!p.check(.r_paren)) {
+                    while (true) {
+                        if (p.check(.identifier) and p.peekTag(1) == .equal) {
+                            const name_tok = p.index;
+                            p.index += 2;
+                            const value = try p.parseExpr();
+                            try args.append(p.allocator, try p.ast.addNode(.assign_stmt, name_tok, .{ .lhs = try p.ast.addNode(.identifier, name_tok, .{}), .rhs = value }));
+                        } else if (p.match(.dot_dot)) |spread_tok| {
+                            const operand = try p.parseExpr();
+                            try args.append(p.allocator, try p.ast.addNode(.unary_expr, spread_tok, .{ .lhs = operand }));
+                        } else if (astNodeIsIdentifierName(&p.ast, expr, "New")) try args.append(p.allocator, try p.parseTypeExpr()) else try args.append(p.allocator, try p.parseExpr());
+                        if (!p.matchDiscard(.comma)) break;
+                    }
                 }
-            }
-            _ = try p.expect(.r_paren, "expected closing paren after call arguments", .{});
-            const extra = try p.ast.addExtraSlice(args.items);
-            expr = try p.ast.addNode(.call_expr, lparen, .{ .lhs = expr, .rhs = extra });
+                _ = try p.expect(.r_paren, "expected closing paren after call arguments", .{});
+                const extra = try p.ast.addExtraSlice(args.items);
+                expr = try p.ast.addNode(.call_expr, lparen, .{ .lhs = expr, .rhs = extra });
+                continue;
             }
             break;
         }
@@ -541,6 +687,9 @@ const Parser = struct {
             }
             const operand = try p.parseExpr();
             return p.ast.addNode(.run_expr, tok, .{ .lhs = operand });
+        }
+        if (p.match(.directive_compile_time)) |tok| {
+            return p.ast.addNode(.bool_literal, tok, .{ .lhs = 2 });
         }
         if (p.match(.directive_char)) |tok| {
             const str_tok = try p.expect(.string_literal, "expected string literal after #char", .{});
@@ -600,6 +749,11 @@ const Parser = struct {
             return p.ast.addNode(.size_of_expr, tok, .{ .lhs = operand });
         }
         if (p.match(.dot)) |tok| {
+            if (p.check(.identifier)) {
+                const name_tok = p.index;
+                p.index += 1;
+                return p.ast.addNode(.field_access, tok, .{ .lhs = null_node, .rhs = name_tok });
+            }
             _ = try p.expect(.l_brace, "expected '{{' after '.' aggregate literal", .{});
             var values = std.ArrayList(u32).empty;
             defer values.deinit(p.allocator);
@@ -620,6 +774,8 @@ const Parser = struct {
             return expr;
         }
         if (p.match(.identifier)) |tok| return p.ast.addNode(.identifier, tok, .{});
+        if (p.match(.keyword_it)) |tok| return p.ast.addNode(.identifier, tok, .{});
+        if (p.match(.keyword_it_index)) |tok| return p.ast.addNode(.identifier, tok, .{});
         if (isTypeKeyword(p.peekTag(0))) {
             const type_tok = p.index;
             p.index += 1;
@@ -679,6 +835,11 @@ fn binaryPrecedence(tag: Tag) ?u8 {
         .pipe_pipe => 3,
         .ampersand_ampersand => 4,
         .equal_equal, .bang_equal => 5,
+        .less_than, .less_equal, .greater_than, .greater_equal => 6,
+        .pipe => 7,
+        .caret => 8,
+        .ampersand => 9,
+        .shift_left, .shift_right, .shift_left_rotate, .shift_right_rotate => 15,
         .star, .slash, .percent => 20,
         .plus, .minus => 10,
         else => null,

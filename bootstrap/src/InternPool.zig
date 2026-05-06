@@ -22,6 +22,10 @@ pub const InternPool = struct {
         pub const type_type: Index = 15;
         pub const any_type: Index = 16;
         pub const vector3_type: Index = 17;
+        pub const apollo_time_type: Index = 18;
+        pub const calendar_type: Index = 19;
+        pub const type_table_type: Index = 20;
+        pub const type_info_type: Index = 21;
     };
 
     allocator: std.mem.Allocator,
@@ -37,6 +41,8 @@ pub const InternPool = struct {
         type_type,
         type_any,
         type_vector3,
+        type_apollo_time,
+        type_calendar,
         type_proc: ProcType,
         type_pointer: Index,
         value_string: u32,
@@ -80,6 +86,8 @@ pub const InternPool = struct {
             .type_type,
             .type_any,
             .type_vector3,
+            .type_apollo_time,
+            .type_calendar,
         });
     }
 
