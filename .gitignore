@@ -8,3 +8,5 @@ out/
 **/zig-cache/
 **/zig-out/
 **/.build/
+.env
+.logs

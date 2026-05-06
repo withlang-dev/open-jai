@@ -64,8 +64,10 @@ pub const Opcode = enum(u8) {
     cmp_ge_int,
     cmp_eq,
     cmp_ne,
+    bit_not,
     bit_and,
     bit_or,
+    bit_xor,
     shl_int,
     shr_int,
     rotl_int,
@@ -108,7 +110,7 @@ pub const Program = struct {
     allocator: std.mem.Allocator,
     strings: std.ArrayList([]const u8) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
-    main_proc: u32 = 0,
+    main_proc: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator) Program { return .{ .allocator = allocator }; }
 

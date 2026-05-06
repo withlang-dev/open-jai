@@ -14,6 +14,7 @@ pub const Options = struct {
     input_path: []const u8,
     output_path: []const u8,
     runtime_path: []const u8 = "zig-out/lib/openjai_runtime.o",
+    check_only: bool = false,
 };
 
 pub const Compilation = struct {
@@ -28,7 +29,7 @@ pub const Compilation = struct {
     pub fn compile(comp: *Compilation) !void {
         const source = try comp.loadSourceWithLoads(comp.options.input_path);
         defer comp.allocator.free(source);
-        if (source.len == 0) return Diagnostic.init(comp.allocator, comp.options.input_path, source).failAt(0, "source file is empty", .{});
+        if (source.len == 0 and !comp.options.check_only) return Diagnostic.init(comp.allocator, comp.options.input_path, source).failAt(0, "source file is empty", .{});
 
         const diag = Diagnostic.init(comp.allocator, comp.options.input_path, source);
         var tokens = try lexer.tokenize(comp.allocator, source, diag);
@@ -41,7 +42,7 @@ pub const Compilation = struct {
             ast.deinit();
         }
 
-        var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag);
+        var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, !comp.options.check_only);
         defer resolved.deinit();
 
         var ip = try InternPool.init(comp.allocator);
@@ -52,8 +53,8 @@ pub const Compilation = struct {
 
         try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
         try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
-        try comp.evaluateBlockRunInitializers(&ast, &typed, &resolved, typed.main_proc, diag);
-        try comp.evaluateNestedRunExpressions(&ast, &typed, &resolved, typed.main_proc, diag);
+        try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
+        try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
 
         var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
         defer bytecode.deinit();
@@ -69,7 +70,33 @@ pub const Compilation = struct {
         }
         try llvm.emitObject(comp.allocator, &bytecode, object_path, diag);
 
-        try link_mod.link(comp.allocator, comp.io, object_path, comp.options.runtime_path, comp.options.output_path, diag);
+        if (!comp.options.check_only) {
+            const runtime_path = try comp.resolveRuntimePath();
+            defer if (runtime_path.owned) comp.allocator.free(runtime_path.path);
+            try link_mod.link(comp.allocator, comp.io, object_path, runtime_path.path, comp.options.output_path, diag);
+        }
+    }
+
+    const ResolvedRuntimePath = struct {
+        path: []const u8,
+        owned: bool = false,
+    };
+
+    fn resolveRuntimePath(comp: *Compilation) !ResolvedRuntimePath {
+        if (try pathExists(comp.io, comp.options.runtime_path)) return .{ .path = comp.options.runtime_path };
+
+        const makefile_runtime = "out/bootstrap/lib/openjai_runtime.o";
+        if (try pathExists(comp.io, makefile_runtime)) return .{ .path = makefile_runtime };
+
+        return .{ .path = comp.options.runtime_path };
+    }
+
+    fn pathExists(io: std.Io, path: []const u8) !bool {
+        std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        return true;
     }
 
     fn executeTopLevelRuns(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
@@ -78,6 +105,7 @@ pub const Compilation = struct {
             const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
             if (ast.tag(decl) != .run_expr) continue;
             const value = try comp.executeRunCall(ast, typed, resolved, decl, ast.data(decl).lhs, diag);
+            if (ast.tokens[ast.mainToken(decl)].tag == .directive_assert) continue;
             switch (value) {
                 .void => {},
                 else => return diag.failAt(ast.tokens[ast.mainToken(decl)].start, "top-level statement #run must not return a value", .{}),
@@ -110,8 +138,13 @@ pub const Compilation = struct {
         }
     }
 
-    fn evaluateBlockRunInitializers(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, proc_node: @import("Ast.zig").NodeIndex, diag: Diagnostic) !void {
-        try comp.evaluateRunInitializersInBlock(ast, typed, resolved, ast.data(proc_node).lhs, diag);
+    fn evaluateAllProcRunInitializers(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            try comp.evaluateRunInitializersInBlock(ast, typed, resolved, ast.data(decl).lhs, diag);
+        }
     }
 
     fn evaluateRunInitializersInBlock(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, block: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!void {
@@ -163,8 +196,13 @@ pub const Compilation = struct {
         }
     }
 
-    fn evaluateNestedRunExpressions(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, proc_node: @import("Ast.zig").NodeIndex, diag: Diagnostic) !void {
-        try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(proc_node).lhs, diag);
+    fn evaluateAllNestedRunExpressions(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(decl).lhs, diag);
+        }
     }
 
     fn evaluateRunExpressionsInNode(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, node: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!void {
@@ -204,7 +242,9 @@ pub const Compilation = struct {
                 for (ast.extraSlice(ast.data(node).rhs)) |arg| try comp.evaluateRunExpressionsInNode(ast, typed, resolved, @intCast(arg), diag);
             },
             .for_stmt => {
-                for (ast.extraSlice(ast.data(node).lhs)) |range_node| try comp.evaluateRunExpressionsInNode(ast, typed, resolved, @intCast(range_node), diag);
+                const operands = ast.extraSlice(ast.data(node).lhs);
+                if (operands.len >= 1) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, @intCast(operands[0]), diag);
+                if (operands.len >= 2 and (operands[1] & 0x80000000) == 0) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, @intCast(operands[1]), diag);
                 try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).rhs, diag);
             },
             else => {},
@@ -264,7 +304,7 @@ pub const Compilation = struct {
             var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
             defer block_program.deinit();
             var block_vm = vm_mod.VM.init(comp.allocator, &block_program);
-            return try block_vm.runProc(block_program.main_proc, diag);
+            return try block_vm.runProc(block_program.main_proc.?, diag);
         }
         if (ast.tag(expr) != .call_expr) return try comp.executeRunConstExpr(ast, typed, resolved, expr, diag);
         const callee = ast.data(expr).lhs;
@@ -311,7 +351,7 @@ pub const Compilation = struct {
             } else return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "#run argument is not a supported compile-time value", .{});
         }
         var vm = vm_mod.VM.init(comp.allocator, &run_program);
-        return try vm.runProcWithArgs(run_program.main_proc, arg_values.items, diag);
+        return try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag);
     }
 
     fn executeRunConstExpr(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, expr: @import("Ast.zig").NodeIndex, diag: Diagnostic) !vm_mod.Value {
@@ -324,6 +364,7 @@ pub const Compilation = struct {
         if (typed.comptime_ints.get(node)) |value| return value;
         return switch (ast.tag(node)) {
             .integer_literal => std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)}),
+            .bool_literal => if (ast.data(node).lhs != 0) 1 else 0,
             .identifier => blk: {
                 const decl = resolved.local_values.get(node) orelse return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run constant expression identifier is unresolved", .{});
                 if (typed.comptime_ints.get(decl)) |value| break :blk value;

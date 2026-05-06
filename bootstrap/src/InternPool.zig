@@ -43,6 +43,8 @@ pub const InternPool = struct {
         type_vector3,
         type_apollo_time,
         type_calendar,
+        type_table,
+        type_info,
         type_proc: ProcType,
         type_pointer: Index,
         value_string: u32,
@@ -88,6 +90,8 @@ pub const InternPool = struct {
             .type_vector3,
             .type_apollo_time,
             .type_calendar,
+            .type_table,
+            .type_info,
         });
     }
 

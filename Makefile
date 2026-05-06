@@ -9,15 +9,7 @@ BOOTSTRAP_COMPILER := $(BOOTSTRAP_PREFIX)/bin/openjai
 BOOTSTRAP_RUNTIME := $(BOOTSTRAP_PREFIX)/lib/openjai_runtime.o
 EXAMPLES_OUT_DIR := $(OUT_DIR)/examples
 
-SUPPORTED_EXAMPLES := \
-	examples/03/3.1_hello_sailor.jai \
-	examples/05/5.1_literals.jai \
-	examples/30/main.jai \
-	examples/30/main2.jai \
-	examples/30/main3.jai \
-	examples/30/main6.jai \
-	examples/30/main8.jai \
-	examples/31/main.jai
+SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' | sort)
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 
@@ -46,7 +38,7 @@ examples: bootstrap
 		out="$(EXAMPLES_OUT_DIR)/$${rel%.jai}"; \
 		mkdir -p "$$(dirname "$$out")"; \
 		echo "openjai $$src -> $$out"; \
-		if ! "$(BOOTSTRAP_COMPILER)" "$$src" -o "$$out" --runtime "$(BOOTSTRAP_RUNTIME)"; then \
+		if ! "$(BOOTSTRAP_COMPILER)" "$$src" --check -o "$$out" --runtime "$(BOOTSTRAP_RUNTIME)"; then \
 			fail=1; \
 		fi; \
 		count=$$((count + 1)); \

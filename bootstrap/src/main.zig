@@ -28,8 +28,11 @@ fn parseArgs(init: std.process.Init.Minimal) !Options {
 
     var output_path: []const u8 = "a.out";
     var runtime_path: []const u8 = "zig-out/lib/openjai_runtime.o";
+    var check_only = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-o")) {
+        if (std.mem.eql(u8, arg, "--check")) {
+            check_only = true;
+        } else if (std.mem.eql(u8, arg, "-o")) {
             output_path = args.next() orelse {
                 std.debug.print("openjai: error: expected output path after -o\n", .{});
                 return error.InvalidArguments;
@@ -50,11 +53,12 @@ fn parseArgs(init: std.process.Init.Minimal) !Options {
         .input_path = input_path,
         .output_path = output_path,
         .runtime_path = runtime_path,
+        .check_only = check_only,
     };
 }
 
 fn usage() void {
-    std.debug.print("usage: openjai <input.jai> [-o output] [--runtime runtime.o]\n", .{});
+    std.debug.print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o]\n", .{});
 }
 
 test "argument parser module loads" {

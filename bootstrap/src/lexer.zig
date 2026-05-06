@@ -59,9 +59,9 @@ const Lexer = struct {
                 '*' => try l.add(if (l.match('=')) .star_equal else .star, start),
                 '/' => try l.add(if (l.match('=')) .slash_equal else .slash, start),
                 '%' => try l.add(.percent, start),
-                '&' => try l.add(if (l.match('&')) .ampersand_ampersand else .ampersand, start),
-                '|' => try l.add(if (l.match('|')) .pipe_pipe else .pipe, start),
-                '^' => try l.add(.caret, start),
+                '&' => try l.add(if (l.match('&')) .ampersand_ampersand else if (l.match('=')) .ampersand_equal else .ampersand, start),
+                '|' => try l.add(if (l.match('|')) .pipe_pipe else if (l.match('=')) .pipe_equal else .pipe, start),
+                '^' => try l.add(if (l.match('=')) .caret_equal else .caret, start),
                 '~' => try l.add(.tilde, start),
                 '.' => {
                     if (l.index < l.source.len and std.ascii.isDigit(l.source[l.index])) try l.leadingDotFloat(start)
@@ -79,6 +79,7 @@ const Lexer = struct {
                 ']' => try l.add(.r_bracket, start),
                 '$' => try l.add(if (l.match('$')) .dollar_dollar else .dollar, start),
                 '@' => try l.add(.at, start),
+                '`' => continue,
                 else => return l.diag.failAt(start, "invalid character 0x{x}", .{c}),
             }
         }

@@ -69,8 +69,6 @@ const LlvmEnv = struct {
 };
 
 pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program, output_obj: []const u8, diag: Diagnostic) !void {
-    if (program.procs.items.len == 0) return diag.failAt(0, "LLVM backend received no procedures", .{});
-
     c.LLVMInitializeAArch64TargetInfo();
     c.LLVMInitializeAArch64Target();
     c.LLVMInitializeAArch64TargetMC();
@@ -159,13 +157,13 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const random_get_within_range_fn = c.LLVMAddFunction(module, "__openjai_random_get_within_range", random_get_within_range_fn_ty);
 
     const main_fn_ty = c.LLVMFunctionType(llvm_i32, null, 0, 0);
-    const main_fn = c.LLVMAddFunction(module, "main", main_fn_ty);
+    const main_fn = if (program.main_proc != null) c.LLVMAddFunction(module, "main", main_fn_ty) else null;
     const proc_void_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
     var proc_functions = try allocator.alloc(c.LLVMValueRef, program.procs.items.len);
     defer allocator.free(proc_functions);
     @memset(proc_functions, null);
     for (program.procs.items, 0..) |_, i| {
-        if (i == program.main_proc) continue;
+        if (program.main_proc != null and i == program.main_proc.?) continue;
         const fn_name_tmp = try std.fmt.allocPrint(allocator, "openjai_proc_{d}", .{i});
         defer allocator.free(fn_name_tmp);
         const fn_name_z = try allocator.dupeZ(u8, fn_name_tmp);
@@ -176,7 +174,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
 
     for (program.procs.items, 0..) |*helper_proc, i| {
-        if (i == program.main_proc) continue;
+        if (program.main_proc != null and i == program.main_proc.?) continue;
         const helper_fn = proc_functions[i] orelse continue;
         const helper_entry = c.LLVMAppendBasicBlockInContext(context, helper_fn, "entry");
         c.LLVMPositionBuilderAtEnd(builder, helper_entry);
@@ -187,14 +185,16 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         _ = c.LLVMBuildRetVoid(builder);
     }
 
-    const entry = c.LLVMAppendBasicBlockInContext(context, main_fn, "entry");
-    c.LLVMPositionBuilderAtEnd(builder, entry);
-    const proc = &program.procs.items[program.main_proc];
-    const registers = try allocator.alloc(RegisterValue, @max(proc.num_registers, 1));
-    defer allocator.free(registers);
-    @memset(registers, .{});
-    try emitProcInstructions(&env, proc, registers, diag);
-    _ = c.LLVMBuildRet(builder, c.LLVMConstInt(llvm_i32, 0, 0));
+    if (program.main_proc) |main_proc| {
+        const entry = c.LLVMAppendBasicBlockInContext(context, main_fn.?, "entry");
+        c.LLVMPositionBuilderAtEnd(builder, entry);
+        const proc = &program.procs.items[main_proc];
+        const registers = try allocator.alloc(RegisterValue, @max(proc.num_registers, 1));
+        defer allocator.free(registers);
+        @memset(registers, .{});
+        try emitProcInstructions(&env, proc, registers, diag);
+        _ = c.LLVMBuildRet(builder, c.LLVMConstInt(llvm_i32, 0, 0));
+    }
 
     var verify_msg: [*c]u8 = null;
     if (c.LLVMVerifyModule(module, c.LLVMReturnStatusAction, &verify_msg) != 0) {
@@ -287,6 +287,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             .not_bool => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend not_bool register out of range", .{});
                 registers[inst.dest] = .{ .llvm_value = c.LLVMBuildNot(env.builder, registers[inst.arg1].llvm_value, "not"), .kind = .bool };
+            },
+            .bit_not => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend bit_not register out of range", .{});
+                const operand = try valueAsInt(env, registers[inst.arg1], diag);
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildNot(env.builder, operand, "bnot"), .kind = .int };
             },
             .mul_int => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend mul register out of range", .{});
@@ -414,6 +419,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     7 => .{ .llvm_value = c.LLVMBuildZExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt8TypeInContext(env.context), "trunc_u8"), env.llvm_i64, "zext_u8"), .kind = .int },
                     8 => .{ .llvm_value = c.LLVMBuildZExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt16TypeInContext(env.context), "trunc_u16"), env.llvm_i64, "zext_u16"), .kind = .int },
                     4 => .{ .llvm_value = c.LLVMBuildSExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt32TypeInContext(env.context), "trunc_s32"), env.llvm_i64, "sext_s32"), .kind = .int },
+                    10 => .{ .llvm_value = c.LLVMBuildIntToPtr(env.builder, int_value, env.ptr_ty, "inttoptr"), .kind = .pointer },
                     else => .{ .llvm_value = int_value, .kind = .int },
                 };
             },
@@ -424,8 +430,42 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .int_to_bool_cast => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend int_to_bool_cast register out of range", .{});
-                const int_value = try valueAsInt(env, registers[inst.arg1], diag);
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildICmp(env.builder, c.LLVMIntNE, int_value, c.LLVMConstInt(env.llvm_i64, 0, 0), "inttobool"), .kind = .bool };
+                registers[inst.dest] = switch (registers[inst.arg1].kind) {
+                    .float => .{ .llvm_value = c.LLVMBuildFCmp(env.builder, c.LLVMRealONE, registers[inst.arg1].llvm_value, c.LLVMConstReal(env.llvm_f64, 0.0), "floattobool"), .kind = .bool },
+                    .pointer => .{
+                        .llvm_value = c.LLVMBuildICmp(
+                            env.builder,
+                            c.LLVMIntNE,
+                            c.LLVMBuildPtrToInt(env.builder, registers[inst.arg1].llvm_value, env.llvm_i64, "ptrtoint_bool"),
+                            c.LLVMConstInt(env.llvm_i64, 0, 0),
+                            "ptrtobool",
+                        ),
+                        .kind = .bool,
+                    },
+                    .string => |string_idx| .{
+                        .llvm_value = c.LLVMBuildICmp(
+                            env.builder,
+                            c.LLVMIntNE,
+                            c.LLVMConstInt(env.llvm_i64, env.program.strings.items[string_idx].len, 0),
+                            c.LLVMConstInt(env.llvm_i64, 0, 0),
+                            "strtobool",
+                        ),
+                        .kind = .bool,
+                    },
+                    .runtime_string => blk: {
+                        var len_indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 0, 0)};
+                        const len_ptr = c.LLVMBuildGEP2(env.builder, env.llvm_i64, registers[inst.arg1].llvm_value, &len_indices, len_indices.len, "runtime_strlen_ptr_bool");
+                        const len = c.LLVMBuildLoad2(env.builder, env.llvm_i64, len_ptr, "runtime_strlen_bool");
+                        break :blk .{
+                            .llvm_value = c.LLVMBuildICmp(env.builder, c.LLVMIntNE, len, c.LLVMConstInt(env.llvm_i64, 0, 0), "runtime_strtobool"),
+                            .kind = .bool,
+                        };
+                    },
+                    else => blk: {
+                        const int_value = try valueAsInt(env, registers[inst.arg1], diag);
+                        break :blk .{ .llvm_value = c.LLVMBuildICmp(env.builder, c.LLVMIntNE, int_value, c.LLVMConstInt(env.llvm_i64, 0, 0), "inttobool"), .kind = .bool };
+                    },
+                };
             },
             .float_cast => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend float_cast register out of range", .{});
@@ -489,7 +529,12 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .free_heap => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend free_heap register out of range", .{});
-                var args = [_]c.LLVMValueRef{registers[inst.arg1].llvm_value};
+                const ptr_value = switch (registers[inst.arg1].kind) {
+                    .pointer => registers[inst.arg1].llvm_value,
+                    .int, .int_addr, .bool => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.arg1], diag), env.ptr_ty, "free_inttoptr"),
+                    else => return diag.failAt(0, "LLVM backend free_heap requires a pointer-compatible register", .{}),
+                };
+                var args = [_]c.LLVMValueRef{ptr_value};
                 _ = c.LLVMBuildCall2(env.builder, env.free_fn_ty, env.free_fn, &args, args.len, "");
             },
             .memcpy => {
@@ -564,13 +609,14 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const value = if (inst.opcode == .bool_and) c.LLVMBuildAnd(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "and") else c.LLVMBuildOr(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "or");
                 registers[inst.dest] = .{ .llvm_value = value, .kind = .bool };
             },
-            .bit_and, .bit_or, .shl_int, .shr_int, .rotl_int => {
+            .bit_and, .bit_or, .bit_xor, .shl_int, .shr_int, .rotl_int => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend bitwise register out of range", .{});
                 const lhs_int = try valueAsInt(env, registers[inst.arg1], diag);
                 const rhs_int = try valueAsInt(env, registers[inst.arg2], diag);
                 const value = switch (inst.opcode) {
                     .bit_and => c.LLVMBuildAnd(env.builder, lhs_int, rhs_int, "band"),
                     .bit_or => c.LLVMBuildOr(env.builder, lhs_int, rhs_int, "bor"),
+                    .bit_xor => c.LLVMBuildXor(env.builder, lhs_int, rhs_int, "bxor"),
                     .shl_int, .rotl_int => c.LLVMBuildShl(env.builder, lhs_int, rhs_int, "shl"),
                     .shr_int => c.LLVMBuildAShr(env.builder, lhs_int, rhs_int, "shr"),
                     else => unreachable,
@@ -646,7 +692,9 @@ fn valueAsInt(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValu
         .int => value.llvm_value,
         .int_addr => c.LLVMBuildLoad2(env.builder, env.llvm_i64, value.llvm_value, "load_int_addr_cmp"),
         .bool => c.LLVMBuildZExt(env.builder, value.llvm_value, env.llvm_i64, "booltoint"),
+        .pointer => c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "ptrtoint"),
         .type_id => value.llvm_value,
+        .void_value => c.LLVMConstInt(env.llvm_i64, 0, 0),
         else => diag.failAt(0, "expected integer-compatible register", .{}),
     };
 }

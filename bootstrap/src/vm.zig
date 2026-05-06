@@ -87,7 +87,49 @@ pub const VM = struct {
                 if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM neg_float register out of range", .{});
                 regs[inst.dest] = .{ .float = -switch (regs[inst.arg1]) { .float => |v| v, .int => |v| @as(f64, @floatFromInt(v)), else => return diag.failAt(0, "VM neg_float requires numeric operand", .{}) } };
             },
-            .mul_int, .rem_int, .add_int, .sub_int => {
+            .not_bool => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM not_bool register out of range", .{});
+                const value = switch (regs[inst.arg1]) {
+                    .bool => |v| v,
+                    else => return diag.failAt(0, "VM not_bool requires bool operand", .{}),
+                };
+                regs[inst.dest] = .{ .bool = !value };
+            },
+            .bool_to_int_cast => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM bool_to_int_cast register out of range", .{});
+                const value = switch (regs[inst.arg1]) {
+                    .bool => |v| v,
+                    else => return diag.failAt(0, "VM bool_to_int_cast requires bool operand", .{}),
+                };
+                regs[inst.dest] = .{ .int = if (value) 1 else 0 };
+            },
+            .int_to_bool_cast => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM int_to_bool_cast register out of range", .{});
+                regs[inst.dest] = .{ .bool = switch (regs[inst.arg1]) {
+                    .int => |v| v != 0,
+                    .float => |v| v != 0,
+                    .bool => |v| v,
+                    else => return diag.failAt(0, "VM int_to_bool_cast requires numeric or bool operand", .{}),
+                } };
+            },
+            .float_cast => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM float_cast register out of range", .{});
+                regs[inst.dest] = .{ .float = switch (regs[inst.arg1]) {
+                    .float => |v| v,
+                    .int => |v| @as(f64, @floatFromInt(v)),
+                    .bool => |v| if (v) 1 else 0,
+                    else => return diag.failAt(0, "VM float_cast requires numeric or bool operand", .{}),
+                } };
+            },
+            .bit_not => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM bit_not register out of range", .{});
+                const value = switch (regs[inst.arg1]) {
+                    .int => |v| v,
+                    else => return diag.failAt(0, "VM bit_not requires integer operand", .{}),
+                };
+                regs[inst.dest] = .{ .int = ~value };
+            },
+            .mul_int, .rem_int, .add_int, .sub_int, .bit_and, .bit_or, .bit_xor, .shl_int, .shr_int, .rotl_int => {
                 if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM integer arithmetic register out of range", .{});
                 const lhs = switch (regs[inst.arg1]) {
                     .int => |v| v,
@@ -102,6 +144,11 @@ pub const VM = struct {
                     .rem_int => @rem(lhs, rhs),
                     .add_int => lhs + rhs,
                     .sub_int => lhs - rhs,
+                    .bit_and => lhs & rhs,
+                    .bit_or => lhs | rhs,
+                    .bit_xor => lhs ^ rhs,
+                    .shl_int, .rotl_int => lhs << @intCast(@mod(rhs, @as(i64, @bitSizeOf(i64)))),
+                    .shr_int => lhs >> @intCast(@mod(rhs, @as(i64, @bitSizeOf(i64)))),
                     else => unreachable,
                 } };
             },
