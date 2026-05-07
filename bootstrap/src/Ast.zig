@@ -75,6 +75,7 @@ pub const Ast = struct {
     node_main_tokens: std.ArrayList(Token.Index) = .empty,
     node_data: std.ArrayList(Node.Data) = .empty,
     extra_data: std.ArrayList(u32) = .empty,
+    node_note_tokens: std.AutoHashMapUnmanaged(NodeIndex, ExtraIndex) = .empty,
     root: NodeIndex = null_node,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token) Ast {
@@ -86,6 +87,7 @@ pub const Ast = struct {
         ast.node_main_tokens.deinit(ast.allocator);
         ast.node_data.deinit(ast.allocator);
         ast.extra_data.deinit(ast.allocator);
+        ast.node_note_tokens.deinit(ast.allocator);
     }
 
     pub fn addNode(ast: *Ast, node_tag: Node.Tag, main_token: Token.Index, node_data_value: Node.Data) !NodeIndex {
@@ -103,6 +105,12 @@ pub const Ast = struct {
         return start;
     }
 
+    pub fn addNodeNotes(ast: *Ast, node: NodeIndex, note_tokens: []const Token.Index) !void {
+        if (note_tokens.len == 0) return;
+        const extra = try ast.addExtraSlice(note_tokens);
+        try ast.node_note_tokens.put(ast.allocator, node, extra);
+    }
+
     pub fn extraSlice(ast: *const Ast, start: ExtraIndex) []const u32 {
         const len = ast.extra_data.items[start];
         return ast.extra_data.items[start + 1 .. start + 1 + len];
@@ -111,6 +119,18 @@ pub const Ast = struct {
     pub fn tag(ast: *const Ast, node: NodeIndex) Node.Tag { return ast.node_tags.items[node]; }
     pub fn mainToken(ast: *const Ast, node: NodeIndex) Token.Index { return ast.node_main_tokens.items[node]; }
     pub fn data(ast: *const Ast, node: NodeIndex) Node.Data { return ast.node_data.items[node]; }
+
+    pub fn noteTokens(ast: *const Ast, node: NodeIndex) []const u32 {
+        const extra = ast.node_note_tokens.get(node) orelse return &.{};
+        return ast.extraSlice(extra);
+    }
+
+    pub fn hasNote(ast: *const Ast, node: NodeIndex, name: []const u8) bool {
+        for (ast.noteTokens(node)) |tok| {
+            if (std.mem.eql(u8, ast.tokenSlice(@intCast(tok)), name)) return true;
+        }
+        return false;
+    }
 
     pub fn tokenSlice(ast: *const Ast, token_index: Token.Index) []const u8 {
         const tok = ast.tokens[token_index];

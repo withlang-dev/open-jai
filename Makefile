@@ -13,7 +13,7 @@ SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' | sort)
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 
-.PHONY: bootstrap test-bootstrap examples clean
+.PHONY: bootstrap test test-bootstrap examples test-jai test-all clean
 
 bootstrap:
 	@mkdir -p "$(OUT_DIR)"
@@ -45,6 +45,16 @@ examples: bootstrap
 	done; \
 	echo "compiled $$count supported example(s)"; \
 	exit $$fail
+
+test-jai: bootstrap
+	@cd "$(BOOTSTRAP_DIR)" && zig build test-jai \
+		--prefix "../$(BOOTSTRAP_PREFIX)" \
+		--cache-dir "../$(BOOTSTRAP_CACHE_DIR)" \
+		--global-cache-dir "../$(ZIG_GLOBAL_CACHE_DIR)"
+
+test-all: test-bootstrap examples test-jai
+
+test: test-all
 
 clean:
 	rm -rf "$(OUT_DIR)"

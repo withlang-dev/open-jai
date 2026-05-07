@@ -109,6 +109,25 @@ pub fn build(b: *std.Build) void {
 
     const test_examples_step = b.step("test-examples", "Run integration tests against examples/");
     test_examples_step.dependOn(&run_test_examples.step);
+
+    const openjai_test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/openjai_test_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const openjai_test_runner_exe = b.addExecutable(.{
+        .name = "openjai_test_runner",
+        .root_module = openjai_test_runner_mod,
+    });
+
+    const run_openjai_tests = b.addRunArtifact(openjai_test_runner_exe);
+    run_openjai_tests.addFileArg(linked_exe);
+    run_openjai_tests.addFileArg(runtime_obj.getEmittedBin());
+    run_openjai_tests.addArg(b.pathFromRoot(".."));
+    if (b.args) |extra_args| run_openjai_tests.addArgs(extra_args);
+
+    const test_jai_step = b.step("test-jai", "Run Jai-native OpenJai test framework");
+    test_jai_step.dependOn(&run_openjai_tests.step);
 }
 
 fn configureLlvmImports(mod: *std.Build.Module) void {

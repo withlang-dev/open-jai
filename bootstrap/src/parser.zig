@@ -233,12 +233,16 @@ const Parser = struct {
         try p.consumeProcModifiers();
         var body = if (p.matchDiscard(.semicolon)) try p.emptyBlock(name_tok) else try p.parseBlock();
         _ = p.matchDiscard(.semicolon);
-        while (p.matchDiscard(.at)) _ = try p.expect(.identifier, "expected attribute name after '@'", .{});
+        var notes = std.ArrayList(Token.Index).empty;
+        defer notes.deinit(p.allocator);
+        while (p.matchDiscard(.at)) try notes.append(p.allocator, try p.expect(.identifier, "expected attribute name after '@'", .{}));
         if (named_returns.items.len != 0) body = try p.prependBlockDecls(body, named_returns.items);
         const params_extra = try p.ast.addExtraSlice(params.items);
         const sig_values = [_]u32{ params_extra, return_type };
         const sig_extra = try p.ast.addExtraSlice(&sig_values);
-        return p.ast.addNode(.proc_decl, name_tok, .{ .lhs = body, .rhs = sig_extra });
+        const proc = try p.ast.addNode(.proc_decl, name_tok, .{ .lhs = body, .rhs = sig_extra });
+        try p.ast.addNodeNotes(proc, notes.items);
+        return proc;
     }
 
     fn parseProcReturnSpec(p: *Parser, named_returns: *std.ArrayList(u32)) !NodeIndex {
@@ -1956,6 +1960,26 @@ test "parser preserves expression-form run arrow block" {
     try std.testing.expectEqual(Node.Tag.type_expr, ast.tag(ast.data(run_expr).rhs));
     try std.testing.expectEqualStrings("string", ast.tokenSlice(ast.mainToken(ast.data(run_expr).rhs)));
 }
+
+test "parser preserves procedure notes" {
+    const lexer = @import("lexer.zig");
+    const source = "sample :: () {} @TestProcedure @Slow\nmain :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "notes.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    const proc: NodeIndex = @intCast(decls[0]);
+    try std.testing.expect(ast.hasNote(proc, "TestProcedure"));
+    try std.testing.expect(ast.hasNote(proc, "Slow"));
+    try std.testing.expect(!ast.hasNote(proc, "Missing"));
+}
+
 test "parser parses hello sailor AST shape" {
     const lexer = @import("lexer.zig");
     const source = "#import \"Basic\";\nmain :: () {\n print(\"Hello, Sailor from Jai!\\n\");\n}\n";

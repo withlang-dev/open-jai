@@ -4,6 +4,8 @@
 .DS_Store
 
 out/
+test/reports/
+test/out/
 **/.zig-cache/
 **/zig-cache/
 **/zig-out/

@@ -221,6 +221,10 @@ pub const VM = struct {
                 if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM addr_of_local register out of range", .{});
                 regs[inst.dest] = .{ .int = @intCast(inst.arg1 + 1) };
             },
+            .proc_addr => {
+                if (inst.dest >= regs.len) return diag.failAt(0, "VM proc_addr register out of range", .{});
+                regs[inst.dest] = .{ .int = 1 };
+            },
             .call_extern => {
                 if (inst.dest != @intFromEnum(Bytecode.ExternSymbol.openjai_print)) return diag.failAt(0, "VM only supports compile-time print extern calls", .{});
                 if (inst.arg1 >= regs.len) return diag.failAt(0, "VM print argument register out of range", .{});
@@ -254,9 +258,20 @@ pub const VM = struct {
             },
             .assert_true => {
                 if (inst.arg1 >= regs.len) return diag.failAt(0, "VM assert register out of range", .{});
-                _ = try registerTruthy(regs[inst.arg1], diag, "assert condition");
+                if (!try registerTruthy(regs[inst.arg1], diag, "assert condition")) {
+                    return diag.failAt(inst.source_node, "compile-time assert failed", .{});
+                }
             },
             .ret_void => return .void,
+            .alloc_heap => {
+                if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
+                regs[inst.dest] = .{ .int = 1 };
+            },
+            .load_ptr => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
+                regs[inst.dest] = regs[inst.arg1];
+            },
+            .store_ptr => {},
             .memcpy, .free_heap => {},
             else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
         }
