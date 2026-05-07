@@ -97,6 +97,7 @@ pub const Token = struct {
         directive_bytes,
         directive_intrinsic,
         directive_program_export,
+        directive_cpp_method,
         directive_elsewhere,
         directive_runtime_support,
         directive_bake_arguments,
@@ -140,6 +141,7 @@ pub const Token = struct {
         shift_right_rotate,
         ampersand_ampersand,
         pipe_pipe,
+        pipe_pipe_equal,
         bang,
         plus_equal,
         minus_equal,
@@ -195,6 +197,7 @@ pub fn directiveOrInvalid(bytes: []const u8) Tag {
         .{ "#insert", .directive_insert }, .{ "#code", .directive_code }, .{ "#expand", .directive_expand },
         .{ "#char", .directive_char }, .{ "#string", .directive_string }, .{ "#foreign", .directive_foreign },
         .{ "#foreign_library", .directive_foreign_library },
+        .{ "#foreign_system_library", .directive_system_library },
         .{ "#system_library", .directive_system_library }, .{ "#library", .directive_library },
         .{ "#type", .directive_type }, .{ "#scope_file", .directive_scope_file },
         .{ "#scope_export", .directive_scope_export }, .{ "#scope_module", .directive_scope_module },
@@ -208,7 +211,7 @@ pub fn directiveOrInvalid(bytes: []const u8) Tag {
         .{ "#no_abc", .directive_no_abc }, .{ "#no_context", .directive_no_context },
         .{ "#c_call", .directive_c_call }, .{ "#add_context", .directive_add_context }, .{ "#asm", .directive_asm },
         .{ "#bytes", .directive_bytes }, .{ "#intrinsic", .directive_intrinsic },
-        .{ "#program_export", .directive_program_export }, .{ "#elsewhere", .directive_elsewhere },
+        .{ "#program_export", .directive_program_export }, .{ "#cpp_method", .directive_cpp_method }, .{ "#elsewhere", .directive_elsewhere },
         .{ "#runtime_support", .directive_runtime_support }, .{ "#bake_arguments", .directive_bake_arguments },
         .{ "#bake_constants", .directive_bake_constants }, .{ "#modify", .directive_modify },
         .{ "#module_parameters", .directive_module_parameters }, .{ "#type_info_none", .directive_type_info_none },
@@ -219,4 +222,12 @@ pub fn directiveOrInvalid(bytes: []const u8) Tag {
         .{ "#caller_code", .directive_caller_code }, .{ "#procedure_of_call", .directive_procedure_of_call },
     });
     return directives.get(bytes) orelse .invalid;
+}
+
+pub fn directiveNameOrInvalid(bytes: []const u8) Tag {
+    var buf: [128]u8 = undefined;
+    if (bytes.len + 1 > buf.len) return .invalid;
+    buf[0] = '#';
+    @memcpy(buf[1 .. bytes.len + 1], bytes);
+    return directiveOrInvalid(buf[0 .. bytes.len + 1]);
 }

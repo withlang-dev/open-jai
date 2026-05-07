@@ -49,6 +49,8 @@ pub const Node = struct {
         type_of_expr,
         size_of_expr,
         run_expr,
+        meta_expr,
+        meta_stmt,
         is_constant_expr,
         unary_expr,
         binary_expr,

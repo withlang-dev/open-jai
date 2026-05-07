@@ -60,7 +60,11 @@ const Lexer = struct {
                 '/' => try l.add(if (l.match('=')) .slash_equal else .slash, start),
                 '%' => try l.add(.percent, start),
                 '&' => try l.add(if (l.match('&')) .ampersand_ampersand else if (l.match('=')) .ampersand_equal else .ampersand, start),
-                '|' => try l.add(if (l.match('|')) .pipe_pipe else if (l.match('=')) .pipe_equal else .pipe, start),
+                '|' => {
+                    if (l.match('|')) {
+                        try l.add(if (l.match('=')) .pipe_pipe_equal else .pipe_pipe, start);
+                    } else try l.add(if (l.match('=')) .pipe_equal else .pipe, start);
+                },
                 '^' => try l.add(if (l.match('=')) .caret_equal else .caret, start),
                 '~' => try l.add(.tilde, start),
                 '.' => {
@@ -139,10 +143,13 @@ const Lexer = struct {
     }
 
     fn directive(l: *Lexer, start: usize) !void {
+        while (l.index < l.source.len and (l.source[l.index] == ' ' or l.source[l.index] == '\t')) l.index += 1;
         if (l.index >= l.source.len or !isIdentStart(l.source[l.index])) return l.diag.failAt(start, "expected directive name after '#'", .{});
+        const name_start = l.index;
         while (l.index < l.source.len and isIdentContinue(l.source[l.index])) l.index += 1;
-        const tag = token_mod.directiveOrInvalid(l.source[start..l.index]);
-        if (tag == .invalid) return l.diag.failAt(start, "unknown directive '{s}'", .{l.source[start..l.index]});
+        const name = l.source[name_start..l.index];
+        const tag = token_mod.directiveNameOrInvalid(name);
+        if (tag == .invalid) return l.diag.failAt(start, "unknown directive '#{s}'", .{name});
         try l.add(tag, start);
         if (tag == .directive_string) try l.multilineStringPayload(start);
     }
@@ -161,9 +168,16 @@ const Lexer = struct {
             const line_start = l.index;
             var line_end = line_start;
             while (line_end < l.source.len and l.source[line_end] != '\n' and l.source[line_end] != '\r') line_end += 1;
+            var trimmed_start = line_start;
+            while (trimmed_start < line_end and (l.source[trimmed_start] == ' ' or l.source[trimmed_start] == '\t')) trimmed_start += 1;
             var trimmed_end = line_end;
-            while (trimmed_end > line_start and (l.source[trimmed_end - 1] == ' ' or l.source[trimmed_end - 1] == '\t')) trimmed_end -= 1;
-            if (std.mem.eql(u8, l.source[line_start..trimmed_end], delimiter)) {
+            while (trimmed_end > trimmed_start and (l.source[trimmed_end - 1] == ' ' or l.source[trimmed_end - 1] == '\t')) trimmed_end -= 1;
+            var candidate_end = trimmed_end;
+            if (candidate_end > trimmed_start and l.source[candidate_end - 1] == ';') {
+                candidate_end -= 1;
+                while (candidate_end > trimmed_start and (l.source[candidate_end - 1] == ' ' or l.source[candidate_end - 1] == '\t')) candidate_end -= 1;
+            }
+            if (std.mem.eql(u8, l.source[trimmed_start..candidate_end], delimiter)) {
                 try l.tokens.append(l.allocator, .{ .tag = .string_literal, .start = @intCast(payload_start), .end = @intCast(line_start) });
                 l.index = line_end;
                 if (l.index < l.source.len and l.source[l.index] == '\r') l.index += 1;
@@ -354,4 +368,26 @@ test "lexer rejects missing float exponent digits" {
     const source = "1e+";
     const diag = Diagnostic.init(std.testing.allocator, "bad_float.jai", source);
     try std.testing.expectError(error.CompilationFailed, tokenize(std.testing.allocator, source, diag));
+}
+
+test "lexer accepts spaced directives" {
+    const source = "# import \"Basic\";\n# if OS == .MACOS return;\n";
+    const diag = Diagnostic.init(std.testing.allocator, "spaced_directives.jai", source);
+    var tokens = try tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const tags = tokens.items(.tag);
+    const expected = &[_]Tag{
+        .directive_import,
+        .string_literal,
+        .semicolon,
+        .directive_if,
+        .identifier,
+        .equal_equal,
+        .dot,
+        .identifier,
+        .keyword_return,
+        .semicolon,
+        .eof,
+    };
+    try std.testing.expectEqualSlices(Tag, expected, tags);
 }

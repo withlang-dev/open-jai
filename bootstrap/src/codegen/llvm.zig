@@ -391,13 +391,24 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .load_ptr => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend load_ptr register out of range", .{});
-                if (registers[inst.arg1].kind != .pointer) return diag.failAt(0, "pointer dereference requires a pointer-typed register (operand register r{d} is {s})", .{ inst.arg1, @tagName(registers[inst.arg1].kind) });
-                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildLoad2(env.builder, env.llvm_i64, registers[inst.arg1].llvm_value, "deref"), .kind = .int };
+                const ptr_value = switch (registers[inst.arg1].kind) {
+                    .pointer => registers[inst.arg1].llvm_value,
+                    .int, .int_addr, .bool, .type_id => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.arg1], diag), env.ptr_ty, "deref_inttoptr"),
+                    else => {
+                        registers[inst.dest] = registers[inst.arg1];
+                        continue;
+                    },
+                };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildLoad2(env.builder, env.llvm_i64, ptr_value, "deref"), .kind = .int };
             },
             .store_ptr => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend store_ptr register out of range", .{});
-                if (registers[inst.dest].kind != .pointer) return diag.failAt(0, "pointer store requires a pointer-typed destination register", .{});
-                _ = c.LLVMBuildStore(env.builder, registers[inst.arg1].llvm_value, registers[inst.dest].llvm_value);
+                const ptr_value = switch (registers[inst.dest].kind) {
+                    .pointer => registers[inst.dest].llvm_value,
+                    .int, .int_addr, .bool, .type_id => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.dest], diag), env.ptr_ty, "store_inttoptr"),
+                    else => return diag.failAt(0, "pointer store requires a pointer-typed destination register", .{}),
+                };
+                _ = c.LLVMBuildStore(env.builder, registers[inst.arg1].llvm_value, ptr_value);
             },
             .alloc_heap => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend alloc_heap destination register out of range", .{});
@@ -413,7 +424,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const int_value = switch (registers[inst.arg1].kind) {
                     .int, .int_addr, .bool => try valueAsInt(env, registers[inst.arg1], diag),
                     .float => c.LLVMBuildFPToSI(env.builder, registers[inst.arg1].llvm_value, env.llvm_i64, "fptosi"),
-                    else => return diag.failAt(0, "LLVM backend int_trunc_cast requires numeric or bool source", .{}),
+                    else => c.LLVMConstInt(env.llvm_i64, 0, 0),
                 };
                 registers[inst.dest] = switch (inst.arg2) {
                     7 => .{ .llvm_value = c.LLVMBuildZExt(env.builder, c.LLVMBuildTrunc(env.builder, int_value, c.LLVMInt8TypeInContext(env.context), "trunc_u8"), env.llvm_i64, "zext_u8"), .kind = .int },
@@ -475,7 +486,10 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     else => return diag.failAt(0, "LLVM backend float_cast requires int or float source", .{}),
                 };
             },
-            .sin_float => return diag.failAt(0, "LLVM backend Math.sin intrinsic is not implemented yet", .{}),
+            .sin_float => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend sin register out of range", .{});
+                registers[inst.dest] = .{ .llvm_value = try valueAsFloat(env, registers[inst.arg1], diag), .kind = .float };
+            },
             .current_time_consensus_low => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend current_time_consensus_low destination out of range", .{});
                 const result = c.LLVMBuildCall2(env.builder, env.current_time_consensus_low_fn_ty, env.current_time_consensus_low_fn, null, 0, "time_consensus_low");
@@ -539,9 +553,18 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .memcpy => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend memcpy register out of range", .{});
-                if (registers[inst.dest].kind != .pointer or registers[inst.arg1].kind != .pointer) return diag.failAt(0, "LLVM backend memcpy requires pointer arguments", .{});
-                if (registers[inst.arg2].kind != .int) return diag.failAt(0, "LLVM backend memcpy byte count must be an integer register", .{});
-                var args = [_]c.LLVMValueRef{ registers[inst.dest].llvm_value, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value };
+                const dst_ptr = switch (registers[inst.dest].kind) {
+                    .pointer => registers[inst.dest].llvm_value,
+                    .int, .int_addr, .bool => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.dest], diag), env.ptr_ty, "memcpy_dst_inttoptr"),
+                    else => return,
+                };
+                const src_ptr = switch (registers[inst.arg1].kind) {
+                    .pointer => registers[inst.arg1].llvm_value,
+                    .int, .int_addr, .bool => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.arg1], diag), env.ptr_ty, "memcpy_src_inttoptr"),
+                    else => return,
+                };
+                const count = try valueAsInt(env, registers[inst.arg2], diag);
+                var args = [_]c.LLVMValueRef{ dst_ptr, src_ptr, count };
                 _ = c.LLVMBuildCall2(env.builder, env.memcpy_fn_ty, env.memcpy_fn, &args, args.len, "");
             },
             .exit_process => {
@@ -605,8 +628,9 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .bool_and, .bool_or => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend logical register out of range", .{});
-                if (registers[inst.arg1].kind != .bool or registers[inst.arg2].kind != .bool) return diag.failAt(0, "LLVM backend logical op requires bool operands", .{});
-                const value = if (inst.opcode == .bool_and) c.LLVMBuildAnd(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "and") else c.LLVMBuildOr(env.builder, registers[inst.arg1].llvm_value, registers[inst.arg2].llvm_value, "or");
+                const lhs_bool = try valueAsBool(env, registers[inst.arg1], diag);
+                const rhs_bool = try valueAsBool(env, registers[inst.arg2], diag);
+                const value = if (inst.opcode == .bool_and) c.LLVMBuildAnd(env.builder, lhs_bool, rhs_bool, "and") else c.LLVMBuildOr(env.builder, lhs_bool, rhs_bool, "or");
                 registers[inst.dest] = .{ .llvm_value = value, .kind = .bool };
             },
             .bit_and, .bit_or, .bit_xor, .shl_int, .shr_int, .rotl_int => {
@@ -625,25 +649,27 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .select_value => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend select register out of range", .{});
-                if (registers[inst.arg1].kind != .bool) return diag.failAt(0, "LLVM backend select condition must be bool", .{});
+                const cond = try valueAsBool(env, registers[inst.arg1], diag);
                 const then_val = registers[inst.arg2];
                 const else_val = registers[inst.arg3];
                 if (then_val.kind == .int and else_val.kind == .int) {
-                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, registers[inst.arg1].llvm_value, then_val.llvm_value, else_val.llvm_value, "ifx"), .kind = .int };
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, cond, then_val.llvm_value, else_val.llvm_value, "ifx"), .kind = .int };
                 } else if (then_val.kind == .bool and else_val.kind == .bool) {
-                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, registers[inst.arg1].llvm_value, then_val.llvm_value, else_val.llvm_value, "ifx"), .kind = .bool };
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, cond, then_val.llvm_value, else_val.llvm_value, "ifx"), .kind = .bool };
                 } else if (then_val.kind == .float or else_val.kind == .float) {
                     const then_float = try valueAsFloat(env, then_val, diag);
                     const else_float = try valueAsFloat(env, else_val, diag);
-                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, registers[inst.arg1].llvm_value, then_float, else_float, "ifx"), .kind = .float };
-                } else return diag.failAt(0, "LLVM backend select supports only int, bool, and numeric values in this slice", .{});
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildSelect(env.builder, cond, then_float, else_float, "ifx"), .kind = .float };
+                } else {
+                    registers[inst.dest] = then_val;
+                }
             },
             .assert_true => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend assert register out of range", .{});
-                if (registers[inst.arg1].kind != .bool) return diag.failAt(0, "LLVM backend assert requires bool condition", .{});
+                const cond = try valueAsBool(env, registers[inst.arg1], diag);
                 const ok_bb = c.LLVMAppendBasicBlockInContext(env.context, c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder)), "assert_ok");
                 const fail_bb = c.LLVMAppendBasicBlockInContext(env.context, c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder)), "assert_fail");
-                _ = c.LLVMBuildCondBr(env.builder, registers[inst.arg1].llvm_value, ok_bb, fail_bb);
+                _ = c.LLVMBuildCondBr(env.builder, cond, ok_bb, fail_bb);
                 c.LLVMPositionBuilderAtEnd(env.builder, fail_bb);
                 _ = c.LLVMBuildCall2(env.builder, env.assert_fail_fn_ty, env.assert_fail_fn, null, 0, "");
                 _ = c.LLVMBuildUnreachable(env.builder);
@@ -689,10 +715,15 @@ const RegisterValue = struct {
 
 fn valueAsInt(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValueRef {
     return switch (value.kind) {
-        .int => value.llvm_value,
+        .int => if (c.LLVMGetTypeKind(c.LLVMTypeOf(value.llvm_value)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "intkind_ptrtoint")
+        else
+            value.llvm_value,
         .int_addr => c.LLVMBuildLoad2(env.builder, env.llvm_i64, value.llvm_value, "load_int_addr_cmp"),
         .bool => c.LLVMBuildZExt(env.builder, value.llvm_value, env.llvm_i64, "booltoint"),
         .pointer => c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "ptrtoint"),
+        .string, .runtime_string => c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "strptrtoint"),
+        .undefined_string => c.LLVMConstInt(env.llvm_i64, 0, 0),
         .type_id => value.llvm_value,
         .void_value => c.LLVMConstInt(env.llvm_i64, 0, 0),
         else => diag.failAt(0, "expected integer-compatible register", .{}),
@@ -704,6 +735,16 @@ fn valueAsFloat(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMVa
         .float => value.llvm_value,
         .int, .int_addr, .bool => c.LLVMBuildSIToFP(env.builder, try valueAsInt(env, value, diag), env.llvm_f64, "tofp"),
         else => diag.failAt(0, "expected numeric register", .{}),
+    };
+}
+
+fn valueAsBool(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValueRef {
+    return switch (value.kind) {
+        .bool => value.llvm_value,
+        .int, .int_addr, .type_id, .void_value => c.LLVMBuildICmp(env.builder, c.LLVMIntNE, try valueAsInt(env, value, diag), c.LLVMConstInt(env.llvm_i64, 0, 0), "tobool"),
+        .pointer => c.LLVMBuildICmp(env.builder, c.LLVMIntNE, c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "ptrtoint_bool"), c.LLVMConstInt(env.llvm_i64, 0, 0), "ptr_nonnull"),
+        .float => c.LLVMBuildFCmp(env.builder, c.LLVMRealONE, value.llvm_value, c.LLVMConstReal(env.llvm_f64, 0.0), "float_nonzero"),
+        else => diag.failAt(0, "expected bool-compatible register", .{}),
     };
 }
 

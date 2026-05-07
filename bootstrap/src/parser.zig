@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Token = @import("Token.zig").Token;
 const Tag = @import("Token.zig").Tag;
 const Ast = @import("Ast.zig").Ast;
@@ -6,6 +7,7 @@ const null_node = @import("Ast.zig").null_node;
 const Node = @import("Ast.zig").Node;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
+const using_param_sentinel: u32 = 0xfffffffe;
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8, tags: []const Tag, starts: []const u32, ends: []const u32, diag: Diagnostic) !Ast {
     const tokens = try allocator.alloc(Token, tags.len);
@@ -28,8 +30,12 @@ const Parser = struct {
         var decls = std.ArrayList(u32).empty;
         defer decls.deinit(p.allocator);
         while (!p.check(.eof)) {
-        const decl = try p.parseTopLevelDecl();
-            try decls.append(p.allocator, decl);
+            const decl = try p.parseTopLevelDecl();
+            if (p.ast.tag(decl) == .stmt_list) {
+                try decls.appendSlice(p.allocator, p.ast.extraSlice(p.ast.data(decl).lhs));
+            } else {
+                try decls.append(p.allocator, decl);
+            }
             _ = p.matchDiscard(.semicolon);
         }
         const extra = try p.ast.addExtraSlice(decls.items);
@@ -38,28 +44,41 @@ const Parser = struct {
         return p.ast;
     }
 
-    fn parseTopLevelDecl(p: *Parser) !NodeIndex {
+    fn parseTopLevelDecl(p: *Parser) anyerror!NodeIndex {
+        if (p.match(.directive_if)) |tok| return p.parseDirectiveIf(tok, true);
         if (p.match(.directive_import)) |tok| return p.parseImport(tok);
         if (p.match(.directive_load)) |tok| return p.parseLoad(tok);
         if (p.match(.directive_scope_file)) |tok| return p.parseScope(tok);
         if (p.match(.directive_scope_export)) |tok| return p.parseScope(tok);
         if (p.match(.directive_scope_module)) |tok| return p.parseScope(tok);
+        if (p.match(.directive_program_export)) |_| return p.parseTopLevelDecl();
+        if (p.match(.directive_no_reset)) |_| return p.parseTopLevelDecl();
+        if (p.match(.directive_poke_name)) |tok| return p.parseTopLevelMetaDirective(tok);
         if (p.match(.directive_add_context)) |tok| return p.parseAddContext(tok);
         if (p.match(.directive_assert)) |tok| return p.parseTopLevelAssert(tok);
         if (p.match(.directive_placeholder)) |tok| return p.parseTopLevelPlaceholder(tok);
         if (p.match(.directive_run)) |tok| return p.parseRunStatement(tok);
+        if (p.match(.keyword_operator)) |_| return p.parseOperatorDecl();
         if (p.check(.identifier)) {
-            if (p.peekTag(1) == .colon_colon or p.peekTag(1) == .colon or p.peekTag(1) == .colon_equal) return p.parseTopLevelIdentifierDecl();
+            if (p.peekTag(1) == .colon_colon or p.peekTag(1) == .colon or p.peekTag(1) == .colon_equal or p.peekTag(1) == .comma) return p.parseTopLevelIdentifierDecl();
         }
         return p.failCurrent("expected top-level import, constant, or procedure declaration", .{});
     }
 
+    fn parseOperatorDecl(p: *Parser) !NodeIndex {
+        const name_tok = p.index;
+        while (!p.check(.colon_colon) and !p.check(.eof)) p.index += 1;
+        _ = try p.expect(.colon_colon, "expected '::' after operator name", .{});
+        return p.parseProcDeclAfterName(name_tok);
+    }
+
     fn parseTopLevelIdentifierDecl(p: *Parser) !NodeIndex {
         const name_tok = try p.expect(.identifier, "expected top-level declaration name", .{});
+        if (p.check(.comma)) return p.parseTopLevelMultiNameDeclAfterFirst(name_tok);
         if (p.matchDiscard(.colon_colon)) {
             if (p.check(.keyword_inline) or p.check(.keyword_no_inline)) return p.parseProcDeclAfterName(name_tok);
             if (p.check(.l_paren)) return p.parseProcDeclAfterName(name_tok);
-            if (p.check(.directive_import) or p.check(.directive_library) or p.check(.directive_system_library) or p.check(.directive_foreign_library) or p.check(.directive_type)) {
+            if (p.check(.directive_import) or p.check(.directive_library) or p.check(.directive_system_library) or p.check(.directive_foreign_library) or p.check(.directive_type) or p.check(.directive_bake_arguments) or p.check(.directive_bake_constants) or p.check(.directive_code)) {
                 return p.parseTopLevelDirectiveConstAfterName(name_tok);
             }
             const value = try p.parseTypeOrExpr();
@@ -81,6 +100,7 @@ const Parser = struct {
         }
         _ = try p.expect(.colon, "expected ':', ':=', or '::' after declaration name", .{});
         const type_expr = try p.parseTypeExpr();
+        try p.consumeDeclModifiers();
         if (p.matchDiscard(.colon)) {
             const value = try p.parseExpr();
             _ = try p.expect(.semicolon, "expected semicolon after typed constant declaration", .{});
@@ -92,6 +112,28 @@ const Parser = struct {
         } else null_node;
         _ = try p.expect(.semicolon, "expected semicolon after top-level variable declaration", .{});
         return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = init });
+    }
+
+    fn parseTopLevelMultiNameDeclAfterFirst(p: *Parser, first_name_tok: Token.Index) !NodeIndex {
+        var name_toks = std.ArrayList(Token.Index).empty;
+        defer name_toks.deinit(p.allocator);
+        try name_toks.append(p.allocator, first_name_tok);
+        while (p.matchDiscard(.comma)) try name_toks.append(p.allocator, try p.expect(.identifier, "expected declaration name after ','", .{}));
+        _ = try p.expect(.colon, "expected ':' after multi-name top-level declaration", .{});
+        const type_expr = try p.parseTypeExpr();
+        try p.consumeDeclModifiers();
+        const init = if (p.matchDiscard(.equal)) blk: {
+            if (p.match(.triple_minus)) |tok| break :blk try p.ast.addNode(.undefined_literal, tok, .{});
+            break :blk try p.parseExpr();
+        } else null_node;
+        _ = try p.expect(.semicolon, "expected semicolon after top-level variable declaration", .{});
+        var decls = std.ArrayList(u32).empty;
+        defer decls.deinit(p.allocator);
+        for (name_toks.items) |name_tok| {
+            try decls.append(p.allocator, try p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = init }));
+        }
+        const extra = try p.ast.addExtraSlice(decls.items);
+        return p.ast.addNode(.stmt_list, first_name_tok, .{ .lhs = extra, .rhs = @intCast(decls.items.len) });
     }
 
     fn parseTopLevelDirectiveConstAfterName(p: *Parser, name_tok: Token.Index) !NodeIndex {
@@ -122,6 +164,21 @@ const Parser = struct {
             _ = p.matchDiscard(.semicolon);
             return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
         }
+        if (p.match(.directive_bake_arguments) != null) {
+            const value = try p.parseTypeExpr();
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_bake_constants)) |tok| {
+            const value = try p.parseOpaqueDirectiveExpr(tok);
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_code)) |tok| {
+            const value = try p.parseOpaqueDirectiveExpr(tok);
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
         return p.failCurrent("expected supported directive after '::'", .{});
     }
 
@@ -138,6 +195,8 @@ const Parser = struct {
         defer params.deinit(p.allocator);
         if (!p.check(.r_paren)) {
             while (true) {
+                const is_using_param = p.matchDiscard(.keyword_using);
+                _ = p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar);
                 const param_name = try p.expect(.identifier, "expected parameter name", .{});
                 var is_variadic_param = false;
                 var param_type: NodeIndex = null_node;
@@ -149,7 +208,8 @@ const Parser = struct {
                 } else if (p.matchDiscard(.colon_equal)) {
                     param_init = try p.parseExpr();
                 }
-                const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = if (is_variadic_param) 1 else param_init });
+                const rhs: u32 = if (is_variadic_param) 1 else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
+                const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = rhs });
                 try params.append(p.allocator, param);
                 if (!p.matchDiscard(.comma)) break;
             }
@@ -172,6 +232,8 @@ const Parser = struct {
         const return_type = if (p.matchDiscard(.arrow)) try p.parseProcReturnSpec(&named_returns) else null_node;
         try p.consumeProcModifiers();
         var body = if (p.matchDiscard(.semicolon)) try p.emptyBlock(name_tok) else try p.parseBlock();
+        _ = p.matchDiscard(.semicolon);
+        while (p.matchDiscard(.at)) _ = try p.expect(.identifier, "expected attribute name after '@'", .{});
         if (named_returns.items.len != 0) body = try p.prependBlockDecls(body, named_returns.items);
         const params_extra = try p.ast.addExtraSlice(params.items);
         const sig_values = [_]u32{ params_extra, return_type };
@@ -180,6 +242,17 @@ const Parser = struct {
     }
 
     fn parseProcReturnSpec(p: *Parser, named_returns: *std.ArrayList(u32)) !NodeIndex {
+        if (p.matchDiscard(.l_paren)) {
+            if (p.check(.identifier) and p.peekTag(1) == .colon) {
+                const return_type = try p.parseProcReturnSpec(named_returns);
+                _ = try p.expect(.r_paren, "expected ')' after procedure return types", .{});
+                return return_type;
+            }
+            const first_type = try p.parseTypeExpr();
+            while (p.matchDiscard(.comma)) _ = try p.parseTypeExpr();
+            _ = try p.expect(.r_paren, "expected ')' after procedure return types", .{});
+            return first_type;
+        }
         if (p.check(.identifier) and p.peekTag(1) == .colon) {
             const name_tok = try p.expect(.identifier, "expected named return name", .{});
             _ = try p.expect(.colon, "expected ':' in named return declaration", .{});
@@ -231,7 +304,15 @@ const Parser = struct {
     fn consumeProcModifiers(p: *Parser) !void {
         while (true) {
             switch (p.peekTag(0)) {
-                .directive_must, .directive_expand, .directive_c_call, .directive_no_context => p.index += 1,
+                .directive_must, .directive_expand, .directive_c_call, .directive_no_context, .directive_cpp_method, .directive_dump => p.index += 1,
+                .directive_modify => {
+                    p.index += 1;
+                    if (p.check(.l_brace)) {
+                        try p.skipBalancedBraces();
+                    } else {
+                        while (!p.check(.l_brace) and !p.check(.semicolon) and !p.check(.eof)) p.index += 1;
+                    }
+                },
                 .directive_deprecated => {
                     p.index += 1;
                     if (p.check(.string_literal)) p.index += 1;
@@ -245,6 +326,34 @@ const Parser = struct {
                     while (p.check(.identifier) or p.check(.string_literal) or p.check(.comma)) p.index += 1;
                 },
                 else => return,
+            }
+        }
+    }
+
+    fn consumeDeclModifiers(p: *Parser) !void {
+        while (true) {
+            switch (p.peekTag(0)) {
+                .directive_align => {
+                    p.index += 1;
+                    _ = try p.parseExpr();
+                },
+                .directive_no_padding, .directive_specified => p.index += 1,
+                else => return,
+            }
+        }
+    }
+
+    fn skipBalancedBraces(p: *Parser) !void {
+        _ = try p.expect(.l_brace, "expected '{{'", .{});
+        var depth: usize = 1;
+        while (depth > 0) {
+            if (p.check(.eof)) return p.failCurrent("expected closing brace before end of file", .{});
+            const tag = p.peekTag(0);
+            p.index += 1;
+            switch (tag) {
+                .l_brace => depth += 1,
+                .r_brace => depth -= 1,
+                else => {},
             }
         }
     }
@@ -281,8 +390,14 @@ const Parser = struct {
     }
 
     fn parseScope(p: *Parser, tok: Token.Index) !NodeIndex {
-        _ = try p.expect(.semicolon, "expected semicolon after scope directive", .{});
+        _ = p.matchDiscard(.semicolon);
         return p.ast.addNode(.scope_decl, tok, .{});
+    }
+
+    fn parseTopLevelMetaDirective(p: *Parser, tok: Token.Index) !NodeIndex {
+        while (!p.check(.semicolon) and !p.check(.eof)) p.index += 1;
+        _ = p.matchDiscard(.semicolon);
+        return p.ast.addNode(.meta_stmt, tok, .{ .lhs = try p.emptyBlock(tok), .rhs = null_node });
     }
 
     fn parseLoad(p: *Parser, tok: Token.Index) !NodeIndex {
@@ -326,11 +441,23 @@ const Parser = struct {
         return p.ast.addNode(.block, lbrace, .{ .lhs = extra, .rhs = @intCast(stmts.items.len) });
     }
 
-    fn parseStmt(p: *Parser) !NodeIndex {
+    fn parseStmt(p: *Parser) anyerror!NodeIndex {
+        if (p.match(.directive_if)) |tok| return p.parseDirectiveIf(tok, false);
+        if (p.match(.directive_asm)) |tok| return p.parseAsmStmt(tok);
         if (p.match(.directive_import)) |tok| return p.parseImport(tok);
+        if (p.match(.directive_insert)) |tok| {
+            const value = try p.parseOpaqueDirectiveExpr(tok);
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.meta_stmt, tok, .{ .lhs = value, .rhs = null_node });
+        }
         if (p.match(.directive_load)) |tok| return p.parseLoad(tok);
         if (p.match(.directive_assert)) |tok| return p.parseTopLevelAssert(tok);
         if (p.match(.directive_placeholder)) |tok| return p.parseTopLevelPlaceholder(tok);
+        if (p.matchDiscard(.keyword_inline) or p.matchDiscard(.keyword_no_inline)) {
+            const expr = try p.parseExpr();
+            _ = try p.expect(.semicolon, "expected semicolon after expression statement", .{});
+            return p.ast.addNode(.expr_stmt, p.ast.mainToken(expr), .{ .lhs = expr });
+        }
         if (p.match(.directive_run)) |tok| return p.parseRunStatement(tok);
         if (p.match(.keyword_push_context)) |tok| {
             const ctx_expr = try p.parseExpr();
@@ -338,6 +465,22 @@ const Parser = struct {
             return p.ast.addNode(.run_expr, tok, .{ .lhs = body, .rhs = ctx_expr });
         }
         if (p.match(.keyword_return)) |tok| {
+            if (p.check(.identifier) and p.peekTag(1) == .equal) {
+                var stmts = std.ArrayList(u32).empty;
+                defer stmts.deinit(p.allocator);
+                while (true) {
+                    const name_tok = try p.expect(.identifier, "expected named return value", .{});
+                    _ = try p.expect(.equal, "expected '=' in named return assignment", .{});
+                    const lhs = try p.ast.addNode(.identifier, name_tok, .{});
+                    const rhs = try p.parseExpr();
+                    try stmts.append(p.allocator, try p.ast.addNode(.assign_stmt, name_tok, .{ .lhs = lhs, .rhs = rhs }));
+                    if (!p.matchDiscard(.comma)) break;
+                }
+                _ = try p.expect(.semicolon, "expected semicolon after return statement", .{});
+                try stmts.append(p.allocator, try p.ast.addNode(.return_stmt, tok, .{ .lhs = null_node }));
+                const extra = try p.ast.addExtraSlice(stmts.items);
+                return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = @intCast(stmts.items.len) });
+            }
             const expr = if (p.check(.semicolon)) null_node else blk: {
                 const first = try p.parseExpr();
                 while (p.matchDiscard(.comma)) _ = try p.parseExpr();
@@ -347,6 +490,13 @@ const Parser = struct {
             return p.ast.addNode(.return_stmt, tok, .{ .lhs = expr });
         }
         if (p.match(.keyword_using)) |tok| {
+            if (p.checkIdentifierLike() and p.peekTag(1) == .colon) {
+                const name_tok = p.index;
+                p.index += 2;
+                const type_expr = try p.parseTypeExpr();
+                _ = try p.expect(.semicolon, "expected semicolon after using declaration", .{});
+                return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = null_node });
+            }
             const expr = try p.parseExpr();
             _ = try p.expect(.semicolon, "expected semicolon after using statement", .{});
             return p.ast.addNode(.expr_stmt, tok, .{ .lhs = expr });
@@ -361,6 +511,7 @@ const Parser = struct {
         }
         if (p.match(.keyword_defer)) |tok| {
             const deferred = try p.parseStmt();
+            _ = p.matchDiscard(.semicolon);
             return p.ast.addNode(.defer_stmt, tok, .{ .lhs = deferred });
         }
         if (p.match(.keyword_break)) |tok| {
@@ -381,20 +532,195 @@ const Parser = struct {
             _ = try p.expect(.semicolon, "expected semicolon after continue", .{});
             return p.ast.addNode(.continue_stmt, tok, .{ .lhs = label });
         }
-        if (p.check(.identifier)) {
+        if (p.check(.identifier) or p.check(.keyword_it) or p.check(.keyword_it_index)) {
+            if (p.check(.identifier) and std.mem.eql(u8, p.ast.tokenSlice(p.index), "remove")) {
+                const tok = p.index;
+                p.index += 1;
+                const operand = try p.parseExpr();
+                _ = try p.expect(.semicolon, "expected semicolon after remove statement", .{});
+                return p.ast.addNode(.meta_stmt, tok, .{ .lhs = operand, .rhs = null_node });
+            }
             if (p.peekTag(1) == .comma) return p.parseMultiNameStmt();
             if (p.peekTag(1) == .colon) return p.parseLocalTypedDecl();
             if (p.peekTag(1) == .colon_equal) return p.parseLocalInferredDecl();
             if (p.peekTag(1) == .plus_equal or p.peekTag(1) == .minus_equal or p.peekTag(1) == .star_equal or p.peekTag(1) == .slash_equal or p.peekTag(1) == .ampersand_equal or p.peekTag(1) == .pipe_equal or p.peekTag(1) == .caret_equal) return p.parseAssignStmt();
             if (p.peekTag(1) == .colon_colon and p.peekTag(2) == .l_paren) return p.parseProcDecl();
             if (p.peekTag(1) == .colon_colon) return p.parseLocalConstDecl();
-            if (p.peekTag(1) == .equal or p.peekTag(1) == .plus_equal or p.peekTag(1) == .minus_equal or p.peekTag(1) == .star_equal or p.peekTag(1) == .slash_equal or p.peekTag(1) == .ampersand_equal or p.peekTag(1) == .pipe_equal or p.peekTag(1) == .caret_equal) return p.parseAssignStmt();
+            if (p.peekTag(1) == .equal or p.peekTag(1) == .plus_equal or p.peekTag(1) == .minus_equal or p.peekTag(1) == .star_equal or p.peekTag(1) == .slash_equal or p.peekTag(1) == .ampersand_equal or p.peekTag(1) == .pipe_equal or p.peekTag(1) == .pipe_pipe_equal or p.peekTag(1) == .caret_equal) return p.parseAssignStmt();
         }
-        if (p.check(.identifier)) return p.parseExprOrAssignStmt();
+        if (p.check(.identifier) or p.check(.keyword_it) or p.check(.keyword_it_index)) return p.parseExprOrAssignStmt();
         if (p.check(.shift_left)) return p.parseDerefAssignOrExprStmt();
-        const expr = try p.parseExpr();
-        _ = try p.expect(.semicolon, "expected semicolon after expression statement", .{});
-        return p.ast.addNode(.expr_stmt, p.ast.mainToken(expr), .{ .lhs = expr });
+        return p.parseExprOrAssignStmt();
+    }
+
+    fn parseDirectiveIf(p: *Parser, tok: Token.Index, comptime top_level: bool) anyerror!NodeIndex {
+        const selected = try p.parseDirectiveIfCondition();
+        const has_block = p.check(.l_brace);
+        if (selected) {
+            const chosen = if (has_block)
+                (if (top_level) try p.parseDirectiveIfBlock(tok, true) else try p.parseDirectiveIfBlock(tok, false))
+            else
+                (if (top_level) try p.parseDirectiveIfInlineBranch(tok, true) else try p.parseDirectiveIfInlineBranch(tok, false));
+            try p.skipElseChainFlexible(top_level);
+            return chosen;
+        }
+        if (has_block) {
+            _ = try p.expect(.l_brace, "expected '{{' after #if condition", .{});
+            try p.skipBraceBlock();
+        } else {
+            try p.skipInlineDirectiveBranch(top_level);
+        }
+        if (p.matchDiscard(.keyword_else) or p.matchDiscard(.directive_else)) {
+            if (p.match(.directive_if)) |else_if_tok| return p.parseDirectiveIf(else_if_tok, top_level);
+            if (p.check(.l_brace)) {
+                return if (top_level) try p.parseDirectiveIfBlock(tok, true) else try p.parseDirectiveIfBlock(tok, false);
+            }
+            return if (top_level) try p.parseDirectiveIfInlineBranch(tok, true) else try p.parseDirectiveIfInlineBranch(tok, false);
+        }
+        return if (top_level) try p.emptyStmtList(tok) else try p.emptyStmtList(tok);
+    }
+
+    fn parseDirectiveIfCondition(p: *Parser) anyerror!bool {
+        return try p.parseDirectiveIfOr();
+    }
+
+    fn parseDirectiveIfOr(p: *Parser) anyerror!bool {
+        var value = try p.parseDirectiveIfPrimary();
+        while (p.matchDiscard(.pipe_pipe)) {
+            const rhs = try p.parseDirectiveIfPrimary();
+            value = value or rhs;
+        }
+        return value;
+    }
+
+    fn parseDirectiveIfPrimary(p: *Parser) anyerror!bool {
+        if (p.matchDiscard(.l_paren)) {
+            const value = try p.parseDirectiveIfOr();
+            _ = try p.expect(.r_paren, "expected ')' after #if condition", .{});
+            return value;
+        }
+        if (p.match(.bang)) |_| return !(try p.parseDirectiveIfPrimary());
+        if (p.match(.keyword_is_constant)) |_| {
+            _ = try p.expect(.l_paren, "expected '(' after is_constant in #if condition", .{});
+            _ = try p.parseExpr();
+            _ = try p.expect(.r_paren, "expected ')' after is_constant operand", .{});
+            return false;
+        }
+        const name_tok = try p.expect(.identifier, "expected identifier in #if condition", .{});
+        const name = p.ast.tokenSlice(name_tok);
+        if (std.mem.eql(u8, name, "OS")) {
+            _ = try p.expect(.equal_equal, "expected '==' after OS in #if condition", .{});
+            _ = try p.expect(.dot, "expected '.' before OS enum literal in #if condition", .{});
+            const os_tok = try p.expect(.identifier, "expected OS enum literal in #if condition", .{});
+            return parserHostMatchesOs(p.ast.tokenSlice(os_tok));
+        }
+        return false;
+    }
+
+    fn parseTopLevelDeclListUntilRBrace(p: *Parser, tok: Token.Index) anyerror!NodeIndex {
+        var decls = std.ArrayList(u32).empty;
+        defer decls.deinit(p.allocator);
+        while (!p.check(.r_brace)) {
+            if (p.check(.eof)) return p.failCurrent("expected '}}' after #if block", .{});
+            const decl = try p.parseTopLevelDecl();
+            if (p.ast.tag(decl) == .stmt_list) {
+                try decls.appendSlice(p.allocator, p.ast.extraSlice(p.ast.data(decl).lhs));
+            } else {
+                try decls.append(p.allocator, decl);
+            }
+            _ = p.matchDiscard(.semicolon);
+        }
+        _ = try p.expect(.r_brace, "expected '}}' after #if block", .{});
+        const extra = try p.ast.addExtraSlice(decls.items);
+        return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = @intCast(decls.items.len) });
+    }
+
+    fn parseDirectiveIfBlock(p: *Parser, tok: Token.Index, comptime top_level: bool) anyerror!NodeIndex {
+        _ = try p.expect(.l_brace, "expected '{{' after #if condition", .{});
+        return if (top_level) try p.parseTopLevelDeclListUntilRBrace(tok) else try p.parseStmtListUntilRBrace(tok);
+    }
+
+    fn parseDirectiveIfInlineBranch(p: *Parser, tok: Token.Index, comptime top_level: bool) anyerror!NodeIndex {
+        if (top_level) {
+            const decl = try p.parseTopLevelDecl();
+            const values = [_]u32{decl};
+            const extra = try p.ast.addExtraSlice(&values);
+            return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = 1 });
+        }
+        const stmt = try p.parseStmt();
+        const values = [_]u32{stmt};
+        const extra = try p.ast.addExtraSlice(&values);
+        return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = 1 });
+    }
+
+    fn parseStmtListUntilRBrace(p: *Parser, tok: Token.Index) anyerror!NodeIndex {
+        var stmts = std.ArrayList(u32).empty;
+        defer stmts.deinit(p.allocator);
+        while (!p.check(.r_brace)) {
+            if (p.check(.eof)) return p.failCurrent("expected '}}' after #if block", .{});
+            try stmts.append(p.allocator, try p.parseStmt());
+        }
+        _ = try p.expect(.r_brace, "expected '}}' after #if block", .{});
+        const extra = try p.ast.addExtraSlice(stmts.items);
+        return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = @intCast(stmts.items.len) });
+    }
+
+    fn emptyStmtList(p: *Parser, tok: Token.Index) !NodeIndex {
+        const extra = try p.ast.addExtraSlice(&[_]u32{});
+        return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = 0 });
+    }
+
+    fn skipBraceBlock(p: *Parser) !void {
+        var depth: usize = 1;
+        while (depth > 0) {
+            if (p.check(.eof)) return p.failCurrent("expected '}}' after #if block", .{});
+            if (p.matchDiscard(.l_brace)) {
+                depth += 1;
+            } else if (p.matchDiscard(.r_brace)) {
+                depth -= 1;
+            } else {
+                p.index += 1;
+            }
+        }
+    }
+
+    fn skipElseChainFlexible(p: *Parser, comptime top_level: bool) !void {
+        if (!(p.matchDiscard(.keyword_else) or p.matchDiscard(.directive_else))) return;
+        if (p.matchDiscard(.directive_if)) {
+            _ = try p.parseDirectiveIfCondition();
+            if (p.check(.l_brace)) {
+                _ = try p.expect(.l_brace, "expected '{{' after #if condition", .{});
+                try p.skipBraceBlock();
+            } else {
+                try p.skipInlineDirectiveBranch(top_level);
+            }
+            try p.skipElseChainFlexible(top_level);
+            return;
+        }
+        if (p.check(.l_brace)) {
+            _ = try p.expect(.l_brace, "expected '{{' after else", .{});
+            try p.skipBraceBlock();
+        } else {
+            try p.skipInlineDirectiveBranch(top_level);
+        }
+    }
+
+    fn skipInlineDirectiveBranch(p: *Parser, comptime top_level: bool) !void {
+        _ = top_level;
+        var paren_depth: usize = 0;
+        while (!p.check(.eof)) {
+            const tag = p.peekTag(0);
+            if (paren_depth == 0 and (tag == .keyword_else or tag == .directive_else)) break;
+            p.index += 1;
+            switch (tag) {
+                .l_paren => paren_depth += 1,
+                .r_paren => {
+                    if (paren_depth != 0) paren_depth -= 1;
+                },
+                .semicolon => if (paren_depth == 0) break,
+                else => {},
+            }
+        }
     }
 
     fn parseWhileStmt(p: *Parser) !NodeIndex {
@@ -436,9 +762,9 @@ const Parser = struct {
             const rhs = try p.parseBinaryExpr(6);
             cond = try p.ast.addNode(.binary_expr, eq_tok, .{ .lhs = cond, .rhs = rhs });
         }
-        // Handle remaining low-precedence operators (!=, &&, ||) after == check.
+        // Handle remaining low-precedence operators after the first == check.
         while (true) {
-            if (p.match(.bang_equal)) |op_tok| {
+            if (p.match(.equal_equal) orelse p.match(.bang_equal)) |op_tok| {
                 const rhs = try p.parseBinaryExpr(6);
                 cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
             } else if (p.match(.ampersand_ampersand)) |op_tok| {
@@ -510,14 +836,23 @@ const Parser = struct {
         _ = p.matchDiscard(.star);
         // Named iterator: "for i: 0..5 { }" or "for number: 1..5 print(...)"
         var iterator_tok: u32 = 0;
-        if (p.check(.identifier) and p.peekTag(1) == .colon) {
+        var index_tok: u32 = 0;
+        if (p.matchDiscard(.colon)) _ = try p.expect(.identifier, "expected for-expansion name after ':'", .{});
+        if (p.checkIdentifierLike() and p.peekTag(1) == .comma and (p.peekTag(2) == .identifier or p.peekTag(2) == .keyword_it or p.peekTag(2) == .keyword_it_index) and p.peekTag(3) == .colon) {
+            iterator_tok = p.index;
+            index_tok = p.index + 2;
+            p.index += 4;
+        } else if (p.checkIdentifierLike() and p.peekTag(1) == .colon) {
             iterator_tok = p.index;
             p.index += 2; // consume name and ':'
         }
         const start_expr = try p.parseExpr();
         if (!p.matchDiscard(.dot_dot)) {
             // Iterable-form: "for collection { }"
-            const iterable_extra = if (iterator_tok != 0) blk: {
+            const iterable_extra = if (index_tok != 0) blk: {
+                const iterable_values = [_]u32{ start_expr, iterator_tok | 0x80000000, index_tok };
+                break :blk try p.ast.addExtraSlice(&iterable_values);
+            } else if (iterator_tok != 0) blk: {
                 const iterable_values = [_]u32{ start_expr, iterator_tok | 0x80000000 };
                 break :blk try p.ast.addExtraSlice(&iterable_values);
             } else blk: {
@@ -540,6 +875,14 @@ const Parser = struct {
         const lhs = try p.parseUnary();
         if (p.matchDiscard(.equal)) {
             const rhs = try p.parseExpr();
+            _ = try p.expect(.semicolon, "expected semicolon after dereference assignment", .{});
+            return p.ast.addNode(.assign_stmt, p.ast.mainToken(lhs), .{ .lhs = lhs, .rhs = rhs });
+        }
+        if (p.peekTag(0) == .plus_equal or p.peekTag(0) == .minus_equal or p.peekTag(0) == .star_equal or p.peekTag(0) == .slash_equal or p.peekTag(0) == .ampersand_equal or p.peekTag(0) == .pipe_equal or p.peekTag(0) == .pipe_pipe_equal or p.peekTag(0) == .caret_equal) {
+            const op_tok = p.index;
+            p.index += 1;
+            const rhs_expr = try p.parseExpr();
+            const rhs = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = lhs, .rhs = rhs_expr });
             _ = try p.expect(.semicolon, "expected semicolon after dereference assignment", .{});
             return p.ast.addNode(.assign_stmt, p.ast.mainToken(lhs), .{ .lhs = lhs, .rhs = rhs });
         }
@@ -613,7 +956,7 @@ const Parser = struct {
                     try stmts.append(p.allocator, try p.ast.addNode(.assign_stmt, name_tok, .{ .lhs = lhs, .rhs = init }));
                 }
             }
-        } else if (p.peekTag(0) == .plus_equal or p.peekTag(0) == .minus_equal or p.peekTag(0) == .star_equal or p.peekTag(0) == .slash_equal or p.peekTag(0) == .ampersand_equal or p.peekTag(0) == .pipe_equal or p.peekTag(0) == .caret_equal) {
+        } else if (p.peekTag(0) == .plus_equal or p.peekTag(0) == .minus_equal or p.peekTag(0) == .star_equal or p.peekTag(0) == .slash_equal or p.peekTag(0) == .ampersand_equal or p.peekTag(0) == .pipe_equal or p.peekTag(0) == .pipe_pipe_equal or p.peekTag(0) == .caret_equal) {
             const op_tok = p.index;
             p.index += 1;
             const rhs_expr = try p.parseExpr();
@@ -633,9 +976,15 @@ const Parser = struct {
     }
 
     fn parseLocalTypedDecl(p: *Parser) !NodeIndex {
-        const name_tok = try p.expect(.identifier, "expected local variable name", .{});
+        const name_tok = try p.expectIdentifierLike("expected local variable name", .{});
         _ = try p.expect(.colon, "expected ':' in local declaration", .{});
+        if (p.matchDiscard(.equal)) {
+            const init = try p.parseExpr();
+            _ = try p.expect(.semicolon, "expected semicolon after local declaration", .{});
+            return p.ast.addNode(.var_decl, name_tok, .{ .lhs = null_node, .rhs = init });
+        }
         const type_expr = try p.parseTypeExpr();
+        try p.consumeDeclModifiers();
         const init = if (p.matchDiscard(.equal)) blk: {
             if (p.match(.triple_minus)) |tok| break :blk try p.ast.addNode(.undefined_literal, tok, .{});
             break :blk try p.parseExpr();
@@ -645,7 +994,7 @@ const Parser = struct {
     }
 
     fn parseLocalInferredDecl(p: *Parser) !NodeIndex {
-        const name_tok = try p.expect(.identifier, "expected local variable name", .{});
+        const name_tok = try p.expectIdentifierLike("expected local variable name", .{});
         _ = try p.expect(.colon_equal, "expected ':=' in local declaration", .{});
         const init = try p.parseExpr();
         if (nodeAllowsImplicitTerminator(&p.ast, init)) {
@@ -657,8 +1006,45 @@ const Parser = struct {
     }
 
     fn parseLocalConstDecl(p: *Parser) !NodeIndex {
-        const name_tok = try p.expect(.identifier, "expected local constant name", .{});
+        const name_tok = try p.expectIdentifierLike("expected local constant name", .{});
         _ = try p.expect(.colon_colon, "expected '::' in local constant declaration", .{});
+        if (p.check(.keyword_inline) or p.check(.keyword_no_inline) or p.check(.l_paren)) {
+            return p.parseProcDeclAfterName(name_tok);
+        }
+        if (p.match(.directive_import)) |tok| {
+            const value = try p.parseImportLikeDirective(tok, "expected module string after #import");
+            _ = try p.expect(.semicolon, "expected semicolon after import", .{});
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_library)) |tok| {
+            const value = try p.parseImportLikeDirective(tok, "expected library string after #library");
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_system_library)) |tok| {
+            const value = try p.parseImportLikeDirective(tok, "expected library string after #system_library");
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_foreign_library)) |tok| {
+            const value = try p.parseImportLikeDirective(tok, "expected library string after #foreign_library");
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.match(.directive_type) != null) {
+            while (p.matchDiscard(.comma)) _ = try p.expect(.identifier, "expected #type modifier after ','", .{});
+            const value = try p.parseTypeExpr();
+            try p.consumeProcModifiers();
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
+        if (p.check(.directive_code)) {
+            const tok = p.index;
+            p.index += 1;
+            const value = try p.parseOpaqueDirectiveExpr(tok);
+            _ = p.matchDiscard(.semicolon);
+            return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
+        }
         const value = try p.parseTypeOrExpr();
         if (nodeAllowsImplicitTerminator(&p.ast, value)) {
             _ = p.matchDiscard(.semicolon);
@@ -700,18 +1086,109 @@ const Parser = struct {
             p.index += 1;
             const rhs_expr = try p.parseExpr();
             const rhs = if (op == .equal) rhs_expr else try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = lhs, .rhs = rhs_expr });
-            _ = try p.expect(.semicolon, "expected semicolon after assignment", .{});
+            if (nodeAllowsImplicitTerminator(&p.ast, rhs)) {
+                _ = p.matchDiscard(.semicolon);
+            } else {
+                _ = try p.expect(.semicolon, "expected semicolon after assignment", .{});
+            }
             return p.ast.addNode(.assign_stmt, p.ast.mainToken(lhs), .{ .lhs = lhs, .rhs = rhs });
         }
         _ = try p.expect(.semicolon, "expected semicolon after expression statement", .{});
         return p.ast.addNode(.expr_stmt, p.ast.mainToken(lhs), .{ .lhs = lhs });
     }
 
+    fn looksLikeAnonymousProc(p: *Parser) bool {
+        if (!p.check(.l_paren)) return false;
+        switch (p.peekTag(1)) {
+            .r_paren, .identifier, .keyword_using, .dollar, .dollar_dollar => {},
+            else => return false,
+        }
+        var idx = p.index + 1;
+        var depth: usize = 1;
+        while (idx < p.tokens.len) : (idx += 1) {
+            switch (p.tokens[idx].tag) {
+                .l_paren => depth += 1,
+                .r_paren => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const next = if (idx + 1 < p.tokens.len) p.tokens[idx + 1].tag else .eof;
+                        return next == .l_brace or next == .arrow or next == .fat_arrow;
+                    }
+                },
+                .dot, .l_bracket, .equal_equal, .bang_equal, .less_than, .less_equal, .greater_than, .greater_equal,
+                .ampersand_ampersand, .pipe_pipe, .plus, .minus, .star, .slash, .percent => if (depth == 1) return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn parseAnonymousProcExpr(p: *Parser) anyerror!NodeIndex {
+        const name_tok: Token.Index = 0;
+        _ = try p.expect(.l_paren, "expected opening paren in anonymous procedure", .{});
+        var params = std.ArrayList(u32).empty;
+        defer params.deinit(p.allocator);
+        if (!p.check(.r_paren)) {
+            while (true) {
+                const is_using_param = p.matchDiscard(.keyword_using);
+                _ = p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar);
+                const param_name = if (p.check(.identifier)) blk: {
+                    const tok = p.index;
+                    p.index += 1;
+                    break :blk tok;
+                } else 0;
+                var is_variadic_param = false;
+                var param_type: NodeIndex = null_node;
+                var param_init: NodeIndex = null_node;
+                if (p.matchDiscard(.colon)) {
+                    is_variadic_param = p.matchDiscard(.dot_dot);
+                    param_type = try p.parseTypeExpr();
+                    if (p.matchDiscard(.equal)) param_init = try p.parseExpr();
+                } else if (p.matchDiscard(.colon_equal)) {
+                    param_init = try p.parseExpr();
+                } else if (param_name != 0) {
+                    p.index -= 1;
+                    const synth = p.index;
+                    p.index += 1;
+                    const param = try p.ast.addNode(.var_decl, synth, .{ .lhs = try p.ast.addNode(.type_expr, synth, .{}), .rhs = null_node });
+                    try params.append(p.allocator, param);
+                    if (!p.matchDiscard(.comma)) break;
+                    continue;
+                } else return p.failCurrent("expected parameter name", .{});
+                const rhs: u32 = if (is_variadic_param) 1 else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
+                const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = rhs });
+                try params.append(p.allocator, param);
+                if (!p.matchDiscard(.comma)) break;
+            }
+        }
+        _ = try p.expect(.r_paren, "expected ')' after parameter list", .{});
+        if (p.matchDiscard(.fat_arrow)) {
+            const expr = try p.parseExpr();
+            const ret = try p.ast.addNode(.return_stmt, p.ast.mainToken(expr), .{ .lhs = expr });
+            const stmts = [_]u32{ret};
+            const stmts_extra = try p.ast.addExtraSlice(&stmts);
+            const body = try p.ast.addNode(.block, name_tok, .{ .lhs = stmts_extra, .rhs = 1 });
+            const params_extra = try p.ast.addExtraSlice(params.items);
+            const sig_values = [_]u32{ params_extra, null_node };
+            const sig_extra = try p.ast.addExtraSlice(&sig_values);
+            return p.ast.addNode(.proc_decl, name_tok, .{ .lhs = body, .rhs = sig_extra });
+        }
+        var named_returns = std.ArrayList(u32).empty;
+        defer named_returns.deinit(p.allocator);
+        const return_type = if (p.matchDiscard(.arrow)) try p.parseProcReturnSpec(&named_returns) else null_node;
+        var body = try p.parseBlock();
+        if (named_returns.items.len != 0) body = try p.prependBlockDecls(body, named_returns.items);
+        const params_extra = try p.ast.addExtraSlice(params.items);
+        const sig_values = [_]u32{ params_extra, return_type };
+        const sig_extra = try p.ast.addExtraSlice(&sig_values);
+        return p.ast.addNode(.proc_decl, name_tok, .{ .lhs = body, .rhs = sig_extra });
+    }
+
     fn parseAssignStmt(p: *Parser) !NodeIndex {
-        const name_tok = try p.expect(.identifier, "expected assignment target", .{});
+        const name_tok = try p.expectIdentifierLike("expected assignment target", .{});
         const lhs = try p.ast.addNode(.identifier, name_tok, .{});
         const op = p.peekTag(0);
-        if (!(op == .equal or op == .plus_equal or op == .minus_equal or op == .star_equal or op == .slash_equal or op == .ampersand_equal or op == .pipe_equal or op == .caret_equal)) return p.failCurrent("expected assignment operator", .{});
+        if (!(op == .equal or op == .plus_equal or op == .minus_equal or op == .star_equal or op == .slash_equal or op == .ampersand_equal or op == .pipe_equal or op == .pipe_pipe_equal or op == .caret_equal)) return p.failCurrent("expected assignment operator", .{});
         p.index += 1;
             const op_tok = p.index - 1;
             const rhs_expr = try p.parseExpr();
@@ -719,7 +1196,11 @@ const Parser = struct {
             const lhs_copy = try p.ast.addNode(.identifier, name_tok, .{});
             break :blk try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = lhs_copy, .rhs = rhs_expr });
         };
-        _ = try p.expect(.semicolon, "expected semicolon after assignment", .{});
+        if (nodeAllowsImplicitTerminator(&p.ast, rhs)) {
+            _ = p.matchDiscard(.semicolon);
+        } else {
+            _ = try p.expect(.semicolon, "expected semicolon after assignment", .{});
+        }
         return p.ast.addNode(.assign_stmt, name_tok, .{ .lhs = lhs, .rhs = rhs });
     }
 
@@ -755,13 +1236,20 @@ const Parser = struct {
             defer params.deinit(p.allocator);
             if (!p.check(.r_paren)) {
                 while (true) {
+                    _ = p.matchDiscard(.keyword_using);
+                    _ = p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar);
+                    _ = p.matchDiscard(.dot_dot);
+                    if (p.check(.identifier) and p.peekTag(1) == .colon) {
+                        p.index += 2;
+                        _ = p.matchDiscard(.dot_dot);
+                    }
                     try params.append(p.allocator, try p.parseTypeExpr());
                     if (!p.matchDiscard(.comma)) break;
                 }
             }
             _ = try p.expect(.r_paren, "expected ')' after procedure type parameters", .{});
-            _ = try p.expect(.arrow, "expected '->' in procedure type", .{});
-            const ret = try p.parseTypeExpr();
+            const ret = if (p.matchDiscard(.arrow)) try p.parseTypeExpr() else try p.ast.addNode(.type_expr, tok, .{});
+            try p.consumeProcModifiers();
             const extra = try p.ast.addExtraSlice(params.items);
             return p.ast.addNode(.proc_type, tok, .{ .lhs = extra, .rhs = ret });
         }
@@ -777,11 +1265,30 @@ const Parser = struct {
             _ = try p.expect(.r_paren, "expected ')' after type_info operand", .{});
             return p.ast.addNode(.type_of_expr, tok, .{ .lhs = operand });
         }
+        const has_dollar = p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar);
         const tok = p.index;
-        if (p.match(.identifier) != null or p.match(.keyword_void) != null) {
+        if ((has_dollar and p.match(.identifier) != null) or p.match(.identifier) != null or p.match(.keyword_void) != null) {
             while (true) {
                 if (p.matchDiscard(.dot)) {
+                    if (p.matchDiscard(.l_bracket)) {
+                        var depth: usize = 1;
+                        while (depth > 0) {
+                            if (p.check(.eof)) return p.failCurrent("expected ']' after type-index expression", .{});
+                            const tag = p.peekTag(0);
+                            p.index += 1;
+                            switch (tag) {
+                                .l_bracket => depth += 1,
+                                .r_bracket => depth -= 1,
+                                else => {},
+                            }
+                        }
+                        continue;
+                    }
                     _ = try p.expect(.identifier, "expected identifier after '.' in type expression", .{});
+                    continue;
+                }
+                if (p.matchDiscard(.slash)) {
+                    if (p.matchDiscard(.keyword_interface)) _ = try p.expect(.identifier, "expected interface name after /interface", .{}) else _ = try p.expect(.identifier, "expected identifier after '/' in type expression", .{});
                     continue;
                 }
                 if (p.matchDiscard(.l_paren)) {
@@ -809,6 +1316,53 @@ const Parser = struct {
         if (p.check(.keyword_struct) or p.check(.keyword_union) or p.check(.keyword_enum) or p.check(.keyword_enum_flags)) return p.parseTypeExpr();
         if ((p.check(.identifier) or p.check(.keyword_void)) and p.peekTag(1) == .semicolon) return p.parseTypeExpr();
         return p.parseExpr();
+    }
+
+    fn lparenTypeIsFollowedByArrow(p: *const Parser) bool {
+        if (!p.check(.l_paren)) return false;
+        var idx = p.index;
+        var depth: usize = 0;
+        while (idx < p.tokens.len) : (idx += 1) {
+            switch (p.tokens[idx].tag) {
+                .l_paren => depth += 1,
+                .r_paren => {
+                    depth -= 1;
+                    if (depth == 0) return idx + 1 < p.tokens.len and p.tokens[idx + 1].tag == .arrow;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn parseOpaqueProcTypeExpr(p: *Parser) !NodeIndex {
+        const tok = try p.expect(.l_paren, "expected '(' in procedure type", .{});
+        try p.skipBalancedParensAfterOpen();
+        if (p.matchDiscard(.arrow)) {
+            if (p.matchDiscard(.l_paren)) {
+                try p.skipBalancedParensAfterOpen();
+            } else {
+                _ = try p.parseTypeExpr();
+            }
+        }
+        try p.consumeProcModifiers();
+        const empty = try p.ast.addExtraSlice(&[_]u32{});
+        const ret = try p.ast.addNode(.type_expr, tok, .{});
+        return p.ast.addNode(.proc_type, tok, .{ .lhs = empty, .rhs = ret });
+    }
+
+    fn skipBalancedParensAfterOpen(p: *Parser) !void {
+        var depth: usize = 1;
+        while (depth > 0) {
+            if (p.check(.eof)) return p.failCurrent("expected ')' in procedure type", .{});
+            const tag = p.peekTag(0);
+            p.index += 1;
+            switch (tag) {
+                .l_paren => depth += 1,
+                .r_paren => depth -= 1,
+                else => {},
+            }
+        }
     }
 
     fn parseRunArrowBlock(p: *Parser, tok: Token.Index) !NodeIndex {
@@ -884,6 +1438,10 @@ const Parser = struct {
                 expr = try p.ast.addNode(.field_access, dot_tok, .{ .lhs = expr, .rhs = field_tok });
                 continue;
             }
+            if (p.match(.dot_star)) |dot_tok| {
+                expr = try p.ast.addNode(.unary_expr, dot_tok, .{ .lhs = expr });
+                continue;
+            }
             if (p.match(.l_bracket)) |tok| {
                 const index_expr = try p.parseExpr();
                 _ = try p.expect(.r_bracket, "expected ']' after subscript expression", .{});
@@ -905,6 +1463,7 @@ const Parser = struct {
                             try args.append(p.allocator, try p.ast.addNode(.unary_expr, spread_tok, .{ .lhs = operand }));
                         } else if (astNodeIsIdentifierName(&p.ast, expr, "New")) try args.append(p.allocator, try p.parseTypeExpr()) else try args.append(p.allocator, try p.parseExpr());
                         if (!p.matchDiscard(.comma)) break;
+                        if (p.check(.r_paren)) break;
                     }
                 }
                 _ = try p.expect(.r_paren, "expected closing paren after call arguments", .{});
@@ -963,8 +1522,16 @@ const Parser = struct {
     }
 
     fn parseContainerType(p: *Parser, node_tag: Node.Tag, tok: Token.Index) !NodeIndex {
-        if (!p.check(.l_brace)) {
-            while (!p.check(.l_brace) and !p.check(.eof)) p.index += 1;
+        while (!p.check(.l_brace) and !p.check(.eof)) {
+            if (p.matchDiscard(.directive_modify)) {
+                if (p.check(.l_brace)) {
+                    try p.skipBalancedBraces();
+                } else {
+                    while (!p.check(.l_brace) and !p.check(.eof)) p.index += 1;
+                }
+                continue;
+            }
+            p.index += 1;
         }
         _ = try p.expect(.l_brace, "expected '{{' after container type", .{});
         var depth: usize = 1;
@@ -983,6 +1550,26 @@ const Parser = struct {
     }
 
     fn parsePrimary(p: *Parser) !NodeIndex {
+        if (p.check(.l_paren) and p.looksLikeAnonymousProc()) {
+            return p.parseAnonymousProcExpr();
+        }
+        if (p.check(.identifier) and p.peekTag(1) == .fat_arrow) {
+            const param_name = try p.expect(.identifier, "expected lambda parameter name", .{});
+            _ = try p.expect(.fat_arrow, "expected '=>' after lambda parameter", .{});
+            const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = null_node, .rhs = null_node });
+            const body = if (p.check(.l_brace)) try p.parseBlock() else blk: {
+                const expr = try p.parseExpr();
+                const ret = try p.ast.addNode(.return_stmt, p.ast.mainToken(expr), .{ .lhs = expr });
+                const stmts = [_]u32{ret};
+                const stmts_extra = try p.ast.addExtraSlice(&stmts);
+                break :blk try p.ast.addNode(.block, param_name, .{ .lhs = stmts_extra, .rhs = 1 });
+            };
+            const params_extra = try p.ast.addExtraSlice(&[_]u32{param});
+            const sig_values = [_]u32{ params_extra, null_node };
+            const sig_extra = try p.ast.addExtraSlice(&sig_values);
+            return p.ast.addNode(.proc_decl, param_name, .{ .lhs = body, .rhs = sig_extra });
+        }
+        if (p.check(.l_bracket)) return p.parseTypeExpr();
         if (p.match(.directive_run)) |tok| {
             if (p.check(.comma) or p.check(.arrow)) return p.parseRunArrowBlock(tok);
             if (p.check(.l_brace)) return p.ast.addNode(.run_expr, tok, .{ .lhs = try p.parseBlock() });
@@ -994,8 +1581,39 @@ const Parser = struct {
             const operand = try p.parseExpr();
             return p.ast.addNode(.run_expr, tok, .{ .lhs = operand });
         }
+        if (p.match(.directive_procedure_name)) |tok| {
+            if (p.matchDiscard(.l_paren)) _ = try p.expect(.r_paren, "expected ')' after #procedure_name", .{});
+            return p.ast.addNode(.string_literal, tok, .{ .lhs = tok });
+        }
+        if (p.match(.directive_file)) |tok| return p.ast.addNode(.string_literal, tok, .{ .lhs = tok });
+        if (p.match(.directive_filepath)) |tok| return p.ast.addNode(.string_literal, tok, .{ .lhs = tok });
+        if (p.match(.directive_line)) |tok| return p.ast.addNode(.integer_literal, tok, .{ .lhs = tok });
+        if (p.match(.directive_caller_code)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
+        if (p.match(.directive_caller_location)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
+        if (p.match(.directive_location)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
+        if (p.match(.directive_type) != null) return p.parseTypeExpr();
+        if (p.match(.directive_code)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
+        if (p.match(.directive_insert)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
+        if (p.match(.directive_this)) |_| {
+            if (p.matchDiscard(.l_paren)) {
+                const operand = try p.parseExpr();
+                _ = try p.expect(.r_paren, "expected ')' after #this", .{});
+                return operand;
+            }
+            return try p.ast.addNode(.identifier, 0, .{});
+        }
+        if (p.match(.directive_procedure_of_call)) |_| {
+            const operand = try p.parseExpr();
+            if (p.ast.tag(operand) == .call_expr) return p.ast.data(operand).lhs;
+            return operand;
+        }
         if (p.match(.directive_compile_time)) |tok| {
             return p.ast.addNode(.bool_literal, tok, .{ .lhs = 2 });
+        }
+        if (p.match(.keyword_operator)) |_| {
+            const tok = p.index;
+            if (!p.check(.eof)) p.index += 1;
+            return p.ast.addNode(.identifier, tok, .{});
         }
         if (p.match(.directive_char)) |tok| {
             const str_tok = try p.expect(.string_literal, "expected string literal after #char", .{});
@@ -1005,12 +1623,13 @@ const Parser = struct {
             const operand = try p.parseUnary();
             return p.ast.addNode(.unary_expr, tok, .{ .lhs = operand });
         }
-        if (p.match(.keyword_ifx)) |tok| {
+        if (p.match(.keyword_ifx) orelse p.match(.directive_ifx)) |tok| {
             const cond = try p.parseExpr();
             var then_expr = cond;
             var else_expr: NodeIndex = null_node;
             if (p.matchDiscard(.keyword_then)) {
                 then_expr = try p.parseExpr();
+                _ = p.matchDiscard(.semicolon);
                 _ = try p.expect(.keyword_else, "expected 'else' in ifx expression", .{});
                 else_expr = try p.parseExpr();
             } else if (p.matchDiscard(.keyword_else)) {
@@ -1043,7 +1662,10 @@ const Parser = struct {
                 }
             }
             _ = try p.expect(.l_paren, "expected '(' after cast", .{});
-            const target_ty = try p.parseTypeExpr();
+            const target_ty = if (p.check(.l_paren))
+                try p.parseOpaqueProcTypeExpr()
+            else
+                try p.parseTypeExpr();
             if (p.matchDiscard(.dot)) _ = try p.expect(.identifier, "expected cast mode after '.'", .{});
             _ = try p.expect(.r_paren, "expected ')' after cast type", .{});
             const operand = try p.parseUnary();
@@ -1097,10 +1719,22 @@ const Parser = struct {
             var values = std.ArrayList(u32).empty;
             defer values.deinit(p.allocator);
             if (!p.check(.r_brace)) {
-                try values.append(p.allocator, try p.parseExpr());
-                while (p.matchDiscard(.comma)) {
-                    if (p.check(.r_brace)) break;
+                const is_named = p.check(.identifier) and p.peekTag(1) == .equal;
+                if (is_named) {
+                    while (true) {
+                        const field_tok = try p.expect(.identifier, "expected field name in aggregate literal", .{});
+                        _ = try p.expect(.equal, "expected '=' after aggregate field name", .{});
+                        const value = try p.parseExpr();
+                        const lhs = try p.ast.addNode(.identifier, field_tok, .{});
+                        try values.append(p.allocator, try p.ast.addNode(.assign_stmt, field_tok, .{ .lhs = lhs, .rhs = value }));
+                        if (!p.matchDiscard(.comma) or p.check(.r_brace)) break;
+                    }
+                } else {
                     try values.append(p.allocator, try p.parseExpr());
+                    while (p.matchDiscard(.comma)) {
+                        if (p.check(.r_brace)) break;
+                        try values.append(p.allocator, try p.parseExpr());
+                    }
                 }
             }
             _ = try p.expect(.r_brace, "expected '}}' after aggregate literal", .{});
@@ -1122,6 +1756,10 @@ const Parser = struct {
             _ = try p.expect(.r_paren, "expected ')' after parenthesized expression", .{});
             return expr;
         }
+        if (p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar)) {
+            const ident = try p.expect(.identifier, "expected identifier after '$'", .{});
+            return p.ast.addNode(.identifier, ident, .{});
+        }
         if (p.match(.identifier)) |tok| return p.ast.addNode(.identifier, tok, .{});
         if (p.match(.keyword_it)) |tok| return p.ast.addNode(.identifier, tok, .{});
         if (p.match(.keyword_it_index)) |tok| return p.ast.addNode(.identifier, tok, .{});
@@ -1139,8 +1777,56 @@ const Parser = struct {
         return p.failCurrent("expected expression", .{});
     }
 
+    fn parseAsmStmt(p: *Parser, tok: Token.Index) !NodeIndex {
+        while (p.matchDiscard(.comma)) _ = try p.expect(.identifier, "expected #asm modifier after ','", .{});
+        while (p.check(.identifier)) {
+            p.index += 1;
+            _ = p.matchDiscard(.comma);
+        }
+        try p.skipBalancedBraces();
+        const block = try p.emptyBlock(tok);
+        return p.ast.addNode(.meta_stmt, tok, .{ .lhs = block, .rhs = null_node });
+    }
+
+    fn parseOpaqueDirectiveExpr(p: *Parser, tok: Token.Index) !NodeIndex {
+        while (p.matchDiscard(.comma)) {
+            const modifier_tok = try p.expect(.identifier, "expected directive modifier after ','", .{});
+            if (std.mem.eql(u8, p.ast.tokenSlice(modifier_tok), "scope") and p.matchDiscard(.l_paren)) {
+                _ = try p.expect(.r_paren, "expected ')' after scope modifier", .{});
+            }
+        }
+        if (p.matchDiscard(.arrow)) {
+            const return_type = try p.parseTypeExpr();
+            const block = try p.parseBlock();
+            return p.ast.addNode(.meta_expr, tok, .{ .lhs = block, .rhs = return_type });
+        }
+        if (p.matchDiscard(.l_paren)) {
+            const operand = if (p.check(.r_paren)) null_node else try p.parseExpr();
+            _ = try p.expect(.r_paren, "expected ')' after directive expression", .{});
+            return p.ast.addNode(.meta_expr, tok, .{ .lhs = operand, .rhs = null_node });
+        }
+        if (p.check(.l_brace)) {
+            const block = try p.parseBlock();
+            return p.ast.addNode(.meta_expr, tok, .{ .lhs = block, .rhs = null_node });
+        }
+        if (p.tokens[tok].tag == .directive_code) {
+            while (!p.check(.semicolon) and !p.check(.eof)) p.index += 1;
+            return p.ast.addNode(.meta_expr, tok, .{ .lhs = null_node, .rhs = null_node });
+        }
+        if (p.check(.semicolon) or p.check(.comma) or p.check(.r_paren) or p.check(.r_brace)) {
+            return p.ast.addNode(.meta_expr, tok, .{ .lhs = null_node, .rhs = null_node });
+        }
+        const operand = try p.parseExpr();
+        return p.ast.addNode(.meta_expr, tok, .{ .lhs = operand, .rhs = null_node });
+    }
+
     fn expect(p: *Parser, tag: Tag, comptime fmt: []const u8, args: anytype) !Token.Index {
         if (p.match(tag)) |tok| return tok;
+        return p.failCurrent(fmt, args);
+    }
+
+    fn expectIdentifierLike(p: *Parser, comptime fmt: []const u8, args: anytype) !Token.Index {
+        if (p.match(.identifier) orelse p.match(.keyword_it) orelse p.match(.keyword_it_index)) |tok| return tok;
         return p.failCurrent(fmt, args);
     }
 
@@ -1155,6 +1841,7 @@ const Parser = struct {
 
     fn matchDiscard(p: *Parser, tag: Tag) bool { return p.match(tag) != null; }
     fn check(p: *const Parser, tag: Tag) bool { return p.tokens[p.index].tag == tag; }
+    fn checkIdentifierLike(p: *const Parser) bool { return p.check(.identifier) or p.check(.keyword_it) or p.check(.keyword_it_index); }
     fn peekTag(p: *const Parser, offset: usize) Tag { return p.tokens[@min(p.index + offset, p.tokens.len - 1)].tag; }
 
     fn failCurrent(p: *const Parser, comptime fmt: []const u8, args: anytype) error{CompilationFailed} {
@@ -1172,10 +1859,14 @@ fn astValueIsRunBlock(ast: *const Ast, node: NodeIndex) bool {
     return ast.tag(node) == .run_expr and ast.data(node).lhs != null_node and ast.tag(ast.data(node).lhs) == .block;
 }
 
+fn astValueIsMultilineDirectiveString(ast: *const Ast, node: NodeIndex) bool {
+    return ast.tag(node) == .string_literal and ast.data(node).lhs != 0 and ast.tokens[ast.data(node).lhs].tag == .directive_string;
+}
+
 fn nodeAllowsImplicitTerminator(ast: *const Ast, node: NodeIndex) bool {
-    if (astValueIsRunBlock(ast, node)) return true;
+    if (astValueIsRunBlock(ast, node) or astValueIsMultilineDirectiveString(ast, node)) return true;
     return switch (ast.tag(node)) {
-        .struct_type, .union_type, .enum_type => true,
+        .struct_type, .union_type, .enum_type, .proc_decl => true,
         else => false,
     };
 }
@@ -1207,6 +1898,15 @@ fn binaryPrecedence(tag: Tag) ?u8 {
         .star, .slash, .percent => 20,
         .plus, .minus => 10,
         else => null,
+    };
+}
+
+fn parserHostMatchesOs(name: []const u8) bool {
+    return switch (builtin.target.os.tag) {
+        .windows => std.mem.eql(u8, name, "WINDOWS"),
+        .linux => std.mem.eql(u8, name, "LINUX"),
+        .macos => std.mem.eql(u8, name, "MACOS") or std.mem.eql(u8, name, "DARWIN"),
+        else => false,
     };
 }
 
@@ -1469,6 +2169,66 @@ test "parser accepts top-level assert and placeholder directives" {
     try std.testing.expectEqualStrings("TRUTH", ast.tokenSlice(ast.mainToken(@intCast(decls[1]))));
 }
 
+test "parser accepts spaced directives and inline directive if branches" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "# import \"Basic\";\n" ++
+        "# if OS == .MACOS value :: #string END\n" ++
+        "hello\n" ++
+        "END\n" ++
+        "else value :: \"nope\";\n" ++
+        "main :: () {\n" ++
+        " #if OS == .MACOS return;\n" ++
+        " #asm AVX { add x, y; }\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "inline_directive_if.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    try std.testing.expectEqual(@as(usize, 3), decls.len);
+    try std.testing.expectEqual(Node.Tag.const_decl, ast.tag(@intCast(decls[1])));
+    const main_decl: NodeIndex = @intCast(decls[2]);
+    const stmts = ast.extraSlice(ast.data(ast.data(main_decl).lhs).lhs);
+    try std.testing.expectEqual(@as(usize, 2), stmts.len);
+    try std.testing.expectEqual(Node.Tag.stmt_list, ast.tag(@intCast(stmts[0])));
+    try std.testing.expectEqual(Node.Tag.meta_stmt, ast.tag(@intCast(stmts[1])));
+}
+
+test "parser separates opaque meta directives from executable run" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "code :: #code x := 1;\n" ++
+        "main :: () {\n" ++
+        " #asm { mov rax, rax }\n" ++
+        " a := #caller_code;\n" ++
+        " #run print(\"x\");\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "meta_split.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    try std.testing.expectEqual(Node.Tag.const_decl, ast.tag(@intCast(decls[0])));
+    try std.testing.expectEqual(Node.Tag.meta_expr, ast.tag(ast.data(@intCast(decls[0])).lhs));
+    const main_decl: NodeIndex = @intCast(decls[1]);
+    const stmts = ast.extraSlice(ast.data(ast.data(main_decl).lhs).lhs);
+    try std.testing.expectEqual(Node.Tag.meta_stmt, ast.tag(@intCast(stmts[0])));
+    try std.testing.expectEqual(Node.Tag.var_decl, ast.tag(@intCast(stmts[1])));
+    try std.testing.expectEqual(Node.Tag.meta_expr, ast.tag(ast.data(@intCast(stmts[1])).rhs));
+    try std.testing.expectEqual(Node.Tag.run_expr, ast.tag(@intCast(stmts[2])));
+}
+
 test "parser accepts starred iterable for syntax" {
     const lexer = @import("lexer.zig");
     const source =
@@ -1493,4 +2253,110 @@ test "parser accepts starred iterable for syntax" {
     const stmts = ast.extraSlice(ast.data(block).lhs);
     try std.testing.expectEqual(@as(usize, 1), stmts.len);
     try std.testing.expectEqual(Node.Tag.for_stmt, ast.tag(@intCast(stmts[0])));
+}
+
+test "parser selects top-level #if branch for host OS" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "#if OS == .WINDOWS {\n" ++
+        " WindowsThing :: 1;\n" ++
+        "} else {\n" ++
+        " OtherThing :: 2;\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "top_level_if.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    try std.testing.expectEqual(@as(usize, 1), decls.len);
+    const decl: NodeIndex = @intCast(decls[0]);
+    try std.testing.expectEqual(Node.Tag.const_decl, ast.tag(decl));
+    const expected_name = if (builtin.target.os.tag == .windows) "WindowsThing" else "OtherThing";
+    try std.testing.expectEqualStrings(expected_name, ast.tokenSlice(ast.mainToken(decl)));
+}
+
+test "parser selects statement #if branch for host OS" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "#import \"Basic\";\n" ++
+        "main :: () {\n" ++
+        " x := 1;\n" ++
+        " #if OS == .WINDOWS {\n" ++
+        "  x = 2;\n" ++
+        " } else {\n" ++
+        "  x = 3;\n" ++
+        " }\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "stmt_if.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    const main_decl: NodeIndex = @intCast(decls[1]);
+    const block = ast.data(main_decl).lhs;
+    const stmts = ast.extraSlice(ast.data(block).lhs);
+    try std.testing.expectEqual(@as(usize, 2), stmts.len);
+    try std.testing.expectEqual(Node.Tag.var_decl, ast.tag(@intCast(stmts[0])));
+    try std.testing.expectEqual(Node.Tag.stmt_list, ast.tag(@intCast(stmts[1])));
+}
+
+test "parser accepts procedure_name anonymous procs and inline call statements" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "#import \"Basic\";\n" ++
+        "main :: () {\n" ++
+        " print(\"%\", #procedure_name());\n" ++
+        " inline test_local(1);\n" ++
+        " f := () -> int { return 1; };\n" ++
+        " g := () { };\n" ++
+        " x := () -> int { return 2; }();\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "anon_proc_surface.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    const main_decl: NodeIndex = @intCast(decls[1]);
+    const block = ast.data(main_decl).lhs;
+    const stmts = ast.extraSlice(ast.data(block).lhs);
+    try std.testing.expectEqual(Node.Tag.expr_stmt, ast.tag(@intCast(stmts[0])));
+    try std.testing.expectEqual(Node.Tag.expr_stmt, ast.tag(@intCast(stmts[1])));
+    try std.testing.expectEqual(Node.Tag.var_decl, ast.tag(@intCast(stmts[2])));
+    try std.testing.expectEqual(Node.Tag.var_decl, ast.tag(@intCast(stmts[3])));
+    try std.testing.expectEqual(Node.Tag.var_decl, ast.tag(@intCast(stmts[4])));
+}
+
+test "parser accepts polymorph and using parameter forms" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "convert :: (arg: $T) {}\n" ++
+        "arr_sum :: (a: [] $T) -> T { return result; }\n" ++
+        "channel_write :: (using c: *Channel($T, $n), data: T) {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "poly_proc_surface.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    try std.testing.expectEqual(@as(usize, 3), decls.len);
+    for (decls) |decl| try std.testing.expectEqual(Node.Tag.proc_decl, ast.tag(@intCast(decl)));
 }

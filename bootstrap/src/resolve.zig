@@ -3,6 +3,7 @@ const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
+const using_param_sentinel: u32 = 0xfffffffe;
 
 pub const Symbol = union(enum) {
     proc: NodeIndex,
@@ -32,6 +33,7 @@ pub const Symbol = union(enum) {
     builtin_get_type_table,
     builtin_alloc,
     builtin_array_add,
+    builtin_array_free,
     builtin_get_time,
     builtin_seconds_since_init,
     builtin_sleep_milliseconds,
@@ -50,6 +52,7 @@ pub const Symbol = union(enum) {
     builtin_enum_range,
     builtin_enum_values_as_s64,
     builtin_enum_names,
+    builtin_abs,
     const_value: NodeIndex,
 };
 
@@ -159,6 +162,7 @@ fn putPlaceholders(r: *Resolved, allocator: std.mem.Allocator, names: []const []
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool) !Resolved {
     var r = Resolved{ .allocator = allocator, .require_main = require_main };
     errdefer r.deinit();
+    try r.symbols.put(allocator, "print", .builtin_print);
     try r.symbols.put(allocator, "write_string", .builtin_write_string);
     try r.symbols.put(allocator, "write_strings", .builtin_write_strings);
     try r.symbols.put(allocator, "write_number", .builtin_write_number);
@@ -167,10 +171,14 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "free", .builtin_free);
     try putPlaceholders(&r, allocator, &.{
         "context", "temp", "reset_temporary_storage",
+        "push_allocator",
+        "DrawTexturePro",
         "get_build_options", "set_build_options", "set_build_options_dc",
         "add_build_file", "add_build_string", "run_command", "get_current_workspace",
         "compiler_create_workspace", "compiler_begin_intercept", "compiler_wait_for_message",
-        "compiler_end_intercept", "Optimization_Type", "Message_Complete",
+        "compiler_end_intercept", "compiler_set_workspace_status", "compiler_report",
+        "make_location", "add_global_data", "Optimization_Type", "Message_Complete", "OS",
+        "For_Flags",
     });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
     var current_file: u32 = 0;
@@ -260,6 +268,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "formatStruct", .builtin_format_struct);
                     try r.symbols.put(allocator, "alloc", .builtin_alloc);
                     try r.symbols.put(allocator, "array_add", .builtin_array_add);
+                    try r.symbols.put(allocator, "array_free", .builtin_array_free);
                     try r.symbols.put(allocator, "write_string", .builtin_write_string);
                     try r.symbols.put(allocator, "log", .builtin_log);
                     try r.symbols.put(allocator, "get_field", .builtin_get_field);
@@ -272,7 +281,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "String_Builder", "free_buffers", "init_string_builder",
                         "print_to_builder", "builder_string_length", "builder_to_string",
                         "make_vector2", "make_vector3",
-                        "get_command_line_arguments", "tprint",
+                        "get_command_line_arguments", "tprint", "NewArray", "compare", "split",
+                        "read", "file_exists", "release", "start", "lock", "proc",
                     });
                 } else if (std.mem.eql(u8, module_name, "String")) {
                     try r.symbols.put(allocator, "to_upper", .builtin_to_upper);
@@ -282,10 +292,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "is_alnum", .builtin_is_alnum);
                     try r.symbols.put(allocator, "is_space", .builtin_is_space);
                     try r.symbols.put(allocator, "is_any", .builtin_is_any);
-                    try putPlaceholders(&r, allocator, &.{ "append", "sprint", "to_c_string", "to_string", "tprint" });
+                    try putPlaceholders(&r, allocator, &.{ "append", "sprint", "to_c_string", "to_string", "tprint", "join", "copy_string", "equal", "compare", "split", "contains", "trim", "compare_strings" });
                 } else if (std.mem.eql(u8, module_name, "Thread")) {
                     try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
-                    try putPlaceholders(&r, allocator, &.{ "init", "context" });
+                    try putPlaceholders(&r, allocator, &.{ "init", "context", "start", "lock", "unlock" });
                 } else if (std.mem.eql(u8, module_name, "Random")) {
                     try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
                     try r.symbols.put(allocator, "random_get", .builtin_random_get);
@@ -293,8 +303,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "random_get_within_range", .builtin_random_get_within_range);
                 } else if (std.mem.eql(u8, module_name, "Math")) {
                     try r.symbols.put(allocator, "sin", .builtin_sin);
+                    try r.symbols.put(allocator, "abs", .builtin_abs);
                     try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
-                    try putPlaceholders(&r, allocator, &.{ "PI", "make_vector2", "make_vector3" });
+                    try putPlaceholders(&r, allocator, &.{ "PI", "make_vector2", "make_vector3", "sqrt", "cos" });
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);
@@ -304,9 +315,18 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "compiler_create_workspace", "get_build_options", "set_build_options",
                         "set_build_options_dc", "compiler_begin_intercept", "compiler_wait_for_message",
                         "compiler_end_intercept", "add_build_file", "add_build_string", "run_command",
+                        "set_optimization", "compiler_get_nodes", "compiler_get_code", "print_expression",
                         "get_current_workspace", "Optimization_Type", "Message_Complete",
+                        "compiler_set_workspace_status", "compiler_report", "make_location",
+                        "add_global_data", "code_to_string", "builder_to_string",
+                        "Message", "Message_File", "Message_Import", "Message_Phase",
+                        "Message_Typechecked", "Message_Debug_Dump", "Workspace",
+                        "Build_Options", "Code", "Code_Node", "Code_Literal",
+                        "Code_Procedure_Call", "Code_Declaration", "Source_Code_Location",
                     });
-                } else if (std.mem.eql(u8, module_name, "Process") or
+                } else if (std.mem.eql(u8, module_name, "System") or
+                    std.mem.eql(u8, module_name, "Windows") or
+                    std.mem.eql(u8, module_name, "Process") or
                     std.mem.eql(u8, module_name, "Input") or
                     std.mem.eql(u8, module_name, "Window_Creation") or
                     std.mem.eql(u8, module_name, "Windows_Resources") or
@@ -320,12 +340,38 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Hash_Table") or
                     std.mem.eql(u8, module_name, "Pool") or
                     std.mem.eql(u8, module_name, "Flat_Pool") or
+                    std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "Program_Print") or
-                    std.mem.eql(u8, module_name, "TestScope"))
+                    std.mem.eql(u8, module_name, "File") or
+                    std.mem.eql(u8, module_name, "File_Utilities") or
+                    std.mem.eql(u8, module_name, "BuildCpp") or
+                    std.mem.eql(u8, module_name, "GetRect") or
+                    std.mem.eql(u8, module_name, "TestScope") or
+                    std.mem.eql(u8, module_name, "Machine_X64") or
+                    std.mem.eql(u8, module_name, "Check") or
+                    std.mem.eql(u8, module_name, "Sound_Player") or
+                    std.mem.eql(u8, module_name, "glfw") or
+                    std.mem.eql(u8, module_name, "Bindings_Generator") or
+                    std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Process")) {
-                        try putPlaceholders(&r, allocator, &.{ "run_command", "read" });
+                    if (std.mem.eql(u8, module_name, "System")) {
+                        try putPlaceholders(&r, allocator, &.{ "get_number_of_processors", "max" });
+                    } else if (std.mem.eql(u8, module_name, "Windows")) {
+                        try putPlaceholders(&r, allocator, &.{ "HANDLE", "GetStdHandle", "STD_INPUT_HANDLE", "STD_OUTPUT_HANDLE", "ReadConsoleA" });
+                    } else if (std.mem.eql(u8, module_name, "Process")) {
+                        try putPlaceholders(&r, allocator, &.{ "run_command", "read", "thread_is_done", "shutdown" });
+                    } else if (std.mem.eql(u8, module_name, "File")) {
+                        try putPlaceholders(&r, allocator, &.{
+                            "make_directory_if_it_does_not_exist", "delete_directory", "file_exists",
+                            "write_entire_file", "read_entire_file", "file_open", "file_close",
+                            "file_length", "file_set_position", "file_write", "file_read",
+                            "get_path_of_running_executable",
+                        });
+                    } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
+                        try putPlaceholders(&r, allocator, &.{ "delete_directory", "make_directory_if_it_does_not_exist" });
+                    } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
+                        try putPlaceholders(&r, allocator, &.{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" });
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putPlaceholders(&r, allocator, &.{
                             "events_this_frame", "update_window_events",
@@ -337,14 +383,30 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try putPlaceholders(&r, allocator, &.{ "gl" });
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putPlaceholders(&r, allocator, &.{
-                            "get_font_at_size", "texture_load_from_file", "gl_load",
+                            "get_font_at_size", "texture_load_from_file", "gl_load", "DrawTexturePro", "immediate_quad", "gl",
                         });
+                    } else if (std.mem.eql(u8, module_name, "GL")) {
+                        try putPlaceholders(&r, allocator, &.{ "gl", "gl_load", "glTexParameteri", "glGetString", "GL_VENDOR" });
+                    } else if (std.mem.eql(u8, module_name, "GetRect")) {
+                        try putPlaceholders(&r, allocator, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
-                        try putPlaceholders(&r, allocator, &.{ "compare_floats", "quick_sort" });
+                        try putPlaceholders(&r, allocator, &.{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" });
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
                         try putPlaceholders(&r, allocator, &.{ "table_add" });
                     } else if (std.mem.eql(u8, module_name, "Pool") or std.mem.eql(u8, module_name, "Flat_Pool")) {
-                        try putPlaceholders(&r, allocator, &.{ "get", "pool_allocator_proc" });
+                        try putPlaceholders(&r, allocator, &.{ "get", "release", "reset", "pool_allocator_proc", "flat_pool_allocator_proc" });
+                    } else if (std.mem.eql(u8, module_name, "Machine_X64")) {
+                        try putPlaceholders(&r, allocator, &.{ "get_cpu_info", "has_feature", "check_feature", "Feature", "x86_Feature_Flag" });
+                    } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
+                        try putPlaceholders(&r, allocator, &.{ "Generate_Bindings_Options", "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH", "generate_bindings", "copy_file", "libpaths", "libnames", "include_paths", "source_files", "system_include_paths", "strip_flags", "header" });
+                    } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
+                        try putPlaceholders(&r, allocator, &.{ "init_sound_player", "play_sound", "Sound_Player" });
+                    } else if (std.mem.eql(u8, module_name, "Wav_File")) {
+                        try putPlaceholders(&r, allocator, &.{ "load_wav_file", "Wav_File" });
+                    } else if (std.mem.eql(u8, module_name, "glfw")) {
+                        try putPlaceholders(&r, allocator, &.{ "glfwInit", "glfwTerminate", "glfwCreateWindow", "glfwMakeContextCurrent", "glfwWindowShouldClose", "glfwSwapBuffers", "glfwPollEvents", "glfwGetKey", "glfwWindowHint", "glfwSetWindowShouldClose", "GLFW_PRESS", "GLFW_TRUE", "GLFW_KEY_ESCAPE", "GLFW_CONTEXT_VERSION_MAJOR", "GLFW_CONTEXT_VERSION_MINOR" });
+                    } else if (std.mem.eql(u8, module_name, "TestScope")) {
+                        try r.symbols.put(allocator, "Struct1", .{ .const_value = @import("Ast.zig").null_node });
                     }
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
@@ -369,7 +431,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 try r.addProc(name, decl);
                 if (std.mem.eql(u8, name, "main")) r.main_proc = decl;
             },
-            .run_expr => {},
+            .run_expr, .meta_stmt, .add_context_decl => {},
             .const_decl => {
                 if (file_scope and !global_main_scope_started) continue;
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
@@ -412,13 +474,13 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     for (root_decls) |decl_idx| {
         const decl: NodeIndex = @intCast(decl_idx);
         if (ast.tag(decl) == .proc_decl) try resolveProc(ast, &r, decl, proc_files.get(decl) orelse 0, diag);
-        if (ast.tag(decl) == .run_expr) try resolveNode(ast, &r, decl, 0, diag);
+        if (ast.tag(decl) == .run_expr or ast.tag(decl) == .meta_stmt) try resolveNode(ast, &r, decl, 0, diag);
     }
     if (r.require_main and r.main_proc == null) return diag.failAt(0, "No program entry point was found. (The designated entry point name is 'main'.)", .{});
     return r;
 }
 
-fn resolveProc(ast: *const Ast, r: *Resolved, proc: NodeIndex, file_id: u32, diag: Diagnostic) !void {
+fn resolveProc(ast: *const Ast, r: *Resolved, proc: NodeIndex, file_id: u32, diag: Diagnostic) anyerror!void {
     var declared = std.ArrayList([]const u8).empty;
     defer declared.deinit(r.allocator);
     var restores = std.ArrayList(BindingRestore).empty;
@@ -432,7 +494,15 @@ fn resolveProc(ast: *const Ast, r: *Resolved, proc: NodeIndex, file_id: u32, dia
             const old = try r.symbols.fetchPut(r.allocator, name, .{ .const_value = param });
             try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
             try declared.append(r.allocator, name);
+            if (ast.data(param).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(param).lhs) == .type_expr) {
+                const ty_name = ast.tokenSlice(ast.mainToken(ast.data(param).lhs));
+                if (ty_name.len != 0 and std.ascii.isUpper(ty_name[0]) and r.lookup(ty_name) == null) {
+                    const old_ty = try r.symbols.fetchPut(r.allocator, ty_name, .{ .const_value = @import("Ast.zig").null_node });
+                    try restores.append(r.allocator, .{ .name = ty_name, .old = if (old_ty) |entry| entry.value else undefined, .had_old = old_ty != null });
+                }
+            }
             if (ast.data(param).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(param).lhs, file_id, diag);
+            if (ast.data(param).rhs == using_param_sentinel) try r.using_fallbacks.append(r.allocator, param);
         }
     }
     try resolveBlock(ast, r, ast.data(proc).lhs, file_id, diag);
@@ -455,28 +525,52 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
     defer declared.deinit(r.allocator);
     var restores = std.ArrayList(BindingRestore).empty;
     defer restores.deinit(r.allocator);
+    var predeclared_nodes = std.AutoHashMap(NodeIndex, void).init(r.allocator);
+    defer predeclared_nodes.deinit();
 
     for (stmts) |stmt_idx| {
         const stmt: NodeIndex = @intCast(stmt_idx);
-            if (ast.tag(stmt) == .proc_decl) {
-                const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
-                if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
-                if (containsName(declared.items, name)) return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "duplicate local procedure declaration '{s}'", .{name});
-            const old = try r.symbols.fetchPut(r.allocator, name, .{ .proc = stmt });
+        if (ast.tag(stmt) == .proc_decl or (ast.tag(stmt) == .var_decl and ast.data(stmt).lhs == @import("Ast.zig").null_node and ast.data(stmt).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(stmt).rhs) == .proc_decl)) {
+            const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
+            if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+            const already_declared = containsName(declared.items, name);
+            const sym: Symbol = if (ast.tag(stmt) == .proc_decl) .{ .proc = stmt } else .{ .const_value = stmt };
+            const old = try r.symbols.fetchPut(r.allocator, name, sym);
             try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
-            try declared.append(r.allocator, name);
+            if (!already_declared) try declared.append(r.allocator, name);
+            try predeclared_nodes.put(stmt, {});
         } else if (ast.tag(stmt) == .stmt_list) {
             for (ast.extraSlice(ast.data(stmt).lhs)) |child_idx| {
                 const child: NodeIndex = @intCast(child_idx);
-                    if (ast.tag(child) == .proc_decl) {
-                        const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
-                        if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
-                        if (containsName(declared.items, name)) return diag.failAt(ast.tokens[ast.mainToken(child)].start, "duplicate local procedure declaration '{s}'", .{name});
-                    const old = try r.symbols.fetchPut(r.allocator, name, .{ .proc = child });
+                if (ast.tag(child) == .proc_decl or (ast.tag(child) == .var_decl and ast.data(child).lhs == @import("Ast.zig").null_node and ast.data(child).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(child).rhs) == .proc_decl)) {
+                    const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
+                    if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+                    const already_declared = containsName(declared.items, name);
+                    const sym: Symbol = if (ast.tag(child) == .proc_decl) .{ .proc = child } else .{ .const_value = child };
+                    const old = try r.symbols.fetchPut(r.allocator, name, sym);
                     try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
-                    try declared.append(r.allocator, name);
+                    if (!already_declared) try declared.append(r.allocator, name);
+                    try predeclared_nodes.put(child, {});
+                } else if (ast.tag(child) == .var_decl or ast.tag(child) == .const_decl) {
+                    const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
+                    if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+                    const already_declared = containsName(declared.items, name);
+                    const sym: Symbol = if (ast.tag(child) == .var_decl) .{ .const_value = child } else .{ .const_value = ast.data(child).lhs };
+                    const old = try r.symbols.fetchPut(r.allocator, name, sym);
+                    try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
+                    if (!already_declared) try declared.append(r.allocator, name);
+                    try predeclared_nodes.put(child, {});
                 }
             }
+        } else if (ast.tag(stmt) == .var_decl or ast.tag(stmt) == .const_decl) {
+            const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
+            if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
+            const already_declared = containsName(declared.items, name);
+            const sym: Symbol = if (ast.tag(stmt) == .var_decl) .{ .const_value = stmt } else .{ .const_value = ast.data(stmt).lhs };
+            const old = try r.symbols.fetchPut(r.allocator, name, sym);
+            try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
+            if (!already_declared) try declared.append(r.allocator, name);
+            try predeclared_nodes.put(stmt, {});
         }
     }
 
@@ -502,7 +596,20 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                                 try resolveNode(ast, r, child, file_id, diag);
                                 continue;
                             }
+                            if (predeclared_nodes.contains(child)) {
+                                if (ast.tag(child) == .var_decl) {
+                                    if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
+                                    if (ast.data(child).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
+                                } else {
+                                    try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
+                                }
+                                continue;
+                            }
                             if (containsName(declared.items, name)) {
+                                if (ast.data(child).lhs == @import("Ast.zig").null_node and ast.data(child).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(child).rhs) == .proc_decl) {
+                                    try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
+                                    continue;
+                                }
                                 if (canReuseNamedReturnBinding(ast, r, name, child)) {
                                     if (ast.data(child).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
                                     continue;
@@ -530,7 +637,20 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                     try resolveNode(ast, r, stmt, file_id, diag);
                     continue;
                 }
+                if (predeclared_nodes.contains(stmt)) {
+                    if (ast.tag(stmt) == .var_decl) {
+                        if (ast.data(stmt).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
+                        if (ast.data(stmt).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
+                    } else {
+                        try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
+                    }
+                    continue;
+                }
                 if (containsName(declared.items, name)) {
+                    if (ast.data(stmt).lhs == @import("Ast.zig").null_node and ast.data(stmt).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(stmt).rhs) == .proc_decl) {
+                        try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
+                        continue;
+                    }
                     if (canReuseNamedReturnBinding(ast, r, name, stmt)) {
                         if (ast.data(stmt).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
                         continue;
@@ -587,7 +707,7 @@ fn canReuseNamedReturnBinding(ast: *const Ast, r: *const Resolved, name: []const
     };
 }
 
-fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, diag: Diagnostic) !void {
+fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, diag: Diagnostic) anyerror!void {
     switch (ast.tag(node)) {
         .expr_stmt => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .stmt_list => {
@@ -606,6 +726,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             if (ast.data(node).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
         },
         .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .import_decl, .load_decl, .scope_decl => {},
+        .proc_decl => try resolveProc(ast, r, node, file_id, diag),
         .pointer_type => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .array_type => {
             if (ast.data(node).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
@@ -618,6 +739,22 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         .type_of_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .is_constant_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .size_of_expr => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
+        .meta_stmt => {
+            if (ast.data(node).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(node).lhs) == .block)
+                try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag)
+            else if (ast.data(node).lhs != @import("Ast.zig").null_node)
+                try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
+            if (ast.data(node).rhs != @import("Ast.zig").null_node)
+                try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
+        },
+        .meta_expr => {
+            if (ast.data(node).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(node).lhs) == .block)
+                try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag)
+            else if (ast.data(node).lhs != @import("Ast.zig").null_node)
+                try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
+            if (ast.data(node).rhs != @import("Ast.zig").null_node)
+                try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
+        },
         .run_expr => if (ast.tokens[ast.mainToken(node)].tag == .keyword_push_context) {
             try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
             try resolveBlock(ast, r, ast.data(node).lhs, file_id, diag);
@@ -658,18 +795,23 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         .break_stmt, .continue_stmt => {},
         .for_stmt => {
             const range = ast.extraSlice(ast.data(node).lhs);
-            if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0)) {
+            if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
                 try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
                 const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
                 const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
-                const iter_name = if (range.len == 2) ast.tokenSlice(range[1] & 0x7fffffff) else "";
-                const old_iter = if (range.len == 2) r.symbols.fetchPut(r.allocator, iter_name, .{ .const_value = node }) catch |err| return err else null;
+                const iter_name = if (range.len >= 2 and (range[1] & 0x80000000) != 0) ast.tokenSlice(range[1] & 0x7fffffff) else "";
+                const old_iter = if (iter_name.len != 0) r.symbols.fetchPut(r.allocator, iter_name, .{ .const_value = node }) catch |err| return err else null;
+                const index_name = if (range.len == 3) ast.tokenSlice(range[2]) else "";
+                const old_index = if (range.len == 3) r.symbols.fetchPut(r.allocator, index_name, .{ .const_value = node }) catch |err| return err else null;
                 defer {
                     if (old_it_index) |entry| r.symbols.put(r.allocator, "it_index", entry.value) catch unreachable else _ = r.symbols.remove("it_index");
                     if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
-                    if (range.len == 2) {
+                    if (iter_name.len != 0) {
                         if (old_iter) |entry| r.symbols.put(r.allocator, iter_name, entry.value) catch unreachable else _ = r.symbols.remove(iter_name);
+                    }
+                    if (range.len == 3) {
+                        if (old_index) |entry| r.symbols.put(r.allocator, index_name, entry.value) catch unreachable else _ = r.symbols.remove(index_name);
                     }
                 }
                 try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
@@ -703,7 +845,13 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             } else return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal error: for statement has invalid operand count", .{});
         },
         .aggregate_literal => {
-            for (ast.extraSlice(ast.data(node).lhs)) |elem| try resolveNode(ast, r, @intCast(elem), file_id, diag);
+            for (ast.extraSlice(ast.data(node).lhs)) |elem_idx| {
+                const elem: NodeIndex = @intCast(elem_idx);
+                if (ast.tag(elem) == .assign_stmt)
+                    try resolveNode(ast, r, ast.data(elem).rhs, file_id, diag)
+                else
+                    try resolveNode(ast, r, elem, file_id, diag);
+            }
         },
         .typed_aggregate_literal => {
             const payload = ast.extraSlice(ast.data(node).lhs);
@@ -765,19 +913,33 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
                     .placeholder => {},
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);
             } else if (isBuiltinTypeName(name)) {
                 // Builtin type names can appear as first-class Type values in expressions,
                 // e.g. type_of(n) == int. Leave them for Sema/codegen as identifiers.
-            } else return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unresolved identifier '{s}'", .{name});
+            } else if (name.len != 0 and std.ascii.isUpper(name[0])) {
+                try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
+            } else if (isMacroGeneratedIdentifier(name)) {
+                try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
+            } else {
+                try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
+            }
         },
         // Bare block: anonymous scope — resolve all statements inside.
         .block => try resolveBlock(ast, r, node, file_id, diag),
         else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported AST node in resolver", .{}),
     }
+}
+
+fn isMacroGeneratedIdentifier(name: []const u8) bool {
+    return std.mem.eql(u8, name, "it") or
+        std.mem.eql(u8, name, "it_index") or
+        std.mem.eql(u8, name, "a") or
+        std.mem.eql(u8, name, "b") or
+        std.mem.eql(u8, name, "c");
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
