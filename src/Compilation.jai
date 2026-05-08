@@ -28,8 +28,9 @@ compile_source_with_options :: (input_path: string, output_path: string, runtime
     resolved := resolve(*ast, *diag, !check_only);
     pool := intern_pool_init();
     typed := sema_analyze(*ast, *resolved, *pool, *diag);
-    program := bytecode_generate(*ast, *typed, *resolved, *diag);
     if diag.failed return .FAILED;
     if check_only return .OK;
+    program := bytecode_generate(*ast, *typed, *resolved, *diag);
+    if diag.failed return .FAILED;
     return .FAILED;
 }

@@ -94,7 +94,55 @@ sema_analyze_node :: (ast: *Ast, typed: *Typed, node: Node_Index, diag: *Diagnos
         ty = type_any();
     } else if tag == .type_expr || tag == .struct_type || tag == .union_type || tag == .enum_type || tag == .proc_type {
         ty = type_init(TYPE_TYPE);
-    } else if tag == .return_stmt || tag == .expr_stmt || tag == .assign_stmt || tag == .meta_stmt || tag == .run_expr {
+    } else if tag == .if_stmt {
+        data := ast_data(ast, node);
+        sema_analyze_node(ast, typed, data.lhs, diag);
+        count := ast_extra_count(ast, data.rhs);
+        i := 0;
+        while i < count {
+            sema_analyze_node(ast, typed, ast_extra_at(ast, data.rhs, i), diag);
+            i += 1;
+        }
+        ty = type_void();
+    } else if tag == .while_stmt {
+        data := ast_data(ast, node);
+        sema_analyze_node(ast, typed, data.lhs, diag);
+        sema_analyze_node(ast, typed, data.rhs, diag);
+        ty = type_void();
+    } else if tag == .call_expr {
+        data := ast_data(ast, node);
+        sema_analyze_node(ast, typed, data.lhs, diag);
+        count := ast_extra_count(ast, data.rhs);
+        i := 0;
+        while i < count {
+            sema_analyze_node(ast, typed, ast_extra_at(ast, data.rhs, i), diag);
+            i += 1;
+        }
+        ty = type_any();
+    } else if tag == .binary_expr {
+        data := ast_data(ast, node);
+        sema_analyze_node(ast, typed, data.lhs, diag);
+        sema_analyze_node(ast, typed, data.rhs, diag);
+        op := ast.tokens.items[ast_main_token(ast, node)].tag;
+        if op == .equal_equal || op == .bang_equal || op == .less_than || op == .less_equal || op == .greater_than || op == .greater_equal || op == .ampersand_ampersand || op == .pipe_pipe {
+            ty = type_bool();
+        } else {
+            ty = type_init(S64_TYPE);
+        }
+    } else if tag == .unary_expr {
+        data := ast_data(ast, node);
+        inner := sema_analyze_node(ast, typed, data.lhs, diag);
+        op := ast.tokens.items[ast_main_token(ast, node)].tag;
+        if op == .bang ty = type_bool();
+        else ty = inner;
+    } else if tag == .identifier || tag == .field_access || tag == .index_expr || tag == .size_of_expr || tag == .type_of_expr {
+        data := ast_data(ast, node);
+        if data.lhs != NULL_NODE sema_analyze_node(ast, typed, data.lhs, diag);
+        if data.rhs != NULL_NODE sema_analyze_node(ast, typed, data.rhs, diag);
+        if tag == .size_of_expr ty = type_init(S64_TYPE);
+        else if tag == .type_of_expr ty = type_init(TYPE_TYPE);
+        else ty = type_any();
+    } else if tag == .return_stmt || tag == .expr_stmt || tag == .assign_stmt || tag == .meta_stmt || tag == .run_expr || tag == .break_stmt || tag == .continue_stmt || tag == .defer_stmt {
         data := ast_data(ast, node);
         if data.lhs != NULL_NODE sema_analyze_node(ast, typed, data.lhs, diag);
         if data.rhs != NULL_NODE sema_analyze_node(ast, typed, data.rhs, diag);

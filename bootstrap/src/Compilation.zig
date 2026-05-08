@@ -63,10 +63,10 @@ pub const Compilation = struct {
         try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
         try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
 
+        if (comp.options.check_only) return;
+
         var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
         defer bytecode.deinit();
-
-        if (comp.options.check_only) return;
 
         const object_path = try std.fmt.allocPrint(comp.allocator, "{s}.o", .{comp.options.output_path});
         defer comp.allocator.free(object_path);
