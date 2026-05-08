@@ -216,6 +216,18 @@ export fn __openjai_string_equal(lhs_data: [*]const u8, lhs_len: usize, rhs_data
     return c.memcmp(lhs_data, rhs_data, lhs_len) == 0;
 }
 
+export fn __openjai_string_slice(source: ?*OpenJaiRuntimeString, start_raw: i64, len_raw: i64) ?*OpenJaiRuntimeString {
+    const src = source orelse return makeRuntimeString("");
+    const start: usize = if (start_raw < 0) 0 else @intCast(start_raw);
+    if (start >= src.len) return makeRuntimeString("");
+    const requested: usize = if (len_raw < 0) 0 else @intCast(len_raw);
+    const len = @min(requested, src.len - start);
+    const header_raw = c.malloc(@sizeOf(OpenJaiRuntimeString)) orelse return null;
+    const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
+    header.* = .{ .len = len, .data = src.data + start };
+    return header;
+}
+
 export fn __openjai_array_add(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) ?*anyopaque {
     const slot_ptr = slot orelse @panic("array_add on null array slot");
     if (elem_size == 0) return null;

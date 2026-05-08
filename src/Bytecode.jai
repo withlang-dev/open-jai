@@ -69,6 +69,7 @@ Opcode :: enum {
     compiler_read_file;
     string_len;
     string_data;
+    string_slice;
     string_index;
     cmp_lt_int;
     cmp_le_int;

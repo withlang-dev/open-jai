@@ -69,6 +69,7 @@ pub const Opcode = enum(u8) {
     compiler_read_file,
     string_len,
     string_data,
+    string_slice,
     string_index,
     cmp_lt_int,
     cmp_le_int,
@@ -100,10 +101,10 @@ pub const Instruction = struct {
     dest: u32 = 0,
     arg1: u32 = 0,
     arg2: u32 = 0,
-        arg3: u32 = 0,
-        arg4: u32 = 0,
-        arg5: u32 = 0,
-        source_node: u32 = 0,
+    arg3: u32 = 0,
+    arg4: u32 = 0,
+    arg5: u32 = 0,
+    source_node: u32 = 0,
 };
 
 pub const ProcBytecode = struct {
@@ -124,7 +125,9 @@ pub const Program = struct {
     procs: std.ArrayList(ProcBytecode) = .empty,
     main_proc: ?u32 = null,
 
-    pub fn init(allocator: std.mem.Allocator) Program { return .{ .allocator = allocator }; }
+    pub fn init(allocator: std.mem.Allocator) Program {
+        return .{ .allocator = allocator };
+    }
 
     pub fn deinit(p: *Program) void {
         for (p.strings.items) |s| p.allocator.free(s);

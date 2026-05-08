@@ -761,28 +761,12 @@ const Parser = struct {
     fn parseIfStmt(p: *Parser) !NodeIndex {
         const if_tok = try p.expect(.keyword_if, "expected if", .{});
         _ = p.matchDiscard(.directive_complete);
-        // Parse the condition stopping before == so we can detect if-case syntax.
-        // parseBinaryExpr(6) handles <, <=, >, >=, +, -, *, /, %, &, |, ^, shifts,
-        // and parenthesized expressions (which may contain ==).
-        var cond = try p.parseBinaryExpr(6);
-        if (p.match(.equal_equal)) |eq_tok| {
-            if (p.matchDiscard(.l_brace)) return p.parseIfCaseStmt(if_tok, cond);
-            const rhs = try p.parseBinaryExpr(6);
-            cond = try p.ast.addNode(.binary_expr, eq_tok, .{ .lhs = cond, .rhs = rhs });
-        }
-        // Handle remaining low-precedence operators after the first == check.
-        while (true) {
-            if (p.match(.equal_equal) orelse p.match(.bang_equal)) |op_tok| {
-                const rhs = try p.parseBinaryExpr(6);
-                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
-            } else if (p.match(.ampersand_ampersand)) |op_tok| {
-                const rhs = try p.parseBinaryExpr(6);
-                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
-            } else if (p.match(.pipe_pipe)) |op_tok| {
-                const rhs = try p.parseBinaryExpr(6);
-                cond = try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = cond, .rhs = rhs });
-            } else break;
-        }
+        const cond = if (p.nextIfCaseEqualsBrace()) {
+            const lhs = try p.parseBinaryExpr(6);
+            _ = try p.expect(.equal_equal, "expected '==' before if-case block", .{});
+            _ = try p.expect(.l_brace, "expected '{{' after if-case '=='", .{});
+            return p.parseIfCaseStmt(if_tok, lhs);
+        } else try p.parseExpr();
         // Optional 'then' keyword before single-statement body.
         _ = p.matchDiscard(.keyword_then);
         const then_block = try p.parseStmtAsBlock();
@@ -790,6 +774,31 @@ const Parser = struct {
         const blocks = [_]u32{ then_block, else_block };
         const blocks_extra = try p.ast.addExtraSlice(&blocks);
         return p.ast.addNode(.if_stmt, if_tok, .{ .lhs = cond, .rhs = blocks_extra });
+    }
+
+    fn nextIfCaseEqualsBrace(p: *Parser) bool {
+        var i = p.index;
+        var parens: i32 = 0;
+        var brackets: i32 = 0;
+        while (i < p.tokens.len) : (i += 1) {
+            const tag = p.tokens[i].tag;
+            if (parens == 0 and brackets == 0) {
+                if (tag == .equal_equal and i + 1 < p.tokens.len and p.tokens[i + 1].tag == .l_brace) return true;
+                if (tag == .keyword_then or tag == .l_brace or tag == .semicolon or tag == .eof) return false;
+            }
+            switch (tag) {
+                .l_paren => parens += 1,
+                .r_paren => {
+                    if (parens > 0) parens -= 1;
+                },
+                .l_bracket => brackets += 1,
+                .r_bracket => {
+                    if (brackets > 0) brackets -= 1;
+                },
+                else => {},
+            }
+        }
+        return false;
     }
 
     fn parseIfCaseStmt(p: *Parser, if_tok: Token.Index, cond: NodeIndex) !NodeIndex {
@@ -1169,8 +1178,7 @@ const Parser = struct {
                         return next == .l_brace or next == .arrow or next == .fat_arrow;
                     }
                 },
-                .dot, .l_bracket, .equal_equal, .bang_equal, .less_than, .less_equal, .greater_than, .greater_equal,
-                .ampersand_ampersand, .pipe_pipe, .plus, .minus, .star, .slash, .percent => if (depth == 1) return false,
+                .dot, .l_bracket, .equal_equal, .bang_equal, .less_than, .less_equal, .greater_than, .greater_equal, .ampersand_ampersand, .pipe_pipe, .plus, .minus, .star, .slash, .percent => if (depth == 1) return false,
                 else => {},
             }
         }
@@ -1244,9 +1252,9 @@ const Parser = struct {
         const op = p.peekTag(0);
         if (!(op == .equal or op == .plus_equal or op == .minus_equal or op == .star_equal or op == .slash_equal or op == .ampersand_equal or op == .pipe_equal or op == .pipe_pipe_equal or op == .caret_equal)) return p.failCurrent("expected assignment operator", .{});
         p.index += 1;
-            const op_tok = p.index - 1;
-            const rhs_expr = try p.parseExpr();
-            const rhs = if (op == .equal) rhs_expr else blk: {
+        const op_tok = p.index - 1;
+        const rhs_expr = try p.parseExpr();
+        const rhs = if (op == .equal) rhs_expr else blk: {
             const lhs_copy = try p.ast.addNode(.identifier, name_tok, .{});
             break :blk try p.ast.addNode(.binary_expr, op_tok, .{ .lhs = lhs_copy, .rhs = rhs_expr });
         };
@@ -1260,13 +1268,10 @@ const Parser = struct {
 
     fn parseTypeExpr(p: *Parser) !NodeIndex {
         if (p.match(.l_bracket)) |tok| {
-            const len_expr = if (p.check(.r_bracket) or p.check(.dot_dot))
-                blk: {
-                    _ = p.matchDiscard(.dot_dot);
-                    break :blk null_node;
-                }
-            else
-                try p.parseExpr();
+            const len_expr = if (p.check(.r_bracket) or p.check(.dot_dot)) blk: {
+                _ = p.matchDiscard(.dot_dot);
+                break :blk null_node;
+            } else try p.parseExpr();
             _ = try p.expect(.r_bracket, "expected ']' after array type length", .{});
             const child = try p.parseTypeExpr();
             return p.ast.addNode(.array_type, tok, .{ .lhs = len_expr, .rhs = child });
@@ -1444,7 +1449,9 @@ const Parser = struct {
         return p.ast.addNode(.run_expr, tok, .{ .lhs = operand });
     }
 
-    fn parseExpr(p: *Parser) anyerror!NodeIndex { return p.parseBinaryExpr(0); }
+    fn parseExpr(p: *Parser) anyerror!NodeIndex {
+        return p.parseBinaryExpr(0);
+    }
 
     fn parseBinaryExpr(p: *Parser, min_prec: u8) anyerror!NodeIndex {
         var lhs = try p.parseUnary();
@@ -1893,10 +1900,18 @@ const Parser = struct {
         return null;
     }
 
-    fn matchDiscard(p: *Parser, tag: Tag) bool { return p.match(tag) != null; }
-    fn check(p: *const Parser, tag: Tag) bool { return p.tokens[p.index].tag == tag; }
-    fn checkIdentifierLike(p: *const Parser) bool { return p.check(.identifier) or p.check(.keyword_it) or p.check(.keyword_it_index); }
-    fn peekTag(p: *const Parser, offset: usize) Tag { return p.tokens[@min(p.index + offset, p.tokens.len - 1)].tag; }
+    fn matchDiscard(p: *Parser, tag: Tag) bool {
+        return p.match(tag) != null;
+    }
+    fn check(p: *const Parser, tag: Tag) bool {
+        return p.tokens[p.index].tag == tag;
+    }
+    fn checkIdentifierLike(p: *const Parser) bool {
+        return p.check(.identifier) or p.check(.keyword_it) or p.check(.keyword_it_index);
+    }
+    fn peekTag(p: *const Parser, offset: usize) Tag {
+        return p.tokens[@min(p.index + offset, p.tokens.len - 1)].tag;
+    }
 
     fn failCurrent(p: *const Parser, comptime fmt: []const u8, args: anytype) error{CompilationFailed} {
         const tok = p.tokens[@min(p.index, p.tokens.len - 1)];
@@ -2347,6 +2362,35 @@ test "parser accepts starred iterable for syntax" {
     const stmts = ast.extraSlice(ast.data(block).lhs);
     try std.testing.expectEqual(@as(usize, 1), stmts.len);
     try std.testing.expectEqual(Node.Tag.for_stmt, ast.tag(@intCast(stmts[0])));
+}
+
+test "parser keeps full disjunction in if condition" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "#import \"Basic\";\n" ++
+        "main :: () {\n" ++
+        " input_path := compiler_arg(1);\n" ++
+        " if input_path == \"-h\" || input_path == \"--help\" {\n" ++
+        "  return;\n" ++
+        " }\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "if_disjunction.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    const main_decl: NodeIndex = @intCast(decls[1]);
+    const block = ast.data(main_decl).lhs;
+    const stmts = ast.extraSlice(ast.data(block).lhs);
+    try std.testing.expectEqual(Node.Tag.if_stmt, ast.tag(@intCast(stmts[1])));
+    const cond = ast.data(@intCast(stmts[1])).lhs;
+    try std.testing.expectEqual(Node.Tag.binary_expr, ast.tag(cond));
+    try std.testing.expectEqual(Tag.pipe_pipe, ast.tokens[ast.mainToken(cond)].tag);
 }
 
 test "parser selects top-level #if branch for host OS" {
