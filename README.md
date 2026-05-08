@@ -74,6 +74,31 @@ out/bootstrap/lib/openjai_runtime.o
 out/zig-cache/
 ```
 
+Build the current staged compiler chain:
+
+```sh
+make build
+```
+
+Today this means:
+
+```text
+stage0: Zig bootstrap seed
+stage1: Jai compiler source built by stage0
+```
+
+The Makefile also defines the later self-hosting checks:
+
+```sh
+make stage2
+make stage3
+make fixpoint
+```
+
+These are intentionally strict and are not expected to pass until the Jai-built
+compiler can compile `src/main.jai`. `make fixpoint` byte-compares the stage2
+and stage3 compiler outputs once both stages exist.
+
 Build the currently supported example subset:
 
 ```sh

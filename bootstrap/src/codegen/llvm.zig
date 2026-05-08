@@ -546,6 +546,14 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const ptr_value = switch (registers[inst.arg1].kind) {
                     .pointer => registers[inst.arg1].llvm_value,
                     .int, .int_addr, .bool => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.arg1], diag), env.ptr_ty, "free_inttoptr"),
+                    .string => c.LLVMBuildPointerCast(env.builder, registers[inst.arg1].llvm_value, env.ptr_ty, "free_strptr"),
+                    .runtime_string => blk: {
+                        var data_indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 1, 0)};
+                        const data_ptr_ptr = c.LLVMBuildGEP2(env.builder, env.llvm_i64, registers[inst.arg1].llvm_value, &data_indices, data_indices.len, "free_runtime_strdata_slot");
+                        const data_ptr_int = c.LLVMBuildLoad2(env.builder, env.llvm_i64, data_ptr_ptr, "free_runtime_strdata_int");
+                        break :blk c.LLVMBuildIntToPtr(env.builder, data_ptr_int, env.ptr_ty, "free_runtime_strdata");
+                    },
+                    .undefined_string => c.LLVMConstNull(env.ptr_ty),
                     else => return diag.failAt(0, "LLVM backend free_heap requires a pointer-compatible register", .{}),
                 };
                 var args = [_]c.LLVMValueRef{ptr_value};
@@ -743,6 +751,20 @@ fn valueAsBool(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMVal
         .bool => value.llvm_value,
         .int, .int_addr, .type_id, .void_value => c.LLVMBuildICmp(env.builder, c.LLVMIntNE, try valueAsInt(env, value, diag), c.LLVMConstInt(env.llvm_i64, 0, 0), "tobool"),
         .pointer => c.LLVMBuildICmp(env.builder, c.LLVMIntNE, c.LLVMBuildPtrToInt(env.builder, value.llvm_value, env.llvm_i64, "ptrtoint_bool"), c.LLVMConstInt(env.llvm_i64, 0, 0), "ptr_nonnull"),
+        .string => |string_idx| c.LLVMBuildICmp(
+            env.builder,
+            c.LLVMIntNE,
+            c.LLVMConstInt(env.llvm_i64, env.program.strings.items[string_idx].len, 0),
+            c.LLVMConstInt(env.llvm_i64, 0, 0),
+            "str_nonempty",
+        ),
+        .runtime_string => blk: {
+            var len_indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 0, 0)};
+            const len_ptr = c.LLVMBuildGEP2(env.builder, env.llvm_i64, value.llvm_value, &len_indices, len_indices.len, "runtime_strlen_ptr_bool");
+            const len = c.LLVMBuildLoad2(env.builder, env.llvm_i64, len_ptr, "runtime_strlen_bool");
+            break :blk c.LLVMBuildICmp(env.builder, c.LLVMIntNE, len, c.LLVMConstInt(env.llvm_i64, 0, 0), "runtime_str_nonempty");
+        },
+        .undefined_string => c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), 0, 0),
         .float => c.LLVMBuildFCmp(env.builder, c.LLVMRealONE, value.llvm_value, c.LLVMConstReal(env.llvm_f64, 0.0), "float_nonzero"),
         else => diag.failAt(0, "expected bool-compatible register", .{}),
     };

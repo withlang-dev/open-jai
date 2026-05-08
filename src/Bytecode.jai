@@ -96,6 +96,7 @@ Instruction :: struct {
 
 Proc_Bytecode :: struct {
     name: string;
+    instructions: [..] Instruction;
     num_registers: int;
     param_count: int;
     return_type: int;
@@ -103,6 +104,8 @@ Proc_Bytecode :: struct {
 }
 
 Bytecode_Program :: struct {
+    strings: [..] string;
+    procs: [..] Proc_Bytecode;
     string_count: int;
     proc_count: int;
     main_proc: int;
@@ -131,7 +134,19 @@ bytecode_program_init :: () -> Bytecode_Program {
 
 bytecode_add_string :: (program: *Bytecode_Program, value: string) -> String_Index {
     index := program.string_count;
+    array_add(*program.strings, value);
     program.string_count += 1;
     return index;
 }
 
+bytecode_add_proc :: (program: *Bytecode_Program, proc: Proc_Bytecode) -> int {
+    index := program.proc_count;
+    array_add(*program.procs, proc);
+    program.proc_count = program.procs.count;
+    return index;
+}
+
+proc_bytecode_add_instruction :: (proc: *Proc_Bytecode, inst: Instruction) {
+    array_add(*proc.instructions, inst);
+    proc.instruction_count = proc.instructions.count;
+}
