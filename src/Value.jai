@@ -1,24 +1,20 @@
 // Port of bootstrap/src/Value.zig.
 
-Value_Kind :: enum {
-    VOID;
-    INT;
-    FLOAT;
-    BOOL;
-    STRING;
-}
-
 Value :: struct {
-    kind: Value_Kind;
-    int_value: int;
-    float_value: float;
-    bool_value: bool;
-    string_value: string;
+    index: Type_Id;
 }
 
-value_void :: () -> Value {
-    v: Value;
-    v.kind = .VOID;
-    return v;
+value_init :: (index: Type_Id) -> Value {
+    return .{index};
+}
+
+value_to_integer :: (value: Value, failed: *bool) -> int {
+    failed.* = true;
+    return 0;
+}
+
+value_to_string :: (value: Value, failed: *bool) -> string {
+    failed.* = true;
+    return "";
 }
 
