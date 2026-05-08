@@ -26,7 +26,7 @@ fn parseArgs(init: std.process.Init.Minimal) !Options {
         std.process.exit(0);
     }
 
-    var output_path: []const u8 = "a.out";
+    var output_path: []const u8 = "out/a.out";
     var runtime_path: []const u8 = "zig-out/lib/openjai_runtime.o";
     var check_only = false;
     while (args.next()) |arg| {

@@ -1,5 +1,8 @@
 const std = @import("std");
 const c = @cImport({
+    @cInclude("crt_externs.h");
+    @cInclude("stdio.h");
+    @cInclude("string.h");
     @cInclude("stdlib.h");
     @cInclude("time.h");
 });
@@ -143,6 +146,127 @@ const OpenJaiRuntimeString = extern struct {
     len: usize,
     data: [*]const u8,
 };
+
+const OpenJaiArray = extern struct {
+    count: usize,
+    capacity: usize,
+    data: ?*anyopaque,
+};
+
+fn makeRuntimeString(bytes: []const u8) ?*OpenJaiRuntimeString {
+    const header_raw = c.malloc(@sizeOf(OpenJaiRuntimeString)) orelse return null;
+    errdefer c.free(header_raw);
+    const allocation_len = @max(bytes.len, 1);
+    const data_raw = c.malloc(allocation_len) orelse return null;
+    const data: [*]u8 = @ptrCast(data_raw);
+    if (bytes.len != 0) @memcpy(data[0..bytes.len], bytes);
+    const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
+    header.* = .{ .len = bytes.len, .data = data };
+    return header;
+}
+
+export fn __openjai_arg_count() i64 {
+    return @intCast(c._NSGetArgc().*);
+}
+
+export fn __openjai_arg_value(index: i64) ?*OpenJaiRuntimeString {
+    if (index < 0) return makeRuntimeString("");
+    const argc = c._NSGetArgc().*;
+    if (index >= argc) return makeRuntimeString("");
+    const argv = c._NSGetArgv().*;
+    const raw = argv[@intCast(index)];
+    if (raw == null) return makeRuntimeString("");
+    const bytes = std.mem.span(raw);
+    return makeRuntimeString(bytes);
+}
+
+export fn __openjai_read_entire_file(path_data: [*]const u8, path_len: usize) ?*OpenJaiRuntimeString {
+    const path_raw = c.malloc(path_len + 1) orelse return null;
+    defer c.free(path_raw);
+    const path: [*]u8 = @ptrCast(path_raw);
+    if (path_len != 0) @memcpy(path[0..path_len], path_data[0..path_len]);
+    path[path_len] = 0;
+
+    const file = c.fopen(path, "rb") orelse return makeRuntimeString("");
+    defer _ = c.fclose(file);
+    if (c.fseek(file, 0, c.SEEK_END) != 0) return makeRuntimeString("");
+    const size = c.ftell(file);
+    if (size < 0) return makeRuntimeString("");
+    if (c.fseek(file, 0, c.SEEK_SET) != 0) return makeRuntimeString("");
+    const len: usize = @intCast(size);
+    const header_raw = c.malloc(@sizeOf(OpenJaiRuntimeString)) orelse return null;
+    errdefer c.free(header_raw);
+    const data_raw = c.malloc(@max(len, 1)) orelse return null;
+    const data: [*]u8 = @ptrCast(data_raw);
+    if (len != 0) {
+        const read_count = c.fread(data, 1, len, file);
+        if (read_count != len) {
+            c.free(data_raw);
+            return makeRuntimeString("");
+        }
+    }
+    const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
+    header.* = .{ .len = len, .data = data };
+    return header;
+}
+
+export fn __openjai_string_equal(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {
+    if (lhs_len != rhs_len) return false;
+    if (lhs_len == 0) return true;
+    return c.memcmp(lhs_data, rhs_data, lhs_len) == 0;
+}
+
+export fn __openjai_array_add(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) ?*anyopaque {
+    const slot_ptr = slot orelse @panic("array_add on null array slot");
+    if (elem_size == 0) return null;
+    var array = slot_ptr.*;
+    if (array == null) {
+        const raw = c.malloc(@sizeOf(OpenJaiArray)) orelse return null;
+        array = @ptrCast(@alignCast(raw));
+        array.?.* = .{ .count = 0, .capacity = 0, .data = null };
+        slot_ptr.* = array;
+    }
+    const a = array.?;
+    if (a.count == a.capacity) {
+        const new_capacity: usize = if (a.capacity == 0) 8 else a.capacity * 2;
+        const bytes = new_capacity * elem_size;
+        const new_data = if (a.data) |old| c.realloc(old, bytes) else c.malloc(bytes);
+        if (new_data == null) return null;
+        a.data = new_data;
+        a.capacity = new_capacity;
+    }
+    const data: [*]u8 = @ptrCast(a.data.?);
+    const dst = data + a.count * elem_size;
+    if (item) |src_raw| {
+        const src: [*]const u8 = @ptrCast(src_raw);
+        @memcpy(dst[0..elem_size], src[0..elem_size]);
+    } else {
+        @memset(dst[0..elem_size], 0);
+    }
+    a.count += 1;
+    return dst;
+}
+
+export fn __openjai_array_count(slot: ?*?*OpenJaiArray) i64 {
+    const slot_ptr = slot orelse return 0;
+    return @intCast(if (slot_ptr.*) |a| a.count else 0);
+}
+
+export fn __openjai_array_data(slot: ?*?*OpenJaiArray) ?*anyopaque {
+    const slot_ptr = slot orelse return null;
+    return if (slot_ptr.*) |a| a.data else null;
+}
+
+export fn __openjai_array_index(slot: ?*?*OpenJaiArray, index: i64, elem_size: usize) ?*anyopaque {
+    const slot_ptr = slot orelse @panic("indexing null dynamic array slot");
+    const a = slot_ptr.* orelse @panic("indexing null dynamic array");
+    if (index < 0 or @as(usize, @intCast(index)) >= a.count) {
+        std.debug.print("openjai runtime: dynamic array index out of bounds: array={*} count={} index={} elem_size={}\n", .{ a, a.count, index, elem_size });
+        @panic("dynamic array index out of bounds");
+    }
+    const data: [*]u8 = @ptrCast(a.data.?);
+    return data + @as(usize, @intCast(index)) * elem_size;
+}
 
 export fn __openjai_to_calendar(low_ns: u64, timezone: i64) ?*OpenJaiCalendar {
     const raw = c.malloc(@sizeOf(OpenJaiCalendar)) orelse return null;

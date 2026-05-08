@@ -76,6 +76,34 @@ pub const VM = struct {
                 if (inst.dest >= regs.len) return diag.failAt(0, "VM undefined load register out of range", .{});
                 regs[inst.dest] = .{ .int = 0 };
             },
+            .string_len => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_len register out of range", .{});
+                regs[inst.dest] = .{ .int = @intCast(switch (regs[inst.arg1]) {
+                    .string => |v| v.len,
+                    else => return diag.failAt(0, "VM string_len requires string operand", .{}),
+                }) };
+            },
+            .string_data => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_data register out of range", .{});
+                _ = switch (regs[inst.arg1]) {
+                    .string => |v| v,
+                    else => return diag.failAt(0, "VM string_data requires string operand", .{}),
+                };
+                regs[inst.dest] = .{ .int = 0 };
+            },
+            .string_index => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_index register out of range", .{});
+                const bytes = switch (regs[inst.arg1]) {
+                    .string => |v| v,
+                    else => return diag.failAt(0, "VM string_index requires string operand", .{}),
+                };
+                const index = switch (regs[inst.arg2]) {
+                    .int => |v| v,
+                    else => return diag.failAt(0, "VM string_index requires integer index", .{}),
+                };
+                if (index < 0 or index >= bytes.len) return diag.failAt(0, "VM string index out of bounds", .{});
+                regs[inst.dest] = .{ .int = bytes[@intCast(index)] };
+            },
             .cmp_lt_int => {
                 if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM cmp_lt_int register out of range", .{});
                 const lhs = switch (regs[inst.arg1]) { .int => |v| v, else => return diag.failAt(0, "VM cmp_lt_int requires integer lhs", .{}) };
@@ -283,6 +311,18 @@ pub const VM = struct {
             .load_ptr => {
                 if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
                 regs[inst.dest] = regs[inst.arg1];
+            },
+            .ptr_offset => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM ptr_offset register out of range", .{});
+                const base = switch (regs[inst.arg1]) {
+                    .int => |v| v,
+                    else => 0,
+                };
+                regs[inst.dest] = .{ .int = base + @as(i64, @intCast(inst.arg2)) };
+            },
+            .load_ptr_string, .alloc_local_bytes, .array_add, .array_count, .array_index => {
+                if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
+                regs[inst.dest] = .{ .int = 0 };
             },
             .store_ptr => {},
             .memcpy, .free_heap => {},

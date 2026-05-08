@@ -66,6 +66,8 @@ pub const Compilation = struct {
         var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
         defer bytecode.deinit();
 
+        if (comp.options.check_only) return;
+
         const object_path = try std.fmt.allocPrint(comp.allocator, "{s}.o", .{comp.options.output_path});
         defer comp.allocator.free(object_path);
         if (std.fs.path.dirname(object_path)) |object_dir| {
@@ -208,10 +210,12 @@ pub const Compilation = struct {
         if (node == @import("Ast.zig").null_node) return;
         switch (ast.tag(node)) {
             .meta_expr => {
+                if (ast.tokens[ast.mainToken(node)].tag == .directive_insert) return;
                 if (ast.data(node).lhs != @import("Ast.zig").null_node) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).lhs, diag);
                 if (ast.data(node).rhs != @import("Ast.zig").null_node) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).rhs, diag);
             },
             .meta_stmt => {
+                if (ast.tokens[ast.mainToken(node)].tag == .directive_insert) return;
                 if (ast.data(node).lhs != @import("Ast.zig").null_node) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).lhs, diag);
                 if (ast.data(node).rhs != @import("Ast.zig").null_node) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).rhs, diag);
             },

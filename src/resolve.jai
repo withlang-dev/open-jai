@@ -18,6 +18,9 @@ Symbol_Kind :: enum {
     builtin_alloc;
     builtin_free;
     builtin_exit;
+    builtin_compiler_arg_count;
+    builtin_compiler_arg;
+    builtin_compiler_read_file;
     const_value;
 }
 
@@ -42,6 +45,9 @@ resolve :: (ast: *Ast, diag: *Diagnostic, require_main: bool) -> Resolved {
     resolved_add_builtin(*r, "alloc", .builtin_alloc);
     resolved_add_builtin(*r, "free", .builtin_free);
     resolved_add_builtin(*r, "exit", .builtin_exit);
+    resolved_add_builtin(*r, "compiler_arg_count", .builtin_compiler_arg_count);
+    resolved_add_builtin(*r, "compiler_arg", .builtin_compiler_arg);
+    resolved_add_builtin(*r, "compiler_read_file", .builtin_compiler_read_file);
 
     if ast.root == NULL_NODE {
         if require_main diagnostic_fail_at(diag, 0, "No program entry point was found. (The designated entry point name is 'main'.)");
@@ -106,6 +112,9 @@ resolve_import :: (ast: *Ast, r: *Resolved, module_name: string) {
         resolved_add_builtin(r, "alloc", .builtin_alloc);
         resolved_add_builtin(r, "free", .builtin_free);
         resolved_add_builtin(r, "exit", .builtin_exit);
+        resolved_add_builtin(r, "compiler_arg_count", .builtin_compiler_arg_count);
+        resolved_add_builtin(r, "compiler_arg", .builtin_compiler_arg);
+        resolved_add_builtin(r, "compiler_read_file", .builtin_compiler_read_file);
         resolved_add_placeholder(r, "context");
         resolved_add_placeholder(r, "temp");
         resolved_add_placeholder(r, "String_Builder");

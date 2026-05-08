@@ -793,8 +793,14 @@ const Parser = struct {
     }
 
     fn parseIfCaseStmt(p: *Parser, if_tok: Token.Index, cond: NodeIndex) !NodeIndex {
-        var stmts = std.ArrayList(u32).empty;
-        defer stmts.deinit(p.allocator);
+        const IfCase = struct {
+            value: NodeIndex,
+            block: NodeIndex,
+            through: bool,
+            token: Token.Index,
+        };
+        var cases = std.ArrayList(IfCase).empty;
+        defer cases.deinit(p.allocator);
         while (!p.check(.r_brace) and !p.check(.eof)) {
             // Handle optional #complete before case
             _ = p.matchDiscard(.directive_complete);
@@ -821,19 +827,51 @@ const Parser = struct {
             }
             const case_block_extra = try p.ast.addExtraSlice(case_stmts.items);
             const case_block = try p.ast.addNode(.block, case_tok, .{ .lhs = case_block_extra, .rhs = @intCast(case_stmts.items.len) });
-            if (is_default) {
-                // Default case: emit block unconditionally
-                try stmts.append(p.allocator, case_block);
-            } else {
-                const cmp = try p.ast.addNode(.binary_expr, case_tok, .{ .lhs = cond, .rhs = case_value });
-                const if_blocks = [_]u32{ case_block, null_node };
-                const if_blocks_extra = try p.ast.addExtraSlice(&if_blocks);
-                try stmts.append(p.allocator, try p.ast.addNode(.if_stmt, case_tok, .{ .lhs = cmp, .rhs = if_blocks_extra }));
-            }
-            // #through: fall-through handled by not having an else (has_through noted but not emitted yet)
+            try cases.append(p.allocator, .{
+                .value = if (is_default) null_node else case_value,
+                .block = case_block,
+                .through = has_through,
+                .token = case_tok,
+            });
         }
         _ = try p.expect(.r_brace, "expected '}}' after if-case block", .{});
-        const extra = try p.ast.addExtraSlice(stmts.items);
+
+        var next: NodeIndex = null_node;
+        var i = cases.items.len;
+        while (i > 0) {
+            i -= 1;
+            const case = cases.items[i];
+            var branch_stmts = std.ArrayList(u32).empty;
+            defer branch_stmts.deinit(p.allocator);
+            var j = i;
+            while (j < cases.items.len) : (j += 1) {
+                const block_stmts = p.ast.extraSlice(p.ast.data(cases.items[j].block).lhs);
+                try branch_stmts.appendSlice(p.allocator, block_stmts);
+                if (!cases.items[j].through) break;
+            }
+            const branch_extra = try p.ast.addExtraSlice(branch_stmts.items);
+            const branch_block = try p.ast.addNode(.block, case.token, .{ .lhs = branch_extra, .rhs = @intCast(branch_stmts.items.len) });
+            if (case.value == null_node) {
+                next = branch_block;
+            } else {
+                const cmp = try p.ast.addNode(.binary_expr, case.token, .{ .lhs = cond, .rhs = case.value });
+                const else_block = if (next == null_node or p.ast.tag(next) == .block) next else blk: {
+                    const nested = [_]u32{next};
+                    const nested_extra = try p.ast.addExtraSlice(&nested);
+                    break :blk try p.ast.addNode(.block, case.token, .{ .lhs = nested_extra, .rhs = 1 });
+                };
+                const if_blocks = [_]u32{ branch_block, else_block };
+                const if_blocks_extra = try p.ast.addExtraSlice(&if_blocks);
+                next = try p.ast.addNode(.if_stmt, case.token, .{ .lhs = cmp, .rhs = if_blocks_extra });
+            }
+        }
+        if (next == null_node) {
+            const empty = [_]u32{};
+            const extra = try p.ast.addExtraSlice(&empty);
+            next = try p.ast.addNode(.block, if_tok, .{ .lhs = extra, .rhs = 0 });
+        }
+        const stmts = [_]u32{next};
+        const extra = try p.ast.addExtraSlice(&stmts);
         return p.ast.addNode(.stmt_list, if_tok, .{ .lhs = extra });
     }
 

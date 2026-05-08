@@ -21,6 +21,59 @@
 #load "Compilation.jai";
 #load "openjai_test_runner.jai";
 
+print_usage :: () {
+    print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o]\n");
+}
+
 main :: () {
-    print("OpenJai Jai compiler port: source tree is present; compiler execution is not self-hosted yet.\n");
+    argc := compiler_arg_count();
+    if argc < 2 {
+        print_usage();
+        exit(64);
+    }
+
+    input_path := compiler_arg(1);
+    if input_path == "-h" || input_path == "--help" {
+        print_usage();
+        return;
+    }
+
+    output_path := "out/a.out";
+    runtime_path := "out/bootstrap/lib/openjai_runtime.o";
+    check_only := false;
+
+    i := 2;
+    while i < argc {
+        arg := compiler_arg(i);
+        if arg == "--check" {
+            check_only = true;
+        } else if arg == "-o" {
+            i += 1;
+            if i >= argc {
+                print("openjai: error: expected output path after -o\n");
+                exit(64);
+            }
+            output_path = compiler_arg(i);
+        } else if arg == "--runtime" {
+            i += 1;
+            if i >= argc {
+                print("openjai: error: expected runtime object path after --runtime\n");
+                exit(64);
+            }
+            runtime_path = compiler_arg(i);
+        } else {
+            print("openjai: error: unrecognized argument '%'\n", arg);
+            exit(64);
+        }
+        i += 1;
+    }
+
+    source := compiler_read_file(input_path);
+    if !source {
+        print("openjai: error: could not read '%'\n", input_path);
+        exit(1);
+    }
+
+    result := compile_source_with_options(input_path, output_path, runtime_path, check_only, source);
+    if result == .FAILED exit(1);
 }

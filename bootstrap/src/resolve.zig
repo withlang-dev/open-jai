@@ -28,6 +28,9 @@ pub const Symbol = union(enum) {
     builtin_random_get,
     builtin_random_get_zero_to_one,
     builtin_random_get_within_range,
+    builtin_compiler_arg_count,
+    builtin_compiler_arg,
+    builtin_compiler_read_file,
     builtin_format_int,
     builtin_format_float,
     builtin_get_type_table,
@@ -169,6 +172,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "write_nonnegative_number", .builtin_write_nonnegative_number);
     try r.symbols.put(allocator, "New", .builtin_new);
     try r.symbols.put(allocator, "free", .builtin_free);
+    try r.symbols.put(allocator, "compiler_arg_count", .builtin_compiler_arg_count);
+    try r.symbols.put(allocator, "compiler_arg", .builtin_compiler_arg);
+    try r.symbols.put(allocator, "compiler_read_file", .builtin_compiler_read_file);
     try putPlaceholders(&r, allocator, &.{
         "context", "temp", "reset_temporary_storage",
         "push_allocator",
@@ -302,6 +308,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "random_get", .builtin_random_get);
                     try r.symbols.put(allocator, "random_get_zero_to_one", .builtin_random_get_zero_to_one);
                     try r.symbols.put(allocator, "random_get_within_range", .builtin_random_get_within_range);
+                    try r.symbols.put(allocator, "compiler_arg_count", .builtin_compiler_arg_count);
+                    try r.symbols.put(allocator, "compiler_arg", .builtin_compiler_arg);
+                    try r.symbols.put(allocator, "compiler_read_file", .builtin_compiler_read_file);
                 } else if (std.mem.eql(u8, module_name, "Math")) {
                     try r.symbols.put(allocator, "sin", .builtin_sin);
                     try r.symbols.put(allocator, "abs", .builtin_abs);
@@ -921,7 +930,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
                     .placeholder => {},
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);
