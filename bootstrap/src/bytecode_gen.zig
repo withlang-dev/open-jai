@@ -1930,7 +1930,22 @@ const GenContext = struct {
 
     fn genInlineResultSlotForReturn(ctx: *GenContext, return_type: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         if (return_type != @import("Ast.zig").null_node) {
-            return try ctx.genDefaultValue(return_type, source_node, diag);
+            const result = try ctx.genDefaultValue(return_type, source_node, diag);
+            const return_text = std.mem.trim(u8, ctx.nodeSource(return_type), " \t\r\n");
+            const stack_back = !std.mem.eql(u8, firstTypeWord(return_text), "string") and
+                !std.mem.eql(u8, firstTypeWord(return_text), "float") and
+                !std.mem.eql(u8, firstTypeWord(return_text), "float32") and
+                !std.mem.eql(u8, firstTypeWord(return_text), "float64") and
+                !std.mem.startsWith(u8, return_text, "*") and
+                std.mem.indexOf(u8, return_text, "->") == null and
+                !isDynamicArrayTypeText(return_text) and
+                !(try typeTextIsStruct(ctx, return_text, diag));
+            if (stack_back) {
+                const addr_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = result, .source_node = source_node });
+            }
+            return result;
         }
         return try ctx.genInlineResultSlot(source_node, diag);
     }

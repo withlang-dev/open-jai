@@ -758,15 +758,26 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend memcpy register out of range", .{});
                 const dst_ptr = switch (registers[inst.dest].kind) {
                     .pointer => registers[inst.dest].llvm_value,
-                    .pointer_addr => c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.dest].llvm_value, "memcpy_dst_load_ptr_addr"),
-                    .int, .int_addr, .bool, .bool_addr => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.dest], diag), env.ptr_ty, "memcpy_dst_inttoptr"),
-                    else => c.LLVMConstNull(env.ptr_ty),
+                    .pointer_addr => blk: {
+                        const loaded = c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.dest].llvm_value, "memcpy_dst_load_ptr_addr");
+                        const slot = c.LLVMBuildPointerCast(env.builder, registers[inst.dest].llvm_value, env.ptr_ty, "memcpy_dst_ptr_slot");
+                        const is_null = c.LLVMBuildICmp(env.builder, c.LLVMIntEQ, loaded, c.LLVMConstPointerNull(env.ptr_ty), "memcpy_dst_ptr_is_null");
+                        break :blk c.LLVMBuildSelect(env.builder, is_null, slot, loaded, "memcpy_dst_ptr_or_slot");
+                    },
+                    .int_addr, .bool_addr => c.LLVMBuildPointerCast(env.builder, registers[inst.dest].llvm_value, env.ptr_ty, "memcpy_dst_scalar_slot"),
+                    else => return diag.failAt(0, "LLVM backend memcpy destination requires addressable storage, got {s}", .{@tagName(registers[inst.dest].kind)}),
                 };
                 const src_ptr = switch (registers[inst.arg1].kind) {
                     .pointer => registers[inst.arg1].llvm_value,
-                    .pointer_addr => c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.arg1].llvm_value, "memcpy_src_load_ptr_addr"),
-                    .int, .int_addr, .bool, .bool_addr => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, registers[inst.arg1], diag), env.ptr_ty, "memcpy_src_inttoptr"),
-                    else => c.LLVMConstNull(env.ptr_ty),
+                    .pointer_addr => blk: {
+                        const loaded = c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.arg1].llvm_value, "memcpy_src_load_ptr_addr");
+                        const slot = c.LLVMBuildPointerCast(env.builder, registers[inst.arg1].llvm_value, env.ptr_ty, "memcpy_src_ptr_slot");
+                        const is_null = c.LLVMBuildICmp(env.builder, c.LLVMIntEQ, loaded, c.LLVMConstPointerNull(env.ptr_ty), "memcpy_src_ptr_is_null");
+                        break :blk c.LLVMBuildSelect(env.builder, is_null, slot, loaded, "memcpy_src_ptr_or_slot");
+                    },
+                    .runtime_string => registers[inst.arg1].llvm_value,
+                    .int, .int_addr, .bool, .bool_addr, .type_id, .float => try valueAddress(env, registers[inst.arg1], diag),
+                    else => return diag.failAt(0, "LLVM backend memcpy source requires byte-addressable value, got {s}", .{@tagName(registers[inst.arg1].kind)}),
                 };
                 const count = try valueAsInt(env, registers[inst.arg2], diag);
                 var args = [_]c.LLVMValueRef{ dst_ptr, src_ptr, count };
