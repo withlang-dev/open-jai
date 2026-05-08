@@ -8,12 +8,14 @@ ZIG_GLOBAL_CACHE_DIR := $(OUT_DIR)/zig-cache/global
 BOOTSTRAP_COMPILER := $(BOOTSTRAP_PREFIX)/bin/openjai
 BOOTSTRAP_RUNTIME := $(BOOTSTRAP_PREFIX)/lib/openjai_runtime.o
 EXAMPLES_OUT_DIR := $(OUT_DIR)/examples
+FOCUS_DIR := .reference/focus
+FOCUS_OUT_DIR := $(OUT_DIR)/reference/focus
 
 SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' | sort)
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 
-.PHONY: bootstrap test test-bootstrap examples test-jai test-all clean
+.PHONY: bootstrap test test-bootstrap examples focus test-jai test-all clean
 
 bootstrap:
 	@mkdir -p "$(OUT_DIR)"
@@ -45,6 +47,13 @@ examples: bootstrap
 	done; \
 	echo "compiled $$count supported example(s)"; \
 	exit $$fail
+
+focus: bootstrap
+	@mkdir -p "$(FOCUS_OUT_DIR)"
+	@echo "openjai $(FOCUS_DIR)/first.jai -> $(FOCUS_OUT_DIR)/focus"
+	@cd "$(FOCUS_DIR)" && "$(abspath $(BOOTSTRAP_COMPILER))" first.jai --check \
+		-o "$(abspath $(FOCUS_OUT_DIR))/focus" \
+		--runtime "$(abspath $(BOOTSTRAP_RUNTIME))"
 
 test-jai: bootstrap
 	@cd "$(BOOTSTRAP_DIR)" && zig build test-jai \

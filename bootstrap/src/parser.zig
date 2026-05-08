@@ -544,7 +544,7 @@ const Parser = struct {
                 _ = try p.expect(.semicolon, "expected semicolon after remove statement", .{});
                 return p.ast.addNode(.meta_stmt, tok, .{ .lhs = operand, .rhs = null_node });
             }
-            if (p.peekTag(1) == .comma) return p.parseMultiNameStmt();
+            if (p.peekTag(1) == .comma or (p.peekTag(1) == .colon and p.peekTag(2) == .comma)) return p.parseMultiNameStmt();
             if (p.peekTag(1) == .colon) return p.parseLocalTypedDecl();
             if (p.peekTag(1) == .colon_equal) return p.parseLocalInferredDecl();
             if (p.peekTag(1) == .plus_equal or p.peekTag(1) == .minus_equal or p.peekTag(1) == .star_equal or p.peekTag(1) == .slash_equal or p.peekTag(1) == .ampersand_equal or p.peekTag(1) == .pipe_equal or p.peekTag(1) == .caret_equal) return p.parseAssignStmt();
@@ -901,13 +901,17 @@ const Parser = struct {
         defer name_modes.deinit(p.allocator);
         try name_toks.append(p.allocator, try p.expect(.identifier, "expected name", .{}));
         try name_modes.append(p.allocator, .declare);
+        if (p.peekTag(0) == .colon and (p.peekTag(1) == .comma or p.peekTag(1) == .equal)) {
+            _ = p.matchDiscard(.colon);
+            name_modes.items[0] = .declare_typed;
+        }
         while (p.matchDiscard(.comma)) {
             const name_tok = try p.expect(.identifier, "expected name after comma", .{});
             try name_toks.append(p.allocator, name_tok);
             if (p.peekTag(0) == .equal and p.peekTag(1) == .comma) {
                 _ = p.matchDiscard(.equal);
                 try name_modes.append(p.allocator, .assign);
-            } else if (p.peekTag(0) == .colon and p.peekTag(1) == .comma) {
+            } else if (p.peekTag(0) == .colon and (p.peekTag(1) == .comma or p.peekTag(1) == .equal)) {
                 _ = p.matchDiscard(.colon);
                 try name_modes.append(p.allocator, .declare_typed);
             } else try name_modes.append(p.allocator, .declare);
