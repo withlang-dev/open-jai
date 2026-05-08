@@ -246,6 +246,18 @@ pub const VM = struct {
                     else => return diag.failAt(0, "VM format_print currently requires string, integer, float, or bool argument", .{}),
                 }
             },
+            .current_time_consensus_low, .current_time_monotonic_low => {
+                if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});
+                regs[inst.dest] = .{ .int = 0 };
+            },
+            .to_calendar => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_calendar register out of range", .{});
+                regs[inst.dest] = regs[inst.arg1];
+            },
+            .calendar_to_string => {
+                if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM calendar_to_string register out of range", .{});
+                regs[inst.dest] = .{ .string = "" };
+            },
             .ret => {
                 if (inst.arg1 >= regs.len) return diag.failAt(0, "VM return register out of range", .{});
                 return switch (regs[inst.arg1]) {
@@ -263,6 +275,7 @@ pub const VM = struct {
                 }
             },
             .ret_void => return .void,
+            .exit_process => return .void,
             .alloc_heap => {
                 if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
                 regs[inst.dest] = .{ .int = 1 };

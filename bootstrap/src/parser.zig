@@ -110,7 +110,11 @@ const Parser = struct {
             if (p.match(.triple_minus)) |tok| break :blk try p.ast.addNode(.undefined_literal, tok, .{});
             break :blk try p.parseExpr();
         } else null_node;
-        _ = try p.expect(.semicolon, "expected semicolon after top-level variable declaration", .{});
+        if (init == null_node and nodeAllowsImplicitTerminator(&p.ast, type_expr)) {
+            _ = p.matchDiscard(.semicolon);
+        } else {
+            _ = try p.expect(.semicolon, "expected semicolon after top-level variable declaration", .{});
+        }
         return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = init });
     }
 
@@ -997,7 +1001,11 @@ const Parser = struct {
             if (p.match(.triple_minus)) |tok| break :blk try p.ast.addNode(.undefined_literal, tok, .{});
             break :blk try p.parseExpr();
         } else null_node;
-        _ = try p.expect(.semicolon, "expected semicolon after local declaration", .{});
+        if (init == null_node and nodeAllowsImplicitTerminator(&p.ast, type_expr)) {
+            _ = p.matchDiscard(.semicolon);
+        } else {
+            _ = try p.expect(.semicolon, "expected semicolon after local declaration", .{});
+        }
         return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = init });
     }
 
@@ -2082,6 +2090,26 @@ test "parser accepts top-level vars and consts with container syntax" {
     try std.testing.expectEqual(Node.Tag.struct_type, ast.tag(ast.data(@intCast(root[2])).rhs));
 }
 
+test "parser accepts top-level struct-typed variable without semicolon" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "settings_info: struct {\n" ++
+        "    name: string;\n" ++
+        "    Version_Lookup :: struct { version: int; }\n" ++
+        "}\n" ++
+        "plugins: [..] *Metaprogram_Plugin;\n";
+    const diag = Diagnostic.init(std.testing.allocator, "struct_typed_var.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 2), ast.extraSlice(ast.data(ast.root).lhs).len);
+}
+
 test "parser accepts old style typed top-level constant" {
     const lexer = @import("lexer.zig");
     const source =
@@ -2306,6 +2334,31 @@ test "parser selects top-level #if branch for host OS" {
     try std.testing.expectEqual(Node.Tag.const_decl, ast.tag(decl));
     const expected_name = if (builtin.target.os.tag == .windows) "WindowsThing" else "OtherThing";
     try std.testing.expectEqualStrings(expected_name, ast.tokenSlice(ast.mainToken(decl)));
+}
+
+test "parser accepts selected top-level directive if branch with multiline string before else if" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "#if OS == .WINDOWS {\n" ++
+        "    value :: 1;\n" ++
+        "} else #if OS == .MACOS {\n" ++
+        "    DATA :: #string STRING\n" ++
+        "<plist>\n" ++
+        "    <string>Focus</string>\n" ++
+        "</plist>\n" ++
+        "STRING\n" ++
+        "} else #if OS == .LINUX {\n" ++
+        "    value :: 2;\n" ++
+        "}\n";
+    var tokens = try lexer.tokenize(std.testing.allocator, source, Diagnostic.init(std.testing.allocator, "test.jai", source));
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), Diagnostic.init(std.testing.allocator, "test.jai", source));
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    try std.testing.expect(ast.extraSlice(ast.data(ast.root).lhs).len >= 1);
 }
 
 test "parser selects statement #if branch for host OS" {

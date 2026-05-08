@@ -19,6 +19,8 @@ pub const Typed = struct {
     inferred_param_types: std.AutoHashMapUnmanaged(NodeIndex, Type) = .empty,
     comptime_ints: std.AutoHashMapUnmanaged(NodeIndex, i64) = .empty,
     comptime_floats: std.AutoHashMapUnmanaged(NodeIndex, f64) = .empty,
+    comptime_strings: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
+    owned_comptime_strings: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -26,10 +28,20 @@ pub const Typed = struct {
         t.inferred_param_types.deinit(t.allocator);
         t.comptime_ints.deinit(t.allocator);
         t.comptime_floats.deinit(t.allocator);
+        t.comptime_strings.deinit(t.allocator);
+        for (t.owned_comptime_strings.items) |value| t.allocator.free(value);
+        t.owned_comptime_strings.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
     pub fn typeOf(t: *const Typed, node: NodeIndex) Type { return t.node_types[node]; }
+
+    pub fn putComptimeString(t: *Typed, node: NodeIndex, value: []const u8) !void {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_comptime_strings.append(t.allocator, owned);
+        try t.comptime_strings.put(t.allocator, node, owned);
+    }
 };
 
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, ip: *InternPool, diag: Diagnostic) !Typed {
@@ -845,10 +857,10 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for is_any", .{}),
             } else if (std.mem.eql(u8, name, "to_calendar")) switch (sym) {
                 .builtin_to_calendar => {
-                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "to_calendar expects Apollo_Time and timezone arguments", .{});
+                    if (args.len < 1 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "to_calendar expects Apollo_Time and optional timezone arguments", .{});
                     const time_ty = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
                     if (time_ty.index != InternPool.well_known.apollo_time_type) return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[0]))].start, "to_calendar first argument must be Apollo_Time", .{});
-                    try validateTimezoneLiteral(ast, @intCast(args[1]), diag);
+                    if (args.len == 2) try validateTimezoneLiteral(ast, @intCast(args[1]), diag);
                     break :blk Type.calendar();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for to_calendar", .{}),
@@ -910,6 +922,17 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     break :blk Type.string();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for type_to_string", .{}),
+            } else if (std.mem.eql(u8, name, "sprint") or std.mem.eql(u8, name, "tprint") or std.mem.eql(u8, name, "trim") or std.mem.eql(u8, name, "to_string")) {
+                for (args) |arg| {
+                    const arg_node: NodeIndex = @intCast(arg);
+                    if (ast.tag(arg_node) == .assign_stmt)
+                        _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag)
+                    else if (ast.tag(arg_node) == .unary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .dot_dot)
+                        _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
+                    else
+                        _ = try analyzeNode(ast, resolved, typed, arg_node, diag);
+                }
+                break :blk Type.string();
             } else if (std.mem.eql(u8, name, "enum_range")) switch (sym) {
                 .builtin_enum_range => {
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "enum_range expects one argument", .{});
@@ -1103,7 +1126,13 @@ fn compilerIntrinsicReturnType(name: []const u8) ?Type {
     {
         return Type.init(InternPool.well_known.any_type);
     }
-    if (std.mem.eql(u8, name, "code_to_string") or std.mem.eql(u8, name, "builder_to_string")) {
+    if (std.mem.eql(u8, name, "code_to_string") or
+        std.mem.eql(u8, name, "builder_to_string") or
+        std.mem.eql(u8, name, "sprint") or
+        std.mem.eql(u8, name, "tprint") or
+        std.mem.eql(u8, name, "trim") or
+        std.mem.eql(u8, name, "to_string"))
+    {
         return Type.string();
     }
     if (std.mem.eql(u8, name, "set_build_options") or
@@ -1140,7 +1169,11 @@ fn isCompilerMetaTypeName(name: []const u8) bool {
         std.mem.eql(u8, name, "Message_Import") or
         std.mem.eql(u8, name, "Message_Phase") or
         std.mem.eql(u8, name, "Message_Typechecked") or
-        std.mem.eql(u8, name, "Message_Debug_Dump");
+        std.mem.eql(u8, name, "Message_Debug_Dump") or
+        std.mem.eql(u8, name, "Message_Complete") or
+        std.mem.eql(u8, name, "Version_Info") or
+        std.mem.eql(u8, name, "Metaprogram_Plugin") or
+        std.mem.eql(u8, name, "Intercept_Flags");
 }
 
 fn typeFromTypeExpr(ast: *const Ast, node: NodeIndex, diag: Diagnostic) !Type {

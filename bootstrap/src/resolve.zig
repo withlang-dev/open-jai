@@ -175,11 +175,12 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
         "DrawTexturePro",
         "get_build_options", "set_build_options", "set_build_options_dc",
         "add_build_file", "add_build_string", "run_command", "get_current_workspace",
-        "compiler_create_workspace", "compiler_begin_intercept", "compiler_wait_for_message",
-        "compiler_end_intercept", "compiler_set_workspace_status", "compiler_report",
-        "make_location", "add_global_data", "Optimization_Type", "Message_Complete", "OS",
-        "For_Flags",
-    });
+                        "compiler_create_workspace", "compiler_begin_intercept", "compiler_wait_for_message",
+                        "compiler_end_intercept", "compiler_set_workspace_status", "compiler_report",
+                        "make_location", "add_global_data", "Optimization_Type", "Message_Complete", "OS",
+                        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
+                        "For_Flags",
+                    });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
     var current_file: u32 = 0;
     var next_file_id: u32 = 0;
@@ -319,10 +320,17 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "get_current_workspace", "Optimization_Type", "Message_Complete",
                         "compiler_set_workspace_status", "compiler_report", "make_location",
                         "add_global_data", "code_to_string", "builder_to_string",
+                        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
                         "Message", "Message_File", "Message_Import", "Message_Phase",
                         "Message_Typechecked", "Message_Debug_Dump", "Workspace",
                         "Build_Options", "Code", "Code_Node", "Code_Literal",
                         "Code_Procedure_Call", "Code_Declaration", "Source_Code_Location",
+                        "Version_Info",
+                    });
+                } else if (std.mem.eql(u8, module_name, "Metaprogram_Plugins")) {
+                    try putPlaceholders(&r, allocator, &.{
+                        "Metaprogram_Plugin", "Intercept_Flags",
+                        "parse_plugin_arguments", "init_plugins",
                     });
                 } else if (std.mem.eql(u8, module_name, "System") or
                     std.mem.eql(u8, module_name, "Windows") or

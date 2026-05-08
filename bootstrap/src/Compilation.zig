@@ -21,12 +21,19 @@ pub const Compilation = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     options: Options,
+    owned_run_result_strings: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
         return .{ .allocator = allocator, .io = io, .options = options };
     }
 
     pub fn compile(comp: *Compilation) !void {
+        defer {
+            for (comp.owned_run_result_strings.items) |value| comp.allocator.free(value);
+            comp.owned_run_result_strings.deinit(comp.allocator);
+            comp.owned_run_result_strings = .empty;
+        }
+
         const source = try comp.loadSourceWithLoads(comp.options.input_path);
         defer comp.allocator.free(source);
         if (source.len == 0 and !comp.options.check_only) return Diagnostic.init(comp.allocator, comp.options.input_path, source).failAt(0, "source file is empty", .{});
@@ -51,10 +58,10 @@ pub const Compilation = struct {
         var typed = try sema.analyze(comp.allocator, &ast, &resolved, &ip, diag);
         defer typed.deinit();
 
-        try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
         try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
         try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
         try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
+        try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
 
         var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
         defer bytecode.deinit();
@@ -99,6 +106,28 @@ pub const Compilation = struct {
         return true;
     }
 
+    fn recordRunValue(comp: *Compilation, typed: *sema.Typed, value_node: @import("Ast.zig").NodeIndex, decl_node: @import("Ast.zig").NodeIndex, value: vm_mod.Value, diag: Diagnostic, source_offset: u32) !void {
+        switch (value) {
+            .int => |int_value| {
+                try typed.comptime_ints.put(comp.allocator, value_node, int_value);
+                try typed.comptime_ints.put(comp.allocator, decl_node, int_value);
+            },
+            .float => |float_value| {
+                try typed.comptime_floats.put(comp.allocator, value_node, float_value);
+                try typed.comptime_floats.put(comp.allocator, decl_node, float_value);
+            },
+            .bool => |bool_value| {
+                try typed.comptime_ints.put(comp.allocator, value_node, if (bool_value) 1 else 0);
+                try typed.comptime_ints.put(comp.allocator, decl_node, if (bool_value) 1 else 0);
+            },
+            .string => |string_value| {
+                try typed.putComptimeString(value_node, string_value);
+                try typed.putComptimeString(decl_node, string_value);
+            },
+            .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
+        }
+    }
+
     fn executeTopLevelRuns(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
         const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
         for (root_decls) |decl_idx| {
@@ -124,22 +153,7 @@ pub const Compilation = struct {
             };
             if (!isExecutableRun(ast, initializer)) continue;
             const value = try comp.executeRunCall(ast, typed, resolved, initializer, ast.data(initializer).lhs, diag);
-            switch (value) {
-                .int => |int_value| {
-                    try typed.comptime_ints.put(comp.allocator, initializer, int_value);
-                    try typed.comptime_ints.put(comp.allocator, decl, int_value);
-                },
-                .float => |float_value| {
-                    try typed.comptime_floats.put(comp.allocator, initializer, float_value);
-                    try typed.comptime_floats.put(comp.allocator, decl, float_value);
-                },
-                .bool => |bool_value| {
-                    try typed.comptime_ints.put(comp.allocator, initializer, if (bool_value) 1 else 0);
-                    try typed.comptime_ints.put(comp.allocator, decl, if (bool_value) 1 else 0);
-                },
-                .string => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run string value propagation is not implemented yet", .{}),
-                .void => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run requires a value but procedure returned void", .{}),
-            }
+            try comp.recordRunValue(typed, initializer, decl, value, diag, ast.tokens[ast.mainToken(initializer)].start);
         }
     }
 
@@ -160,22 +174,7 @@ pub const Compilation = struct {
                     const initializer = if (ast.tag(stmt) == .const_decl) ast.data(stmt).lhs else ast.data(stmt).rhs;
                     if (isExecutableRun(ast, initializer)) {
                         const value = try comp.executeRunCall(ast, typed, resolved, initializer, ast.data(initializer).lhs, diag);
-                        switch (value) {
-                            .int => |int_value| {
-                                try typed.comptime_ints.put(comp.allocator, initializer, int_value);
-                                try typed.comptime_ints.put(comp.allocator, stmt, int_value);
-                            },
-                            .float => |float_value| {
-                                try typed.comptime_floats.put(comp.allocator, initializer, float_value);
-                                try typed.comptime_floats.put(comp.allocator, stmt, float_value);
-                            },
-                            .bool => |bool_value| {
-                                try typed.comptime_ints.put(comp.allocator, initializer, if (bool_value) 1 else 0);
-                                try typed.comptime_ints.put(comp.allocator, stmt, if (bool_value) 1 else 0);
-                            },
-                            .string => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run string value propagation is not implemented yet", .{}),
-                            .void => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run requires a value but procedure returned void", .{}),
-                        }
+                        try comp.recordRunValue(typed, initializer, stmt, value, diag, ast.tokens[ast.mainToken(initializer)].start);
                     }
                 },
                 .stmt_list => {
@@ -185,22 +184,7 @@ pub const Compilation = struct {
                             const initializer = if (ast.tag(child) == .const_decl) ast.data(child).lhs else ast.data(child).rhs;
                             if (isExecutableRun(ast, initializer)) {
                                 const value = try comp.executeRunCall(ast, typed, resolved, initializer, ast.data(initializer).lhs, diag);
-                                switch (value) {
-                                    .int => |int_value| {
-                                        try typed.comptime_ints.put(comp.allocator, initializer, int_value);
-                                        try typed.comptime_ints.put(comp.allocator, child, int_value);
-                                    },
-                                    .float => |float_value| {
-                                        try typed.comptime_floats.put(comp.allocator, initializer, float_value);
-                                        try typed.comptime_floats.put(comp.allocator, child, float_value);
-                                    },
-                                    .bool => |bool_value| {
-                                        try typed.comptime_ints.put(comp.allocator, initializer, if (bool_value) 1 else 0);
-                                        try typed.comptime_ints.put(comp.allocator, child, if (bool_value) 1 else 0);
-                                    },
-                                    .string => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run string value propagation is not implemented yet", .{}),
-                                    .void => return diag.failAt(ast.tokens[ast.mainToken(initializer)].start, "expression-form #run requires a value but procedure returned void", .{}),
-                                }
+                                try comp.recordRunValue(typed, initializer, child, value, diag, ast.tokens[ast.mainToken(initializer)].start);
                             }
                         }
                     }
@@ -242,13 +226,13 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
                     .float => |float_value| try typed.comptime_floats.put(comp.allocator, node, float_value),
                     .bool => |bool_value| try typed.comptime_ints.put(comp.allocator, node, if (bool_value) 1 else 0),
-                    .string => {},
+                    .string => |string_value| try typed.putComptimeString(node, string_value),
                     .void => {},
                 }
             },
@@ -340,13 +324,10 @@ pub const Compilation = struct {
             return diag.failAt(ast.tokens[ast.mainToken(run_node)].start, "compile-time execution received a null expression operand", .{});
         }
         if (ast.tag(expr) == .block) {
-            if (ast.data(run_node).rhs != 0) {
-                return diag.failAt(ast.tokens[ast.mainToken(run_node)].start, "expression-form #run -> block execution is not implemented; compile-time block return values, including strings, must be propagated explicitly", .{});
-            }
             var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
             defer block_program.deinit();
             var block_vm = vm_mod.VM.init(comp.allocator, &block_program);
-            return try block_vm.runProc(block_program.main_proc.?, diag);
+            return try comp.ownRunResultString(try block_vm.runProc(block_program.main_proc.?, diag));
         }
         if (ast.tag(expr) != .call_expr) return try comp.executeRunConstExpr(ast, typed, resolved, expr, diag);
         const callee = ast.data(expr).lhs;
@@ -388,6 +369,8 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .int = value });
             } else if (typed.comptime_floats.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .float = value });
+            } else if (typed.comptime_strings.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .string = value });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
@@ -403,6 +386,8 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .int = value });
                 } else if (typed.comptime_floats.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .float = value });
+                } else if (typed.comptime_strings.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .string = value });
                 } else {
                     if (decl == @import("Ast.zig").null_node) {
                         try arg_values.append(comp.allocator, .{ .int = 0 });
@@ -417,6 +402,8 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .int = value });
                     } else if (typed.comptime_floats.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .float = value });
+                    } else if (typed.comptime_strings.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .string = value });
                     } else {
                         try arg_values.append(comp.allocator, .{ .int = 0 });
                     }
@@ -426,7 +413,19 @@ pub const Compilation = struct {
             }
         }
         var vm = vm_mod.VM.init(comp.allocator, &run_program);
-        return try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag);
+        return try comp.ownRunResultString(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
+    }
+
+    fn ownRunResultString(comp: *Compilation, value: vm_mod.Value) !vm_mod.Value {
+        return switch (value) {
+            .string => |string_value| blk: {
+                const owned = try comp.allocator.dupe(u8, string_value);
+                errdefer comp.allocator.free(owned);
+                try comp.owned_run_result_strings.append(comp.allocator, owned);
+                break :blk .{ .string = owned };
+            },
+            else => value,
+        };
     }
 
     fn executeRunHostArg(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, arg: @import("Ast.zig").NodeIndex, diag: Diagnostic) !vm_mod.Value {
@@ -435,6 +434,7 @@ pub const Compilation = struct {
         if (ast.tag(arg) == .call_expr) return .{ .int = 0 };
         if (typed.comptime_ints.get(arg)) |value| return .{ .int = value };
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
+        if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },

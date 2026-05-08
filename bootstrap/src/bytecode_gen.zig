@@ -722,6 +722,9 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .load_float, .dest = reg, .arg1 = @truncate(bits), .arg2 = @truncate(bits >> 32), .source_node = expr });
                     return reg;
                 }
+                if (typed.comptime_strings.get(expr)) |value| {
+                    return try ctx.emitString(expr, value);
+                }
             }
             return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "expression-form #run value propagation is not implemented for this expression", .{});
         },
@@ -1300,9 +1303,9 @@ const GenContext = struct {
             }
             if (std.mem.eql(u8, name, "to_calendar")) {
                 const args = ast.extraSlice(ast.data(expr).rhs);
-                if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "to_calendar expects two arguments", .{});
+                if (args.len < 1 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "to_calendar expects one or two arguments", .{});
                 const time_reg = try ctx.genExpr(@intCast(args[0]), diag);
-                const tz = try timezoneLiteralValue(ast, @intCast(args[1]), diag);
+                const tz = if (args.len == 2) try timezoneLiteralValue(ast, @intCast(args[1]), diag) else 1;
                 const reg = proc.num_registers;
                 proc.num_registers += 1;
                 try proc.instructions.append(program.allocator, .{ .opcode = .to_calendar, .dest = reg, .arg1 = time_reg, .arg2 = tz, .source_node = expr });
@@ -1564,6 +1567,10 @@ const GenContext = struct {
         if (std.mem.eql(u8, name, "run_command") or std.mem.eql(u8, name, "add_global_data")) {
             for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
             return try ctx.emitInt(expr, 0);
+        }
+        if (std.mem.eql(u8, name, "parse_plugin_arguments")) {
+            for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+            return try ctx.emitBool(expr, true);
         }
         if (std.mem.eql(u8, name, "builder_to_string") or std.mem.eql(u8, name, "code_to_string")) {
             for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);

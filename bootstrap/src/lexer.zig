@@ -172,16 +172,13 @@ const Lexer = struct {
             while (trimmed_start < line_end and (l.source[trimmed_start] == ' ' or l.source[trimmed_start] == '\t')) trimmed_start += 1;
             var trimmed_end = line_end;
             while (trimmed_end > trimmed_start and (l.source[trimmed_end - 1] == ' ' or l.source[trimmed_end - 1] == '\t')) trimmed_end -= 1;
-            var candidate_end = trimmed_end;
-            if (candidate_end > trimmed_start and l.source[candidate_end - 1] == ';') {
-                candidate_end -= 1;
-                while (candidate_end > trimmed_start and (l.source[candidate_end - 1] == ' ' or l.source[candidate_end - 1] == '\t')) candidate_end -= 1;
-            }
-            if (std.mem.eql(u8, l.source[trimmed_start..candidate_end], delimiter)) {
+            if (l.multilineStringDelimiterSuffix(trimmed_start, trimmed_end, delimiter)) |suffix_start| {
                 try l.tokens.append(l.allocator, .{ .tag = .string_literal, .start = @intCast(payload_start), .end = @intCast(line_start) });
-                l.index = line_end;
-                if (l.index < l.source.len and l.source[l.index] == '\r') l.index += 1;
-                if (l.index < l.source.len and l.source[l.index] == '\n') l.index += 1;
+                l.index = suffix_start;
+                if (l.index >= line_end) {
+                    if (l.index < l.source.len and l.source[l.index] == '\r') l.index += 1;
+                    if (l.index < l.source.len and l.source[l.index] == '\n') l.index += 1;
+                }
                 return;
             }
             l.index = line_end;
@@ -189,6 +186,19 @@ const Lexer = struct {
             if (l.index < l.source.len and l.source[l.index] == '\n') l.index += 1;
         }
         return l.diag.failAt(directive_start, "unterminated #string payload; expected delimiter '{s}'", .{delimiter});
+    }
+
+    fn multilineStringDelimiterSuffix(l: *const Lexer, trimmed_start: usize, trimmed_end: usize, delimiter: []const u8) ?usize {
+        if (trimmed_end < trimmed_start + delimiter.len) return null;
+        if (!std.mem.eql(u8, l.source[trimmed_start .. trimmed_start + delimiter.len], delimiter)) return null;
+        var suffix = trimmed_start + delimiter.len;
+        while (suffix < trimmed_end and (l.source[suffix] == ' ' or l.source[suffix] == '\t')) suffix += 1;
+        if (suffix == trimmed_end) return trimmed_end;
+        return switch (l.source[suffix]) {
+            ';' => trimmed_end,
+            ',', ')', ']', '}' => suffix,
+            else => null,
+        };
     }
 
     fn number(l: *Lexer, start: usize) !void {
@@ -346,6 +356,28 @@ test "lexer tokenizes #string multiline payload and reports unterminated payload
     const bad = "INFO :: #string STRING\n<?xml version=\"1.0\" ?>\n";
     const bad_diag = Diagnostic.init(std.testing.allocator, "bad_multiline_string.jai", bad);
     try std.testing.expectError(error.CompilationFailed, tokenize(std.testing.allocator, bad, bad_diag));
+}
+
+test "lexer leaves #string delimiter comma as call argument separator" {
+    const source = "value :: tprint(#string STRING\nhello\nSTRING,\nname);\n";
+    const diag = Diagnostic.init(std.testing.allocator, "multiline_string_comma.jai", source);
+    var tokens = try tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const tags = tokens.items(.tag);
+    const expected = &[_]Tag{
+        .identifier,
+        .colon_colon,
+        .identifier,
+        .l_paren,
+        .directive_string,
+        .string_literal,
+        .comma,
+        .identifier,
+        .r_paren,
+        .semicolon,
+        .eof,
+    };
+    try std.testing.expectEqualSlices(Tag, expected, tags);
 }
 
 test "lexer tokenizes nested block comments and char directive" {
