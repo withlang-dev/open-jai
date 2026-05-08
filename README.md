@@ -29,6 +29,7 @@ corpus. The complete language described in the spec remains work in progress.
 
 ```text
 bootstrap/   Zig implementation of the bootstrap compiler
+src/         Jai port of the bootstrap compiler, kept structurally aligned
 docs/        Language spec and compiler implementation notes
 examples/    Jai/OpenJai example programs used as compiler milestones
 test/        Jai-style test framework and example-derived tests
@@ -90,6 +91,16 @@ make test
 
 This runs the Zig bootstrap tests, the example compile sweep, and the Jai-style
 test harness.
+
+Check the Jai source port:
+
+```sh
+make selfhost-check
+```
+
+The Jai compiler port lives under `src/` and mirrors the Zig bootstrap compiler
+module boundaries. The Zig bootstrap compiler remains the trusted compiler until
+the Jai port can compile `examples/hello.jai` end-to-end.
 
 Clean generated output:
 

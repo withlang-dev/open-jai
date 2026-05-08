@@ -8,12 +8,15 @@ ZIG_GLOBAL_CACHE_DIR := $(OUT_DIR)/zig-cache/global
 BOOTSTRAP_COMPILER := $(BOOTSTRAP_PREFIX)/bin/openjai
 BOOTSTRAP_RUNTIME := $(BOOTSTRAP_PREFIX)/lib/openjai_runtime.o
 EXAMPLES_OUT_DIR := $(OUT_DIR)/examples
+SELFHOST_SRC := src/main.jai
+SELFHOST_OUT_DIR := $(OUT_DIR)/selfhost
+SELFHOST_COMPILER := $(SELFHOST_OUT_DIR)/openjai
 
 SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' | sort)
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 
-.PHONY: bootstrap test test-bootstrap examples test-jai test-all clean
+.PHONY: bootstrap test test-bootstrap examples selfhost-check selfhost-build selfhost-hello test-jai test-all clean
 
 bootstrap:
 	@mkdir -p "$(OUT_DIR)"
@@ -45,6 +48,25 @@ examples: bootstrap
 	done; \
 	echo "compiled $$count supported example(s)"; \
 	exit $$fail
+
+selfhost-check: bootstrap
+	@mkdir -p "$(SELFHOST_OUT_DIR)"
+	@echo "openjai $(SELFHOST_SRC) --check"
+	@"$(BOOTSTRAP_COMPILER)" "$(SELFHOST_SRC)" --check \
+		-o "$(SELFHOST_COMPILER)" \
+		--runtime "$(BOOTSTRAP_RUNTIME)"
+
+selfhost-build: bootstrap
+	@mkdir -p "$(SELFHOST_OUT_DIR)"
+	@echo "openjai $(SELFHOST_SRC) -> $(SELFHOST_COMPILER)"
+	@"$(BOOTSTRAP_COMPILER)" "$(SELFHOST_SRC)" \
+		-o "$(SELFHOST_COMPILER)" \
+		--runtime "$(BOOTSTRAP_RUNTIME)"
+
+selfhost-hello: selfhost-build
+	@echo "selfhost-hello is blocked until the Jai port owns runtime file I/O, LLVM emission, and linking."
+	@echo "Run make selfhost-check for the current source-port milestone."
+	@exit 1
 
 test-jai: bootstrap
 	@cd "$(BOOTSTRAP_DIR)" && zig build test-jai \
