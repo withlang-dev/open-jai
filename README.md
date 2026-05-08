@@ -21,9 +21,9 @@ The bootstrap compiler has the start of the full pipeline:
 source -> lexer -> parser -> AST -> semantic analysis -> bytecode -> LLVM object -> linked executable
 ```
 
-Current support is intentionally narrow. It can compile a small Phase 1 subset
-of the examples, while the complete language described in the spec remains
-work in progress.
+Current support is still incomplete, but the bootstrap compiler now covers a
+large example-driven surface, including compile-through checks for the example
+corpus. The complete language described in the spec remains work in progress.
 
 ## Repository Layout
 
@@ -31,6 +31,7 @@ work in progress.
 bootstrap/   Zig implementation of the bootstrap compiler
 docs/        Language spec and compiler implementation notes
 examples/    Jai/OpenJai example programs used as compiler milestones
+test/        Jai-style test framework and example-derived tests
 out/         Generated build output, ignored by git
 ```
 
@@ -40,6 +41,8 @@ Important docs:
   specification notes.
 - [`docs/OpenJai_implementation_notes.md`](docs/OpenJai_implementation_notes.md):
   bootstrap compiler architecture and implementation plan.
+- [`docs/open_jai_test_spec.md`](docs/open_jai_test_spec.md): Jai-style test
+  framework design and example-test conventions.
 
 ## Requirements
 
@@ -76,8 +79,17 @@ Build the currently supported example subset:
 make examples
 ```
 
-Example binaries and objects are written under `out/examples/`, mirroring the
-source tree.
+`make examples` checks every `*.jai` file under `examples/` by default.
+Generated outputs are written under `out/examples/`, mirroring the source tree.
+
+Run all repository tests:
+
+```sh
+make test
+```
+
+This runs the Zig bootstrap tests, the example compile sweep, and the Jai-style
+test harness.
 
 Clean generated output:
 
@@ -98,20 +110,30 @@ out/bootstrap/bin/openjai examples/03/3.1_hello_sailor.jai \
 The compiler CLI is currently:
 
 ```text
-openjai <input.jai> [-o output] [--runtime runtime.o]
+openjai <input.jai> [--check] [-o output] [--runtime runtime.o]
 ```
 
 ## Examples
 
-`make examples` builds the examples that the current Phase 1 compiler supports.
-As language support grows, add more files to `SUPPORTED_EXAMPLES` in the
-[`Makefile`](Makefile).
+`make examples` runs the broad compile-through acceptance sweep for the example
+corpus. The `SUPPORTED_EXAMPLES` list is discovered dynamically from
+`examples/**/*.jai`.
 
 You can also override the example list:
 
 ```sh
 make examples EXAMPLES="examples/03/3.1_hello_sailor.jai examples/05/5.1_literals.jai"
 ```
+
+## Tests
+
+The project has two layers of tests:
+
+- `make test-bootstrap`: Zig unit tests for the bootstrap compiler.
+- `make test-jai`: Jai-style tests described by
+  [`docs/open_jai_test_spec.md`](docs/open_jai_test_spec.md).
+
+Use `make test` for the full local suite.
 
 ## Git Hygiene
 
