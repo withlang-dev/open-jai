@@ -277,6 +277,22 @@ pub const VM = struct {
                         else => return diag.failAt(0, "VM compile-time print currently requires string, integer, float, or bool argument", .{}),
                     }
                 },
+                .call => {
+                    if (inst.arg1 >= vm.program.procs.items.len) return diag.failAt(0, "VM call target procedure index out of range", .{});
+                    if (inst.arg3 + inst.arg2 > vm.program.call_args.items.len) return diag.failAt(0, "VM call argument table out of range", .{});
+                    const call_args = try vm.allocator.alloc(Value, inst.arg2);
+                    defer vm.allocator.free(call_args);
+                    for (call_args, 0..) |*arg, arg_index| {
+                        const reg_index = vm.program.call_args.items[inst.arg3 + arg_index];
+                        if (reg_index >= regs.len) return diag.failAt(0, "VM call argument register out of range", .{});
+                        arg.* = try registerValueToValue(regs[reg_index], diag);
+                    }
+                    const result = try vm.runProcWithArgs(inst.arg1, call_args, diag);
+                    if (result != .void) {
+                        if (inst.dest >= regs.len) return diag.failAt(0, "VM call result register out of range", .{});
+                        regs[inst.dest] = registerValueFromValue(result);
+                    }
+                },
                 .format_print => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM format_print register out of range", .{});
                     switch (regs[inst.arg1]) {
@@ -364,6 +380,26 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .float => |v| v != 0,
         .string => |v| v.len != 0,
         .empty => false,
+    };
+}
+
+fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
+    return switch (value) {
+        .int => |v| .{ .int = v },
+        .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
+        .string => |v| .{ .string = v },
+        .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
+    };
+}
+
+fn registerValueFromValue(value: Value) RegisterValue {
+    return switch (value) {
+        .int => |v| .{ .int = v },
+        .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
+        .string => |v| .{ .string = v },
+        .void => .empty,
     };
 }
 

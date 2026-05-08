@@ -118,15 +118,16 @@ parser_parse_identifier_var :: (parser: *Parser) -> Node_Index {
 parser_parse_proc_decl_after_name :: (parser: *Parser, name_tok: Token_Index) -> Node_Index {
     params := parser_parse_balanced_node(parser, .l_paren, .r_paren, .param_list);
     body := NULL_NODE;
+    return_type := NULL_NODE;
     if parser_match_discard(parser, .arrow) {
-        parser_parse_opaque_type_until_body_or_terminator(parser);
+        return_type = parser_parse_opaque_type_until_body_or_terminator(parser);
     }
     if parser_check(parser, .l_brace) body = parser_parse_block(parser);
     else parser_match_discard(parser, .semicolon);
 
     sig_values: [..] int;
     array_add(*sig_values, params);
-    array_add(*sig_values, NULL_NODE);
+    array_add(*sig_values, return_type);
     sig_extra := ast_add_extra_values(*parser.ast, sig_values);
 
     data := ast_empty_data();

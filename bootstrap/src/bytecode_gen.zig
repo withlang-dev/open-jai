@@ -21,8 +21,10 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         if (typed.main_proc != null and decl == typed.main_proc.?) continue;
         var helper = Bytecode.ProcBytecode{ .name = ast.tokenSlice(ast.mainToken(decl)) };
         errdefer helper.deinit(allocator);
-        var helper_ctx = GenContext{ .ast = ast, .program = &program, .proc = &helper, .resolved = resolved, .typed = typed };
+        try initProcBytecodeSignature(allocator, ast, decl, &helper, diag);
+        var helper_ctx = GenContext{ .ast = ast, .program = &program, .proc = &helper, .resolved = resolved, .typed = typed, .allow_root_proc_calls = true };
         defer helper_ctx.deinit();
+        try helper_ctx.bindProcParams(decl, helper.param_count, diag);
         try helper_ctx.genBlock(ast.data(decl).lhs, diag);
         try helper.instructions.append(allocator, .{ .opcode = .ret_void });
         try program.procs.append(allocator, helper);
@@ -30,8 +32,10 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
     if (typed.main_proc) |main_proc| {
         var proc = Bytecode.ProcBytecode{ .name = ast.tokenSlice(ast.mainToken(main_proc)) };
         errdefer proc.deinit(allocator);
-        var ctx = GenContext{ .ast = ast, .program = &program, .proc = &proc, .resolved = resolved, .typed = typed };
+        try initProcBytecodeSignature(allocator, ast, main_proc, &proc, diag);
+        var ctx = GenContext{ .ast = ast, .program = &program, .proc = &proc, .resolved = resolved, .typed = typed, .allow_root_proc_calls = true };
         defer ctx.deinit();
+        try ctx.bindProcParams(main_proc, proc.param_count, diag);
         try ctx.genBlock(ast.data(main_proc).lhs, diag);
         try proc.instructions.append(allocator, .{ .opcode = .ret_void });
         const main_idx: u32 = @intCast(program.procs.items.len);
@@ -39,6 +43,27 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         program.main_proc = main_idx;
     }
     return program;
+}
+
+fn initProcBytecodeSignature(allocator: std.mem.Allocator, ast: *const Ast, proc_node: NodeIndex, proc: *Bytecode.ProcBytecode, diag: Diagnostic) !void {
+    if (procSignature(ast, proc_node)) |sig| {
+        const params = ast.extraSlice(sig.params_extra);
+        proc.param_count = @intCast(params.len);
+        proc.num_registers = proc.param_count;
+        for (params) |param_idx| {
+            const param: NodeIndex = @intCast(param_idx);
+            const param_type = ast.data(param).lhs;
+            const type_id: u32 = if (param_type != @import("Ast.zig").null_node)
+                try typeIdFromTypeExpr(ast, param_type, diag)
+            else
+                16;
+            try proc.param_types.append(allocator, type_id);
+        }
+        proc.return_type = if (sig.return_type != @import("Ast.zig").null_node)
+            try typeIdFromTypeExpr(ast, sig.return_type, diag)
+        else
+            0;
+    }
 }
 
 pub fn generateProc(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, proc_node: NodeIndex, diag: Diagnostic) !Bytecode.Program {
@@ -79,6 +104,7 @@ const GenContext = struct {
     proc: *Bytecode.ProcBytecode,
     resolved: *const Resolved,
     typed: ?*const Typed = null,
+    allow_root_proc_calls: bool = false,
     decl_registers: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
     pointer_addrs: std.AutoHashMapUnmanaged(Bytecode.Register, Bytecode.Register) = .empty,
     field_values: std.AutoHashMapUnmanaged(u64, Bytecode.Register) = .empty,
@@ -186,6 +212,76 @@ const GenContext = struct {
         }
     }
 
+    fn tryEmitDirectProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+        if (!ctx.allow_root_proc_calls) return null;
+        const ast = ctx.ast;
+        const sig = procSignature(ast, proc_node) orelse return null;
+        const params = ast.extraSlice(sig.params_extra);
+        if (args.len != params.len) return null;
+
+        const target_index = ctx.procIndexForNode(proc_node) orelse return null;
+        var arg_regs = std.ArrayList(Bytecode.Register).empty;
+        defer arg_regs.deinit(ctx.program.allocator);
+        for (args) |arg_idx| {
+            const arg: NodeIndex = @intCast(arg_idx);
+            const source = if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
+            try arg_regs.append(ctx.program.allocator, try genCallArg(ctx, source, diag));
+        }
+
+        const return_type = if (sig.return_type != @import("Ast.zig").null_node)
+            try typeIdFromTypeExpr(ast, sig.return_type, diag)
+        else
+            0;
+        if (!typeIdCanUseDirectCall(return_type)) return null;
+        for (params) |param_idx| {
+            const param: NodeIndex = @intCast(param_idx);
+            const param_type = ast.data(param).lhs;
+            const param_type_id: u32 = if (param_type != @import("Ast.zig").null_node)
+                try typeIdFromTypeExpr(ast, param_type, diag)
+            else
+                16;
+            if (!typeIdCanUseDirectCall(param_type_id)) return null;
+        }
+        const dest: Bytecode.Register = if (return_type == 0) 0 else blk: {
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            break :blk reg;
+        };
+        const arg_start = try ctx.program.addCallArgs(arg_regs.items);
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .call,
+            .dest = dest,
+            .arg1 = target_index,
+            .arg2 = @intCast(arg_regs.items.len),
+            .arg3 = arg_start,
+            .source_node = call_expr,
+        });
+        return dest;
+    }
+
+    fn typeIdCanUseDirectCall(type_id: u32) bool {
+        return type_id == 0 or type_id == 1 or (type_id >= 2 and type_id <= 15);
+    }
+
+    fn procIndexForNode(ctx: *GenContext, proc_node: NodeIndex) ?u32 {
+        if (ctx.ast.root == @import("Ast.zig").null_node) return null;
+        const root_decls = ctx.ast.extraSlice(ctx.ast.data(ctx.ast.root).lhs);
+        var index: u32 = 0;
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ctx.ast.tag(decl) != .proc_decl) continue;
+            if (ctx.typed) |typed| {
+                if (typed.main_proc != null and decl == typed.main_proc.?) continue;
+            }
+            if (decl == proc_node) return index;
+            index += 1;
+        }
+        if (ctx.typed) |typed| {
+            if (typed.main_proc != null and proc_node == typed.main_proc.?) return index;
+        }
+        return null;
+    }
+
     fn resolveProcCallTarget(ctx: *GenContext, callee: NodeIndex, name: []const u8, arg_count: usize) ?NodeIndex {
         const ast = ctx.ast;
         if (ast.tag(callee) == .proc_decl) return callee;
@@ -266,6 +362,25 @@ const GenContext = struct {
         return try ctx.emitCompoundAssignment(lhs, ast.data(rhs_node).rhs, op, source_node, diag);
     }
 
+    fn tryEmitSelfBinaryAssignment(ctx: *GenContext, lhs: NodeIndex, rhs_node: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+        const ast = ctx.ast;
+        if (ast.tag(rhs_node) != .binary_expr) return null;
+        const rhs_lhs = ast.data(rhs_node).lhs;
+        if (!std.mem.eql(u8, ctx.nodeSource(lhs), ctx.nodeSource(rhs_lhs))) return null;
+        const op = ast.tokens[ast.mainToken(rhs_node)].tag;
+        const compound_op: TokenTag = switch (op) {
+            .plus => .plus_equal,
+            .minus => .minus_equal,
+            .star => .star_equal,
+            .slash => .slash_equal,
+            .ampersand => .ampersand_equal,
+            .pipe => .pipe_equal,
+            .caret => .caret_equal,
+            else => return null,
+        };
+        return try ctx.emitCompoundAssignment(lhs, ast.data(rhs_node).rhs, compound_op, source_node, diag);
+    }
+
     fn emitCompoundAssignment(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
         const current = try ctx.genExpr(lhs, diag);
@@ -335,7 +450,7 @@ const GenContext = struct {
             };
             const value_reg = try ctx.genExpr(value_node, diag);
             const clean_field_type = std.mem.trim(u8, info.type_text, " \t\r\n");
-            if (try typeTextIsStruct(ctx, clean_field_type, diag)) {
+            if (try typeTextIsEmbeddedStruct(ctx, clean_field_type, diag)) {
                 const size_reg = try ctx.emitInt(source_node, @intCast(try typeTextSize(ctx, clean_field_type, diag)));
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = value_reg, .arg2 = size_reg, .source_node = source_node });
             } else {
@@ -467,6 +582,7 @@ const GenContext = struct {
                 const lhs = ast.data(stmt).lhs;
                 const rhs_node = ast.data(stmt).rhs;
                 if (try ctx.tryEmitAssignCompound(lhs, rhs_node, stmt, diag)) |_| return;
+                if (try ctx.tryEmitSelfBinaryAssignment(lhs, rhs_node, stmt, diag)) |_| return;
                 const rhs = try ctx.genExpr(rhs_node, diag);
                 if (ast.tag(lhs) == .field_access) {
                     const field_info = blk: {
@@ -476,7 +592,7 @@ const GenContext = struct {
                     if (field_info) |info| {
                         const addr = try genAddressOfLvalue(ctx, lhs, diag);
                         const clean_field_type = std.mem.trim(u8, info.type_text, " \t\r\n");
-                        if (try typeTextIsStruct(ctx, clean_field_type, diag)) {
+                        if (try typeTextIsEmbeddedStruct(ctx, clean_field_type, diag)) {
                             const size_reg = try ctx.emitInt(stmt, @intCast(try typeTextSize(ctx, clean_field_type, diag)));
                             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = rhs, .arg2 = size_reg, .source_node = stmt });
                         } else {
@@ -511,7 +627,7 @@ const GenContext = struct {
                 } else if (init != @import("Ast.zig").null_node and ast.tag(init) != .undefined_literal) {
                     const reg = try ctx.genExpr(init, diag);
                     const ty = if (ctx.typed) |typed| typed.typeOf(stmt) else Type.init(InternPool.well_known.any_type);
-                    if (ty.isInteger() or ty.isBool()) {
+                    if (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer()) {
                         const addr_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = reg, .source_node = stmt });
@@ -546,7 +662,7 @@ const GenContext = struct {
                     if (value != @import("Ast.zig").null_node) {
                         if (frame.result_type != @import("Ast.zig").null_node) {
                             const result_type_text = std.mem.trim(u8, ctx.nodeSource(frame.result_type), " \t\r\n");
-                            if (try typeTextIsStruct(ctx, result_type_text, diag)) {
+                            if (try typeTextIsEmbeddedStruct(ctx, result_type_text, diag)) {
                                 if (ast.tag(value) == .aggregate_literal) {
                                     try ctx.emitAggregateToStruct(value, frame.result_reg, result_type_text, stmt, diag);
                                 } else {
@@ -670,7 +786,7 @@ const GenContext = struct {
                     else
                         null;
                     const elem_size = if (elem_text) |text| try typeTextSize(ctx, text, diag) else 8;
-                    const elem_is_struct = if (elem_text) |text| try typeTextIsStruct(ctx, text, diag) else false;
+                    const elem_is_struct = if (elem_text) |text| try typeTextIsEmbeddedStruct(ctx, text, diag) else false;
                     const elem_is_string = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(text), "string") else false;
 
                     const count_reg = ctx.proc.num_registers;
@@ -680,6 +796,9 @@ const GenContext = struct {
                     const index_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = index_reg, .arg1 = 0, .source_node = stmt });
+                    const index_addr = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = index_addr, .arg1 = index_reg, .source_node = stmt });
                     try ctx.loop_index_registers.put(ctx.program.allocator, stmt, index_reg);
 
                     const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
@@ -1252,7 +1371,7 @@ const GenContext = struct {
                             break :blk tmp;
                         };
                         const clean_field_type = std.mem.trim(u8, info.type_text, " \t\r\n");
-                        if (isDynamicArrayTypeText(clean_field_type) or try typeTextIsStruct(ctx, clean_field_type, diag)) return addr;
+                        if (isDynamicArrayTypeText(clean_field_type) or try typeTextIsEmbeddedStruct(ctx, clean_field_type, diag)) return addr;
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
                         if (std.mem.eql(u8, firstTypeWord(clean_field_type), "string")) {
@@ -1358,7 +1477,7 @@ const GenContext = struct {
                     }
                     if (dynamicArrayElementText(base_text)) |elem_text| {
                         const elem_size = try typeTextSize(ctx, elem_text, diag);
-                        const elem_is_struct = try typeTextIsStruct(ctx, elem_text, diag);
+                        const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_text, diag);
                         const elem_kind: u32 = if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else 0;
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -1373,6 +1492,7 @@ const GenContext = struct {
                 if (ast.tag(callee) == .proc_decl) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
+                    if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
                     if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
                     for (args) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
@@ -1528,7 +1648,7 @@ const GenContext = struct {
                     else
                         try ctx.genExpr(array_operand, diag);
                     const elem_size = try typeTextSize(ctx, elem_ty, diag);
-                    const elem_is_struct = try typeTextIsStruct(ctx, elem_ty, diag);
+                    const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_ty, diag);
                     var last_reg: ?Bytecode.Register = null;
                     if (args.len == 1) {
                         last_reg = try ctx.genDefaultValue(@import("Ast.zig").null_node, expr, diag);
@@ -1788,6 +1908,7 @@ const GenContext = struct {
                     }
                     if (is_user_proc_call) {
                         if (ctx.resolveProcCallTarget(callee, name, args.len)) |target_proc| {
+                            if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
                             if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
                         }
                         for (args) |arg_idx| {
@@ -1939,7 +2060,7 @@ const GenContext = struct {
                 !std.mem.startsWith(u8, return_text, "*") and
                 std.mem.indexOf(u8, return_text, "->") == null and
                 !isDynamicArrayTypeText(return_text) and
-                !(try typeTextIsStruct(ctx, return_text, diag));
+                !(try typeTextIsEmbeddedStruct(ctx, return_text, diag));
             if (stack_back) {
                 const addr_reg = ctx.proc.num_registers;
                 ctx.proc.num_registers += 1;
@@ -2407,7 +2528,7 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             const base_reg = try ctx.genExpr(base, diag);
             const index_reg = try ctx.genExpr(ast.data(expr).rhs, diag);
             const elem_size = try typeTextSize(ctx, elem_ty, diag);
-            const is_struct = try typeTextIsStruct(ctx, elem_ty, diag);
+            const is_struct = try typeTextIsEmbeddedStruct(ctx, elem_ty, diag);
             const addr = proc.num_registers;
             proc.num_registers += 1;
             try proc.instructions.append(program.allocator, .{ .opcode = .array_index, .dest = addr, .arg1 = base_reg, .arg2 = index_reg, .arg3 = @intCast(elem_size), .arg4 = if (is_struct) 1 else 0, .source_node = expr });
@@ -2555,6 +2676,14 @@ fn typeTextIsStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !b
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return false;
     return (try structTypeNodeByName(ctx, type_name)) != null;
+}
+
+fn typeTextIsEmbeddedStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !bool {
+    var ty = std.mem.trim(u8, raw_type, " \t\r\n");
+    while (std.mem.startsWith(u8, ty, "using")) ty = std.mem.trim(u8, ty[5..], " \t\r\n");
+    if (ty.len == 0 or ty[0] == '*') return false;
+    if (std.mem.startsWith(u8, ty, "[..]") or std.mem.indexOf(u8, ty, "->") != null) return false;
+    return try typeTextIsStruct(ctx, ty, diag);
 }
 
 fn structTypeNodeByName(ctx: *GenContext, name: []const u8) !?NodeIndex {
@@ -2911,6 +3040,9 @@ fn typeIdFromTypeExpr(ast: *const Ast, node: NodeIndex, diag: Diagnostic) !u32 {
 fn typeIdFromToken(ast: *const Ast, token: u32, diag: Diagnostic) !u32 {
     const name = ast.tokenSlice(token);
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64")) return 5;
+    if (std.mem.eql(u8, name, "Node_Index") or std.mem.eql(u8, name, "Token_Index") or std.mem.eql(u8, name, "Extra_Index")) return 5;
+    if (std.mem.eql(u8, name, "Register") or std.mem.eql(u8, name, "String_Index") or std.mem.eql(u8, name, "Type_Id")) return 5;
+    if (std.mem.eql(u8, name, "Token_Tag") or std.mem.eql(u8, name, "Ast_Node_Tag") or std.mem.eql(u8, name, "Compile_Result")) return 5;
     if (std.mem.eql(u8, name, "s32")) return 4;
     if (std.mem.eql(u8, name, "u8")) return 7;
     if (std.mem.eql(u8, name, "u16")) return 8;

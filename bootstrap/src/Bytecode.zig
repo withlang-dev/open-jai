@@ -110,11 +110,13 @@ pub const Instruction = struct {
 pub const ProcBytecode = struct {
     name: []const u8,
     instructions: std.ArrayList(Instruction) = .empty,
+    param_types: std.ArrayList(u32) = .empty,
     num_registers: u32 = 0,
     param_count: u32 = 0,
     return_type: u32 = 0,
 
     pub fn deinit(p: *ProcBytecode, allocator: std.mem.Allocator) void {
+        p.param_types.deinit(allocator);
         p.instructions.deinit(allocator);
     }
 };
@@ -123,6 +125,7 @@ pub const Program = struct {
     allocator: std.mem.Allocator,
     strings: std.ArrayList([]const u8) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
+    call_args: std.ArrayList(Register) = .empty,
     main_proc: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator) Program {
@@ -132,6 +135,7 @@ pub const Program = struct {
     pub fn deinit(p: *Program) void {
         for (p.strings.items) |s| p.allocator.free(s);
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
+        p.call_args.deinit(p.allocator);
         p.strings.deinit(p.allocator);
         p.procs.deinit(p.allocator);
     }
@@ -142,5 +146,11 @@ pub const Program = struct {
         const idx: StringIndex = @intCast(p.strings.items.len);
         try p.strings.append(p.allocator, owned);
         return idx;
+    }
+
+    pub fn addCallArgs(p: *Program, args: []const Register) !u32 {
+        const start: u32 = @intCast(p.call_args.items.len);
+        try p.call_args.appendSlice(p.allocator, args);
+        return start;
     }
 };
