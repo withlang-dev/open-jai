@@ -67,6 +67,7 @@ pub const Opcode = enum(u8) {
     compiler_arg_count,
     compiler_arg,
     compiler_read_file,
+    compiler_write_file,
     string_len,
     string_data,
     string_slice,

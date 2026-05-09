@@ -4,6 +4,7 @@ const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("string.h");
     @cInclude("stdlib.h");
+    @cInclude("sys/stat.h");
     @cInclude("time.h");
 });
 
@@ -208,6 +209,33 @@ export fn __openjai_read_entire_file(path_data: [*]const u8, path_len: usize) ?*
     const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
     header.* = .{ .len = len, .data = data };
     return header;
+}
+
+export fn __openjai_write_entire_file(path_data: [*]const u8, path_len: usize, contents_data: [*]const u8, contents_len: usize) bool {
+    const path_raw = c.malloc(path_len + 1) orelse return false;
+    defer c.free(path_raw);
+    const path: [*]u8 = @ptrCast(path_raw);
+    if (path_len != 0) @memcpy(path[0..path_len], path_data[0..path_len]);
+    path[path_len] = 0;
+
+    makeParentDirs(path, path_len);
+
+    const file = c.fopen(path, "wb") orelse return false;
+    defer _ = c.fclose(file);
+    if (contents_len == 0) return true;
+    return c.fwrite(contents_data, 1, contents_len, file) == contents_len;
+}
+
+fn makeParentDirs(path: [*]u8, path_len: usize) void {
+    var i: usize = 0;
+    while (i < path_len) : (i += 1) {
+        if (path[i] != '/') continue;
+        if (i == 0) continue;
+        const saved = path[i];
+        path[i] = 0;
+        _ = c.mkdir(path, 0o755);
+        path[i] = saved;
+    }
 }
 
 export fn __openjai_string_equal(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {

@@ -354,6 +354,20 @@ bytecode_gen_call :: (ctx: *Bytecode_Gen_Context, expr: Node_Index, diag: *Diagn
         proc_bytecode_add_instruction(ctx.proc, inst);
         return reg;
     }
+    if name == "compiler_write_file" {
+        path := bytecode_emit_int(ctx, expr, 0);
+        contents := bytecode_emit_int(ctx, expr, 0);
+        if arg_count > 0 path = bytecode_gen_expr(ctx, ast_extra_at(ctx.ast, args_extra, 0), diag);
+        if arg_count > 1 contents = bytecode_gen_expr(ctx, ast_extra_at(ctx.ast, args_extra, 1), diag);
+        reg := bytecode_alloc_register(ctx);
+        inst := instruction_init(.compiler_write_file);
+        inst.dest = reg;
+        inst.arg1 = path;
+        inst.arg2 = contents;
+        inst.source_node = expr;
+        proc_bytecode_add_instruction(ctx.proc, inst);
+        return reg;
+    }
 
     sym := resolved_lookup(ctx.resolved, name);
     if sym.kind == .proc {

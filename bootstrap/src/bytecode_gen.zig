@@ -1626,6 +1626,16 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_read_file, .dest = reg, .arg1 = path_reg, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "compiler_write_file")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_write_file expects a path string and contents string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const contents_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .compiler_write_file, .dest = reg, .arg1 = path_reg, .arg2 = contents_reg, .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "string_slice")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     return try ctx.emitStringSliceCall(args, expr, diag);
@@ -2607,6 +2617,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     return "int";
                 }
                 if (std.mem.eql(u8, name, "thread_is_done") or
+                    std.mem.eql(u8, name, "compiler_write_file") or
                     std.mem.eql(u8, name, "is_digit") or
                     std.mem.eql(u8, name, "is_alpha") or
                     std.mem.eql(u8, name, "is_alnum") or
@@ -3651,6 +3662,48 @@ test "Phase 1 hello sailor lowers to expected bytecode flow" {
     try std.testing.expectEqual(@as(u32, 0), proc.instructions.items[1].arg1);
     try std.testing.expectEqual(Bytecode.Opcode.ret_void, proc.instructions.items[2].opcode);
     try std.testing.expectEqualSlices(u8, "Hello, Sailor from Jai!\n", program.strings.items[proc.instructions.items[0].arg1]);
+}
+
+test "compiler_write_file lowers to file write bytecode" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve = @import("resolve.zig");
+    const sema = @import("Sema.zig");
+
+    const source = "#import \"Basic\";\nmain :: () {\n ok := compiler_write_file(\"out/tmp/write_probe.txt\", \"probe\\n\");\n if !ok exit(1);\n}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "write_probe.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const token_slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, token_slice.items(.tag), token_slice.items(.start), token_slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true);
+    defer resolved.deinit();
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+
+    var typed = try sema.analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+
+    var program = try generate(std.testing.allocator, &ast, &typed, &resolved, diag);
+    defer program.deinit();
+
+    const proc = &program.procs.items[program.main_proc.?];
+    var write_inst: ?Bytecode.Instruction = null;
+    for (proc.instructions.items) |inst| {
+        if (inst.opcode == .compiler_write_file) write_inst = inst;
+    }
+    const inst = write_inst orelse return error.MissingCompilerWriteFile;
+    try std.testing.expect(inst.dest < proc.num_registers);
+    try std.testing.expect(inst.arg1 < proc.num_registers);
+    try std.testing.expect(inst.arg2 < proc.num_registers);
 }
 
 test "push_context emits the nested block body" {
