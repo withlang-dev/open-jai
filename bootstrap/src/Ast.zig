@@ -17,6 +17,7 @@ pub const Node = struct {
         scope_decl,
         add_context_decl,
         proc_decl,
+        placeholder_decl,
         const_decl,
         param_list,
         block,

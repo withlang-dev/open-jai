@@ -13,7 +13,7 @@ const InternPool = @import("InternPool.zig").InternPool;
 pub const Options = struct {
     input_path: []const u8,
     output_path: []const u8,
-    runtime_path: []const u8 = "zig-out/lib/openjai_runtime.o",
+    runtime_path: []const u8 = "zig-out/lib/openjai_runtime.manifest",
     check_only: bool = false,
 };
 
@@ -51,6 +51,7 @@ pub const Compilation = struct {
 
         var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, !comp.options.check_only);
         defer resolved.deinit();
+        try resolved.failIfImplicitPlaceholders(diag);
 
         var ip = try InternPool.init(comp.allocator);
         defer ip.deinit();
@@ -94,8 +95,11 @@ pub const Compilation = struct {
     fn resolveRuntimePath(comp: *Compilation) !ResolvedRuntimePath {
         if (try pathExists(comp.io, comp.options.runtime_path)) return .{ .path = comp.options.runtime_path };
 
-        const makefile_runtime = "out/bootstrap/lib/openjai_runtime.o";
+        const makefile_runtime = "out/bootstrap/lib/openjai_runtime.manifest";
         if (try pathExists(comp.io, makefile_runtime)) return .{ .path = makefile_runtime };
+
+        const makefile_runtime_object = "out/bootstrap/lib/openjai_runtime.o";
+        if (try pathExists(comp.io, makefile_runtime_object)) return .{ .path = makefile_runtime_object };
 
         return .{ .path = comp.options.runtime_path };
     }

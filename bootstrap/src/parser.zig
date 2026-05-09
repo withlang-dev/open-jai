@@ -393,8 +393,7 @@ const Parser = struct {
     fn parseTopLevelPlaceholder(p: *Parser, tok: Token.Index) !NodeIndex {
         const name_tok = try p.expect(.identifier, "expected placeholder name after #placeholder", .{});
         _ = p.matchDiscard(.semicolon);
-        const init = try p.ast.addNode(.bool_literal, tok, .{ .lhs = 0 });
-        return p.ast.addNode(.const_decl, name_tok, .{ .lhs = init });
+        return p.ast.addNode(.placeholder_decl, name_tok, .{ .lhs = tok });
     }
 
     fn parseScope(p: *Parser, tok: Token.Index) !NodeIndex {
@@ -2274,7 +2273,7 @@ test "parser accepts top-level assert and placeholder directives" {
     const decls = ast.extraSlice(ast.data(ast.root).lhs);
     try std.testing.expectEqual(@as(usize, 3), decls.len);
     try std.testing.expectEqual(Node.Tag.run_expr, ast.tag(@intCast(decls[0])));
-    try std.testing.expectEqual(Node.Tag.const_decl, ast.tag(@intCast(decls[1])));
+    try std.testing.expectEqual(Node.Tag.placeholder_decl, ast.tag(@intCast(decls[1])));
     try std.testing.expectEqualStrings("TRUTH", ast.tokenSlice(ast.mainToken(@intCast(decls[1]))));
 }
 

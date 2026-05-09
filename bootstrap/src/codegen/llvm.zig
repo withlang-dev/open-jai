@@ -49,6 +49,12 @@ const LlvmEnv = struct {
     current_time_consensus_low_fn: c.LLVMValueRef,
     current_time_monotonic_low_fn_ty: c.LLVMTypeRef,
     current_time_monotonic_low_fn: c.LLVMValueRef,
+    get_time_seconds_fn_ty: c.LLVMTypeRef,
+    get_time_seconds_fn: c.LLVMValueRef,
+    seconds_since_init_fn_ty: c.LLVMTypeRef,
+    seconds_since_init_fn: c.LLVMValueRef,
+    to_float64_seconds_fn_ty: c.LLVMTypeRef,
+    to_float64_seconds_fn: c.LLVMValueRef,
     to_calendar_fn_ty: c.LLVMTypeRef,
     to_calendar_fn: c.LLVMValueRef,
     calendar_get_i64_fn_ty: c.LLVMTypeRef,
@@ -71,12 +77,36 @@ const LlvmEnv = struct {
     read_entire_file_fn: c.LLVMValueRef,
     write_entire_file_fn_ty: c.LLVMTypeRef,
     write_entire_file_fn: c.LLVMValueRef,
+    get_command_line_arguments_fn_ty: c.LLVMTypeRef,
+    get_command_line_arguments_fn: c.LLVMValueRef,
+    sleep_milliseconds_fn_ty: c.LLVMTypeRef,
+    sleep_milliseconds_fn: c.LLVMValueRef,
+    make_directory_fn_ty: c.LLVMTypeRef,
+    make_directory_fn: c.LLVMValueRef,
+    file_exists_fn_ty: c.LLVMTypeRef,
+    file_exists_fn: c.LLVMValueRef,
+    file_open_fn_ty: c.LLVMTypeRef,
+    file_open_fn: c.LLVMValueRef,
+    file_close_fn_ty: c.LLVMTypeRef,
+    file_close_fn: c.LLVMValueRef,
+    file_length_fn_ty: c.LLVMTypeRef,
+    file_length_fn: c.LLVMValueRef,
+    file_set_position_fn_ty: c.LLVMTypeRef,
+    file_set_position_fn: c.LLVMValueRef,
+    file_write_fn_ty: c.LLVMTypeRef,
+    file_write_fn: c.LLVMValueRef,
+    file_read_fn_ty: c.LLVMTypeRef,
+    file_read_fn: c.LLVMValueRef,
     string_equal_fn_ty: c.LLVMTypeRef,
     string_equal_fn: c.LLVMValueRef,
     string_slice_fn_ty: c.LLVMTypeRef,
     string_slice_fn: c.LLVMValueRef,
     array_add_fn_ty: c.LLVMTypeRef,
     array_add_fn: c.LLVMValueRef,
+    array_free_fn_ty: c.LLVMTypeRef,
+    array_free_fn: c.LLVMValueRef,
+    new_array_fn_ty: c.LLVMTypeRef,
+    new_array_fn: c.LLVMValueRef,
     array_count_fn_ty: c.LLVMTypeRef,
     array_count_fn: c.LLVMValueRef,
     array_index_fn_ty: c.LLVMTypeRef,
@@ -155,6 +185,13 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const current_time_consensus_low_fn = c.LLVMAddFunction(module, "__openjai_current_time_consensus_low", current_time_consensus_low_fn_ty);
     const current_time_monotonic_low_fn_ty = c.LLVMFunctionType(llvm_i64, null, 0, 0);
     const current_time_monotonic_low_fn = c.LLVMAddFunction(module, "__openjai_current_time_monotonic_low", current_time_monotonic_low_fn_ty);
+    const get_time_seconds_fn_ty = c.LLVMFunctionType(llvm_f64, null, 0, 0);
+    const get_time_seconds_fn = c.LLVMAddFunction(module, "__openjai_get_time_seconds", get_time_seconds_fn_ty);
+    const seconds_since_init_fn_ty = c.LLVMFunctionType(llvm_f64, null, 0, 0);
+    const seconds_since_init_fn = c.LLVMAddFunction(module, "__openjai_seconds_since_init", seconds_since_init_fn_ty);
+    const to_float64_seconds_params = [_]c.LLVMTypeRef{llvm_i64};
+    const to_float64_seconds_fn_ty = c.LLVMFunctionType(llvm_f64, @constCast(&to_float64_seconds_params), to_float64_seconds_params.len, 0);
+    const to_float64_seconds_fn = c.LLVMAddFunction(module, "__openjai_to_float64_seconds", to_float64_seconds_fn_ty);
     const to_calendar_params = [_]c.LLVMTypeRef{ llvm_i64, llvm_i64 };
     const to_calendar_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&to_calendar_params), to_calendar_params.len, 0);
     const to_calendar_fn = c.LLVMAddFunction(module, "__openjai_to_calendar", to_calendar_fn_ty);
@@ -185,6 +222,32 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const write_entire_file_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, ptr_ty, llvm_i64 };
     const write_entire_file_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&write_entire_file_params), write_entire_file_params.len, 0);
     const write_entire_file_fn = c.LLVMAddFunction(module, "__openjai_write_entire_file", write_entire_file_fn_ty);
+    const get_command_line_arguments_fn_ty = c.LLVMFunctionType(ptr_ty, null, 0, 0);
+    const get_command_line_arguments_fn = c.LLVMAddFunction(module, "__openjai_get_command_line_arguments", get_command_line_arguments_fn_ty);
+    const sleep_milliseconds_params = [_]c.LLVMTypeRef{llvm_i64};
+    const sleep_milliseconds_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&sleep_milliseconds_params), sleep_milliseconds_params.len, 0);
+    const sleep_milliseconds_fn = c.LLVMAddFunction(module, "__openjai_sleep_milliseconds", sleep_milliseconds_fn_ty);
+    const make_directory_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const make_directory_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&make_directory_params), make_directory_params.len, 0);
+    const make_directory_fn = c.LLVMAddFunction(module, "__openjai_make_directory", make_directory_fn_ty);
+    const file_exists_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&make_directory_params), make_directory_params.len, 0);
+    const file_exists_fn = c.LLVMAddFunction(module, "__openjai_file_exists", file_exists_fn_ty);
+    const file_open_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, c.LLVMInt1TypeInContext(context), c.LLVMInt1TypeInContext(context) };
+    const file_open_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&file_open_params), file_open_params.len, 0);
+    const file_open_fn = c.LLVMAddFunction(module, "__openjai_file_open", file_open_fn_ty);
+    const file_close_params = [_]c.LLVMTypeRef{ptr_ty};
+    const file_close_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&file_close_params), file_close_params.len, 0);
+    const file_close_fn = c.LLVMAddFunction(module, "__openjai_file_close", file_close_fn_ty);
+    const file_length_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&file_close_params), file_close_params.len, 0);
+    const file_length_fn = c.LLVMAddFunction(module, "__openjai_file_length", file_length_fn_ty);
+    const file_set_position_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const file_set_position_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&file_set_position_params), file_set_position_params.len, 0);
+    const file_set_position_fn = c.LLVMAddFunction(module, "__openjai_file_set_position", file_set_position_fn_ty);
+    const file_rw_params = [_]c.LLVMTypeRef{ ptr_ty, ptr_ty, llvm_i64 };
+    const file_write_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&file_rw_params), file_rw_params.len, 0);
+    const file_write_fn = c.LLVMAddFunction(module, "__openjai_file_write", file_write_fn_ty);
+    const file_read_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&file_rw_params), file_rw_params.len, 0);
+    const file_read_fn = c.LLVMAddFunction(module, "__openjai_file_read", file_read_fn_ty);
     const string_equal_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, ptr_ty, llvm_i64 };
     const string_equal_fn_ty = c.LLVMFunctionType(c.LLVMInt8TypeInContext(context), @constCast(&string_equal_params), string_equal_params.len, 0);
     const string_equal_fn = c.LLVMAddFunction(module, "__openjai_string_equal", string_equal_fn_ty);
@@ -194,6 +257,12 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const array_add_params = [_]c.LLVMTypeRef{ ptr_ty, ptr_ty, llvm_i64 };
     const array_add_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&array_add_params), array_add_params.len, 0);
     const array_add_fn = c.LLVMAddFunction(module, "__openjai_array_add", array_add_fn_ty);
+    const array_free_params = [_]c.LLVMTypeRef{ptr_ty};
+    const array_free_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&array_free_params), array_free_params.len, 0);
+    const array_free_fn = c.LLVMAddFunction(module, "__openjai_array_free", array_free_fn_ty);
+    const new_array_params = [_]c.LLVMTypeRef{ llvm_i64, llvm_i64, llvm_i64 };
+    const new_array_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&new_array_params), new_array_params.len, 0);
+    const new_array_fn = c.LLVMAddFunction(module, "__openjai_new_array", new_array_fn_ty);
     const array_count_params = [_]c.LLVMTypeRef{ptr_ty};
     const array_count_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&array_count_params), array_count_params.len, 0);
     const array_count_fn = c.LLVMAddFunction(module, "__openjai_array_count", array_count_fn_ty);
@@ -201,8 +270,8 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const array_index_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&array_index_params), array_index_params.len, 0);
     const array_index_fn = c.LLVMAddFunction(module, "__openjai_array_index", array_index_fn_ty);
 
-    const main_fn_ty = c.LLVMFunctionType(llvm_i32, null, 0, 0);
-    const main_fn = if (program.main_proc != null) c.LLVMAddFunction(module, "main", main_fn_ty) else null;
+    const user_main_fn_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
+    const user_main_fn = if (program.main_proc != null) c.LLVMAddFunction(module, "__openjai_user_main", user_main_fn_ty) else null;
     const proc_void_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
     var proc_functions = try allocator.alloc(c.LLVMValueRef, program.procs.items.len);
     defer allocator.free(proc_functions);
@@ -229,7 +298,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         proc_functions[i] = c.LLVMAddFunction(module, fn_name_z.ptr, fn_ty);
     }
 
-    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
+    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .get_time_seconds_fn_ty = get_time_seconds_fn_ty, .get_time_seconds_fn = get_time_seconds_fn, .seconds_since_init_fn_ty = seconds_since_init_fn_ty, .seconds_since_init_fn = seconds_since_init_fn, .to_float64_seconds_fn_ty = to_float64_seconds_fn_ty, .to_float64_seconds_fn = to_float64_seconds_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .get_command_line_arguments_fn_ty = get_command_line_arguments_fn_ty, .get_command_line_arguments_fn = get_command_line_arguments_fn, .sleep_milliseconds_fn_ty = sleep_milliseconds_fn_ty, .sleep_milliseconds_fn = sleep_milliseconds_fn, .make_directory_fn_ty = make_directory_fn_ty, .make_directory_fn = make_directory_fn, .file_exists_fn_ty = file_exists_fn_ty, .file_exists_fn = file_exists_fn, .file_open_fn_ty = file_open_fn_ty, .file_open_fn = file_open_fn, .file_close_fn_ty = file_close_fn_ty, .file_close_fn = file_close_fn, .file_length_fn_ty = file_length_fn_ty, .file_length_fn = file_length_fn, .file_set_position_fn_ty = file_set_position_fn_ty, .file_set_position_fn = file_set_position_fn, .file_write_fn_ty = file_write_fn_ty, .file_write_fn = file_write_fn, .file_read_fn_ty = file_read_fn_ty, .file_read_fn = file_read_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_free_fn_ty = array_free_fn_ty, .array_free_fn = array_free_fn, .new_array_fn_ty = new_array_fn_ty, .new_array_fn = new_array_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
 
     for (program.procs.items, 0..) |*helper_proc, i| {
         if (program.main_proc != null and i == program.main_proc.?) continue;
@@ -251,14 +320,14 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     }
 
     if (program.main_proc) |main_proc| {
-        const entry = c.LLVMAppendBasicBlockInContext(context, main_fn.?, "entry");
+        const entry = c.LLVMAppendBasicBlockInContext(context, user_main_fn.?, "entry");
         c.LLVMPositionBuilderAtEnd(builder, entry);
         const proc = &program.procs.items[main_proc];
         const registers = try allocator.alloc(RegisterValue, @max(proc.num_registers, 1));
         defer allocator.free(registers);
         @memset(registers, .{});
         try emitProcInstructions(&env, proc, registers, diag);
-        _ = c.LLVMBuildRet(builder, c.LLVMConstInt(llvm_i32, 0, 0));
+        _ = c.LLVMBuildRetVoid(builder);
     }
 
     var verify_msg: [*c]u8 = null;
@@ -571,6 +640,15 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 _ = c.LLVMBuildStore(env.builder, result, slot);
                 registers[inst.dest] = .{ .llvm_value = slot, .kind = .{ .pointer_addr = inst.dest } };
             },
+            .new_array => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend new_array destination register out of range", .{});
+                var args = [_]c.LLVMValueRef{
+                    c.LLVMConstInt(env.llvm_i64, inst.arg1, 0),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg3, 0),
+                };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.new_array_fn_ty, env.new_array_fn, &args, args.len, "new_array"), .kind = .pointer };
+            },
             .alloc_local_bytes => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend alloc_local_bytes destination register out of range", .{});
                 const current_function = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
@@ -588,6 +666,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 var args = [_]c.LLVMValueRef{ slot_ptr, item_ptr, c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
                 const result = c.LLVMBuildCall2(env.builder, env.array_add_fn_ty, env.array_add_fn, &args, args.len, "array_item");
                 try setPointerResult(env, registers, inst.dest, result);
+            },
+            .array_free => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_free register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "array_free array")};
+                _ = c.LLVMBuildCall2(env.builder, env.array_free_fn_ty, env.array_free_fn, &args, args.len, "");
             },
             .array_count => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_count register out of range", .{});
@@ -692,6 +775,22 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const result = c.LLVMBuildCall2(env.builder, env.current_time_monotonic_low_fn_ty, env.current_time_monotonic_low_fn, null, 0, "time_low");
                 registers[inst.dest] = .{ .llvm_value = result, .kind = .int };
             },
+            .get_time_seconds => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend get_time_seconds destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.get_time_seconds_fn_ty, env.get_time_seconds_fn, null, 0, "time_seconds");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .float };
+            },
+            .seconds_since_init => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend seconds_since_init destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.seconds_since_init_fn_ty, env.seconds_since_init_fn, null, 0, "seconds_since_init");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .float };
+            },
+            .to_float64_seconds => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend to_float64_seconds register out of range", .{});
+                var args = [_]c.LLVMValueRef{try valueAsInt(env, registers[inst.arg1], diag)};
+                const result = c.LLVMBuildCall2(env.builder, env.to_float64_seconds_fn_ty, env.to_float64_seconds_fn, &args, args.len, "apollo_seconds");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .float };
+            },
             .to_calendar => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend to_calendar register out of range", .{});
                 var args = [_]c.LLVMValueRef{ try valueAsInt(env, registers[inst.arg1], diag), c.LLVMConstInt(env.llvm_i64, inst.arg2, 0) };
@@ -757,6 +856,76 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const contents = try stringParts(env, registers[inst.arg2], diag);
                 var args = [_]c.LLVMValueRef{ path.data, path.len, contents.data, contents.len };
                 const result = c.LLVMBuildCall2(env.builder, env.write_entire_file_fn_ty, env.write_entire_file_fn, &args, args.len, "openjai_write_file");
+                try setBoolResult(env, registers, inst.dest, result);
+            },
+            .get_command_line_arguments => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend get_command_line_arguments destination out of range", .{});
+                const result = c.LLVMBuildCall2(env.builder, env.get_command_line_arguments_fn_ty, env.get_command_line_arguments_fn, null, 0, "argv_array");
+                try setPointerResult(env, registers, inst.dest, result);
+            },
+            .sleep_milliseconds => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend sleep_milliseconds register out of range", .{});
+                var args = [_]c.LLVMValueRef{try valueAsInt(env, registers[inst.arg1], diag)};
+                _ = c.LLVMBuildCall2(env.builder, env.sleep_milliseconds_fn_ty, env.sleep_milliseconds_fn, &args, args.len, "");
+                if (inst.dest < registers.len) try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, 0, 0));
+            },
+            .make_directory => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend make_directory register out of range", .{});
+                const path = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{ path.data, path.len };
+                const result = c.LLVMBuildCall2(env.builder, env.make_directory_fn_ty, env.make_directory_fn, &args, args.len, "mkdir_ok");
+                try setBoolResult(env, registers, inst.dest, result);
+            },
+            .file_exists => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend file_exists register out of range", .{});
+                const path = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{ path.data, path.len };
+                const result = c.LLVMBuildCall2(env.builder, env.file_exists_fn_ty, env.file_exists_fn, &args, args.len, "file_exists");
+                try setBoolResult(env, registers, inst.dest, result);
+            },
+            .file_open => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend file_open register out of range", .{});
+                const path = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{
+                    path.data,
+                    path.len,
+                    c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), inst.arg2, 0),
+                    c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), inst.arg3, 0),
+                };
+                const result = c.LLVMBuildCall2(env.builder, env.file_open_fn_ty, env.file_open_fn, &args, args.len, "file_handle");
+                try setPointerResult(env, registers, inst.dest, result);
+            },
+            .file_close => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend file_close register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "file_close handle")};
+                _ = c.LLVMBuildCall2(env.builder, env.file_close_fn_ty, env.file_close_fn, &args, args.len, "");
+            },
+            .file_length => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend file_length register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "file_length handle")};
+                const result = c.LLVMBuildCall2(env.builder, env.file_length_fn_ty, env.file_length_fn, &args, args.len, "file_length");
+                try setIntResult(env, registers, inst.dest, result);
+            },
+            .file_set_position => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend file_set_position register out of range", .{});
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "file_set_position handle"), try valueAsInt(env, registers[inst.arg2], diag) };
+                const result = c.LLVMBuildCall2(env.builder, env.file_set_position_fn_ty, env.file_set_position_fn, &args, args.len, "file_seek_ok");
+                try setBoolResult(env, registers, inst.dest, result);
+            },
+            .file_write => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend file_write register out of range", .{});
+                const data_ptr, const data_len = if (inst.arg4 != 0) blk: {
+                    const parts = try stringParts(env, registers[inst.arg2], diag);
+                    break :blk .{ parts.data, parts.len };
+                } else .{ try pointerValue(env, registers[inst.arg2], diag, "file_write data"), try valueAsInt(env, registers[inst.arg3], diag) };
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "file_write handle"), data_ptr, data_len };
+                const result = c.LLVMBuildCall2(env.builder, env.file_write_fn_ty, env.file_write_fn, &args, args.len, "file_write_ok");
+                try setBoolResult(env, registers, inst.dest, result);
+            },
+            .file_read => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend file_read register out of range", .{});
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "file_read handle"), try pointerValue(env, registers[inst.arg2], diag, "file_read data"), try valueAsInt(env, registers[inst.arg3], diag) };
+                const result = c.LLVMBuildCall2(env.builder, env.file_read_fn_ty, env.file_read_fn, &args, args.len, "file_read_ok");
                 try setBoolResult(env, registers, inst.dest, result);
             },
             .string_len => {
@@ -1095,6 +1264,21 @@ fn runtimeStringValue(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) any
         .pointer => value.llvm_value,
         .pointer_addr => c.LLVMBuildLoad2(env.builder, env.ptr_ty, value.llvm_value, "load_runtime_string_addr"),
         .int, .int_addr => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, value, diag), env.ptr_ty, "runtime_string_inttoptr"),
+        .bool, .bool_addr => blk: {
+            const bool_value = try valueAsBool(env, value, diag);
+            const true_text = c.LLVMBuildGlobalStringPtr(env.builder, "true", "bool_true_text");
+            const false_text = c.LLVMBuildGlobalStringPtr(env.builder, "false", "bool_false_text");
+            const data = c.LLVMBuildSelect(env.builder, bool_value, true_text, false_text, "bool_string_data");
+            const len = c.LLVMBuildSelect(env.builder, bool_value, c.LLVMConstInt(env.llvm_i64, 4, 0), c.LLVMConstInt(env.llvm_i64, 5, 0), "bool_string_len");
+            const function = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
+            const pair_ty = c.LLVMArrayType(env.llvm_i64, 2);
+            const slot = buildEntryAlloca(env, function, pair_ty, "bool_runtime_string");
+            var len_indices = [_]c.LLVMValueRef{ c.LLVMConstInt(env.llvm_i64, 0, 0), c.LLVMConstInt(env.llvm_i64, 0, 0) };
+            _ = c.LLVMBuildStore(env.builder, len, c.LLVMBuildGEP2(env.builder, pair_ty, slot, &len_indices, len_indices.len, "bool_strlen_slot"));
+            var data_indices = [_]c.LLVMValueRef{ c.LLVMConstInt(env.llvm_i64, 0, 0), c.LLVMConstInt(env.llvm_i64, 1, 0) };
+            _ = c.LLVMBuildStore(env.builder, c.LLVMBuildPtrToInt(env.builder, data, env.llvm_i64, "bool_strdata_int"), c.LLVMBuildGEP2(env.builder, pair_ty, slot, &data_indices, data_indices.len, "bool_strdata_slot"));
+            break :blk c.LLVMBuildPointerCast(env.builder, slot, env.ptr_ty, "bool_runtime_string_ptr");
+        },
         else => diag.failAt(0, "expected string-compatible register, got {s}", .{@tagName(value.kind)}),
     };
 }

@@ -27,11 +27,13 @@ fn parseArgs(init: std.process.Init.Minimal) !Options {
     }
 
     var output_path: []const u8 = "out/a.out";
-    var runtime_path: []const u8 = "zig-out/lib/openjai_runtime.o";
+    var runtime_path: []const u8 = "zig-out/lib/openjai_runtime.manifest";
     var check_only = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.eql(u8, arg, "--no-implicit-placeholders") or std.mem.eql(u8, arg, "--strict-placeholders")) {
+            // This is the default bootstrap policy; keep the flag accepted for scripts.
         } else if (std.mem.eql(u8, arg, "-o")) {
             output_path = args.next() orelse {
                 std.debug.print("openjai: error: expected output path after -o\n", .{});

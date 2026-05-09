@@ -52,13 +52,13 @@ pub fn build(b: *std.Build) void {
     const install_exe = b.addInstallBinFile(linked_exe, "openjai");
     b.getInstallStep().dependOn(&install_exe.step);
 
-    const runtime_mod = b.createModule(.{
-        .root_source_file = b.path("lib/runtime.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    runtime_mod.link_libc = true;
+    const runtime_mod = createRuntimeModule(b, target, optimize, "rt/runtime.zig");
+    const runtime_core_mod = createRuntimeModule(b, target, optimize, "rt/core.zig");
+    const runtime_platform_mod = createRuntimeModule(b, target, optimize, "rt/platform_darwin.zig");
+    const runtime_start_mod = createRuntimeModule(b, target, optimize, "rt/start_exe.zig");
 
+    // Direct-object compatibility for --runtime path/to/openjai_runtime.o.
+    // The manifest below is the canonical runtime shape.
     const runtime_obj = b.addObject(.{
         .name = "openjai_runtime",
         .root_module = runtime_mod,
@@ -66,6 +66,40 @@ pub fn build(b: *std.Build) void {
     });
     const install_runtime = b.addInstallFile(runtime_obj.getEmittedBin(), "lib/openjai_runtime.o");
     b.getInstallStep().dependOn(&install_runtime.step);
+
+    const runtime_core_obj = b.addObject(.{
+        .name = "openjai_rt_core",
+        .root_module = runtime_core_mod,
+        .use_llvm = true,
+    });
+    const install_runtime_core = b.addInstallFile(runtime_core_obj.getEmittedBin(), "lib/openjai_rt_core.o");
+    b.getInstallStep().dependOn(&install_runtime_core.step);
+
+    const runtime_platform_obj = b.addObject(.{
+        .name = "openjai_rt_platform_darwin_aarch64",
+        .root_module = runtime_platform_mod,
+        .use_llvm = true,
+    });
+    const install_runtime_platform = b.addInstallFile(runtime_platform_obj.getEmittedBin(), "lib/openjai_rt_platform_darwin_aarch64.o");
+    b.getInstallStep().dependOn(&install_runtime_platform.step);
+
+    const runtime_start_obj = b.addObject(.{
+        .name = "openjai_rt_start_exe",
+        .root_module = runtime_start_mod,
+        .use_llvm = true,
+    });
+    const install_runtime_start = b.addInstallFile(runtime_start_obj.getEmittedBin(), "lib/openjai_rt_start_exe.o");
+    b.getInstallStep().dependOn(&install_runtime_start.step);
+
+    const runtime_manifest = b.addWriteFiles();
+    const manifest_file = runtime_manifest.add("openjai_runtime.manifest",
+        \\openjai_rt_start_exe.o
+        \\openjai_rt_core.o
+        \\openjai_rt_platform_darwin_aarch64.o
+        \\
+    );
+    const install_runtime_manifest = b.addInstallFile(manifest_file, "lib/openjai_runtime.manifest");
+    b.getInstallStep().dependOn(&install_runtime_manifest.step);
 
     // Unit tests use a dedicated test root (test_main.zig) that imports every
     // module with test blocks except Compilation.zig, which transitively imports
@@ -133,6 +167,16 @@ pub fn build(b: *std.Build) void {
 fn configureLlvmImports(mod: *std.Build.Module) void {
     mod.addIncludePath(.{ .cwd_relative = "/usr/local/llvm/include" });
     mod.link_libc = true;
+}
+
+fn createRuntimeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, root_source_file: []const u8) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path(root_source_file),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.link_libc = true;
+    return mod;
 }
 
 fn addTokenizedArgs(run: *std.Build.Step.Run, args: []const u8) void {

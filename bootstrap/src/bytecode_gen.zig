@@ -641,6 +641,7 @@ const GenContext = struct {
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, reg);
                 }
             },
+            .placeholder_decl => {},
             .meta_stmt => return,
             .run_expr => {
                 if (ast.tokens[ast.mainToken(stmt)].tag == .keyword_push_context) {
@@ -1583,6 +1584,32 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = 8, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "NewArray")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "NewArray expects a count and type argument", .{});
+                    const count = try evalIntegerConstExpr(ctx, @intCast(args[0]), diag);
+                    if (count < 0) return diag.failAt(ast.tokens[ast.mainToken(@as(NodeIndex, @intCast(args[0])))].start, "NewArray count must be non-negative", .{});
+                    const elem_type: NodeIndex = @intCast(args[1]);
+                    const elem_size = try typeTextSize(ctx, ctx.nodeSource(elem_type), diag);
+                    for (args[2..]) |arg| {
+                        const arg_node: NodeIndex = @intCast(arg);
+                        if (ast.tag(arg_node) == .assign_stmt)
+                            _ = try ctx.genExpr(ast.data(arg_node).rhs, diag)
+                        else
+                            _ = try genCallArg(ctx, arg_node, diag);
+                    }
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    var alignment: u64 = 0;
+                    for (args[2..]) |arg| {
+                        const arg_node: NodeIndex = @intCast(arg);
+                        if (ast.tag(arg_node) == .assign_stmt and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(arg_node).lhs)), "alignment")) {
+                            alignment = @intCast(try evalIntegerConstExpr(ctx, ast.data(arg_node).rhs, diag));
+                        }
+                    }
+                    try proc.instructions.append(program.allocator, .{ .opcode = .new_array, .dest = reg, .arg1 = @intCast(count), .arg2 = @intCast(@max(elem_size, 1)), .arg3 = @intCast(alignment), .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "free")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "free expects one pointer argument", .{});
@@ -1617,23 +1644,106 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_arg, .dest = reg, .arg1 = index_reg, .source_node = expr });
                     return reg;
                 }
-                if (std.mem.eql(u8, name, "compiler_read_file")) {
+                if (std.mem.eql(u8, name, "compiler_read_file") or std.mem.eql(u8, name, "read_entire_file")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
-                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_read_file expects one path string", .{});
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one path string", .{name});
                     const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_read_file, .dest = reg, .arg1 = path_reg, .source_node = expr });
                     return reg;
                 }
-                if (std.mem.eql(u8, name, "compiler_write_file")) {
+                if (std.mem.eql(u8, name, "compiler_write_file") or std.mem.eql(u8, name, "write_entire_file")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
-                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_write_file expects a path string and contents string", .{});
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects a path string and contents string", .{name});
                     const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const contents_reg = try ctx.genExpr(@intCast(args[1]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_write_file, .dest = reg, .arg1 = path_reg, .arg2 = contents_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "get_command_line_arguments")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_command_line_arguments expects no arguments", .{});
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .get_command_line_arguments, .dest = reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "make_directory_if_it_does_not_exist")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "make_directory_if_it_does_not_exist expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .make_directory, .dest = reg, .arg1 = path_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_exists")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_exists expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_exists, .dest = reg, .arg1 = path_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_open")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_open expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_open, .dest = reg, .arg1 = path_reg, .arg2 = try namedBoolArg(ctx, args[1..], "for_writing", false, diag), .arg3 = try namedBoolArg(ctx, args[1..], "keep_existing_content", false, diag), .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_close")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_close expects one file handle", .{});
+                    const handle_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_close, .arg1 = handle_reg, .source_node = expr });
+                    return handle_reg;
+                }
+                if (std.mem.eql(u8, name, "file_length")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_length expects one file handle", .{});
+                    const handle_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_length, .dest = reg, .arg1 = handle_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_set_position")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_set_position expects a file handle and position", .{});
+                    const handle_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+                    const pos_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_set_position, .dest = reg, .arg1 = handle_reg, .arg2 = pos_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_write")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len < 2 or args.len > 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_write expects a file handle, string or buffer, and optional length", .{});
+                    const handle_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+                    const data_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const len_reg = if (args.len == 3) try ctx.genExpr(@intCast(args[2]), diag) else data_reg;
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_write, .dest = reg, .arg1 = handle_reg, .arg2 = data_reg, .arg3 = len_reg, .arg4 = if (args.len == 2) 1 else 0, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "file_read")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_read expects a file handle, buffer, and byte count", .{});
+                    const handle_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+                    const data_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const len_reg = try ctx.genExpr(@intCast(args[2]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .file_read, .dest = reg, .arg1 = handle_reg, .arg2 = data_reg, .arg3 = len_reg, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "string_slice")) {
@@ -1809,25 +1919,25 @@ const GenContext = struct {
                     if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects no arguments", .{name});
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    const bits: u64 = @bitCast(@as(f64, 0.0));
-                    try proc.instructions.append(program.allocator, .{ .opcode = .load_float, .dest = reg, .arg1 = @truncate(bits), .arg2 = @truncate(bits >> 32), .source_node = expr });
+                    try proc.instructions.append(program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "get_time")) .get_time_seconds else .seconds_since_init, .dest = reg, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "sleep_milliseconds")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "sleep_milliseconds expects one argument", .{});
-                    _ = try ctx.genExpr(@intCast(args[0]), diag);
+                    const ms_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    try proc.instructions.append(program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = 0, .source_node = expr });
+                    try proc.instructions.append(program.allocator, .{ .opcode = .sleep_milliseconds, .dest = reg, .arg1 = ms_reg, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "array_free")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_free expects one argument", .{});
-                    _ = try ctx.genExpr(@intCast(args[0]), diag);
+                    const array_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_free, .arg1 = array_reg, .source_node = expr });
                     try proc.instructions.append(program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = 0, .source_node = expr });
                     return reg;
                 }
@@ -1839,11 +1949,10 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "to_float64_seconds")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "to_float64_seconds expects one argument", .{});
-                    _ = try ctx.genExpr(@intCast(args[0]), diag);
+                    const source = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    const bits: u64 = @bitCast(@as(f64, 0.0));
-                    try proc.instructions.append(program.allocator, .{ .opcode = .load_float, .dest = reg, .arg1 = @truncate(bits), .arg2 = @truncate(bits >> 32), .source_node = expr });
+                    try proc.instructions.append(program.allocator, .{ .opcode = .to_float64_seconds, .dest = reg, .arg1 = source, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "get_field")) {
@@ -2291,6 +2400,9 @@ const GenContext = struct {
         if (std.mem.eql(u8, type_name, "string")) {
             const string_idx = try ctx.program.addString("");
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_string, .dest = reg, .arg1 = string_idx, .source_node = source_node });
+            const addr_reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = reg, .source_node = source_node });
         } else if (std.mem.eql(u8, type_name, "bool")) {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_bool, .dest = reg, .arg1 = 0, .source_node = source_node });
         } else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "float32") or std.mem.eql(u8, type_name, "float64")) {
@@ -2362,7 +2474,7 @@ fn collectNodeEnd(ast: *const Ast, node: NodeIndex, end: *u32) void {
             collectNodeEnd(ast, data.lhs, end);
             collectNodeEnd(ast, data.rhs, end);
         },
-        .const_decl, .expr_stmt, .return_stmt, .pointer_type, .type_of_expr, .size_of_expr, .run_expr, .is_constant_expr, .unary_expr, .defer_stmt => {
+        .const_decl, .placeholder_decl, .expr_stmt, .return_stmt, .pointer_type, .type_of_expr, .size_of_expr, .run_expr, .is_constant_expr, .unary_expr, .defer_stmt => {
             collectNodeEnd(ast, data.lhs, end);
         },
         .proc_decl => {
@@ -2489,6 +2601,33 @@ fn genCallArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.Regi
     return ctx.genExpr(arg, diag);
 }
 
+fn handleArgNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
+    if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .star) return ast.data(arg).lhs;
+    return arg;
+}
+
+fn namedBoolArg(ctx: *GenContext, args: []const u32, option_name: []const u8, default_value: bool, diag: Diagnostic) !u32 {
+    const ast = ctx.ast;
+    for (args) |arg_idx| {
+        const arg: NodeIndex = @intCast(arg_idx);
+        if (ast.tag(arg) != .assign_stmt) {
+            _ = try ctx.genExpr(arg, diag);
+            continue;
+        }
+        const lhs = ast.data(arg).lhs;
+        if (ast.tag(lhs) != .identifier or !std.mem.eql(u8, ast.tokenSlice(ast.mainToken(lhs)), option_name)) {
+            _ = try ctx.genExpr(ast.data(arg).rhs, diag);
+            continue;
+        }
+        const rhs = ast.data(arg).rhs;
+        if (ast.tag(rhs) == .bool_literal) return if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(rhs)), "true")) 1 else 0;
+        const reg = try ctx.genExpr(rhs, diag);
+        _ = reg;
+        return if (default_value) 1 else 0;
+    }
+    return if (default_value) 1 else 0;
+}
+
 fn fieldValueKey(base: Bytecode.Register, name: []const u8) u64 {
     var h: u64 = 14695981039346656037;
     for (name) |c| {
@@ -2597,6 +2736,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 const name = ast.tokenSlice(ast.mainToken(callee));
                 if (std.mem.eql(u8, name, "compiler_arg") or
                     std.mem.eql(u8, name, "compiler_read_file") or
+                    std.mem.eql(u8, name, "read_entire_file") or
                     std.mem.eql(u8, name, "string_slice") or
                     std.mem.eql(u8, name, "formatInt") or
                     std.mem.eql(u8, name, "formatFloat") or
@@ -2608,6 +2748,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     return "string";
                 }
                 if (std.mem.eql(u8, name, "compiler_arg_count") or
+                    std.mem.eql(u8, name, "file_length") or
                     std.mem.eql(u8, name, "array_count") or
                     std.mem.eql(u8, name, "write_string") or
                     std.mem.eql(u8, name, "write_strings") or
@@ -2618,6 +2759,12 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 }
                 if (std.mem.eql(u8, name, "thread_is_done") or
                     std.mem.eql(u8, name, "compiler_write_file") or
+                    std.mem.eql(u8, name, "write_entire_file") or
+                    std.mem.eql(u8, name, "make_directory_if_it_does_not_exist") or
+                    std.mem.eql(u8, name, "file_exists") or
+                    std.mem.eql(u8, name, "file_set_position") or
+                    std.mem.eql(u8, name, "file_write") or
+                    std.mem.eql(u8, name, "file_read") or
                     std.mem.eql(u8, name, "is_digit") or
                     std.mem.eql(u8, name, "is_alpha") or
                     std.mem.eql(u8, name, "is_alnum") or
@@ -2626,6 +2773,8 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 {
                     return "bool";
                 }
+                if (std.mem.eql(u8, name, "file_open")) return "*File";
+                if (std.mem.eql(u8, name, "get_command_line_arguments")) return "[..] string";
             }
             const target = if (ast.tag(callee) == .proc_decl)
                 callee
@@ -2678,6 +2827,10 @@ fn typeTextIsScalarComparable(raw: []const u8) bool {
 fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) !?FieldInfo {
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return null;
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (std.mem.eql(u8, field_name, "count")) return .{ .offset = 0, .type_text = "int" };
+        if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*u8" };
+    }
     const type_node = try structTypeNodeByName(ctx, type_name) orelse return null;
     return try containerFieldInfoFromSource(ctx, type_node, field_name, diag);
 }

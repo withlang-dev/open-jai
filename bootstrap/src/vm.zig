@@ -307,6 +307,10 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});
                     regs[inst.dest] = .{ .int = 0 };
                 },
+                .get_time_seconds, .seconds_since_init, .to_float64_seconds => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM time float destination register out of range", .{});
+                    regs[inst.dest] = .{ .float = 0 };
+                },
                 .to_calendar => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_calendar register out of range", .{});
                     regs[inst.dest] = regs[inst.arg1];
@@ -349,12 +353,22 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .int = base + @as(i64, @intCast(inst.arg2)) };
                 },
-                .load_ptr_string, .alloc_local_bytes, .array_add, .array_count, .array_index, .string_slice => {
+                .load_ptr_string, .alloc_local_bytes, .new_array, .array_add, .array_count, .array_index, .string_slice => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     regs[inst.dest] = .{ .int = 0 };
                 },
+                .sleep_milliseconds => {
+                    return diag.failAt(0, "VM does not support sleep_milliseconds in #run yet", .{});
+                },
+                .get_command_line_arguments, .file_open => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
+                    return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
+                },
+                .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read => {
+                    return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
+                },
                 .store_ptr => {},
-                .memcpy, .free_heap => {},
+                .memcpy, .free_heap, .array_free => {},
                 else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
             }
         }

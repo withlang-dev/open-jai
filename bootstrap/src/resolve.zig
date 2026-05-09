@@ -15,6 +15,7 @@ pub const Symbol = union(enum) {
     builtin_write_number,
     builtin_write_nonnegative_number,
     builtin_new,
+    builtin_new_array,
     builtin_free,
     builtin_exit,
     builtin_memcpy,
@@ -32,6 +33,17 @@ pub const Symbol = union(enum) {
     builtin_compiler_arg,
     builtin_compiler_read_file,
     builtin_compiler_write_file,
+    builtin_get_command_line_arguments,
+    builtin_make_directory_if_it_does_not_exist,
+    builtin_file_exists,
+    builtin_read_entire_file,
+    builtin_write_entire_file,
+    builtin_file_open,
+    builtin_file_close,
+    builtin_file_length,
+    builtin_file_set_position,
+    builtin_file_write,
+    builtin_file_read,
     builtin_format_int,
     builtin_format_float,
     builtin_get_type_table,
@@ -63,6 +75,8 @@ pub const Symbol = union(enum) {
 pub const Resolved = struct {
     allocator: std.mem.Allocator,
     symbols: std.StringHashMapUnmanaged(Symbol) = .empty,
+    implicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
+    used_implicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
     local_values: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex) = .empty,
     loop_value_types: std.AutoHashMapUnmanaged(NodeIndex, u32) = .empty,
     loop_indexes: std.AutoHashMapUnmanaged(NodeIndex, u32) = .empty,
@@ -77,6 +91,8 @@ pub const Resolved = struct {
         var it = r.proc_overloads.iterator();
         while (it.next()) |entry| entry.value_ptr.deinit(r.allocator);
         r.proc_overloads.deinit(r.allocator);
+        r.used_implicit_placeholders.deinit(r.allocator);
+        r.implicit_placeholders.deinit(r.allocator);
         r.symbols.deinit(r.allocator);
         r.local_values.deinit(r.allocator);
         r.loop_value_types.deinit(r.allocator);
@@ -84,6 +100,32 @@ pub const Resolved = struct {
         r.using_fallbacks.deinit(r.allocator);
         for (r.owned_names.items) |name| r.allocator.free(name);
         r.owned_names.deinit(r.allocator);
+    }
+
+    pub fn implicitPlaceholderCount(r: *const Resolved) u32 {
+        return @intCast(r.implicit_placeholders.count());
+    }
+
+    pub fn usedImplicitPlaceholderCount(r: *const Resolved) u32 {
+        return @intCast(r.used_implicit_placeholders.count());
+    }
+
+    pub fn failIfImplicitPlaceholders(r: *const Resolved, diag: Diagnostic) !void {
+        if (r.used_implicit_placeholders.count() == 0) return;
+
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(r.allocator);
+        var it = r.used_implicit_placeholders.keyIterator();
+        while (it.next()) |name| try names.append(r.allocator, name.*);
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+                return std.mem.lessThan(u8, lhs, rhs);
+            }
+        }.lessThan);
+
+        std.debug.print("implicit placeholder symbols:\n", .{});
+        for (names.items) |name| std.debug.print("  {s}\n", .{name});
+        return diag.failAt(0, "implicit placeholder symbols are disabled; first used placeholder is '{s}' ({d} used, {d} accepted)", .{ names.items[0], names.items.len, r.implicit_placeholders.count() });
     }
 
     pub fn lookup(r: *const Resolved, name: []const u8) ?Symbol {
@@ -129,7 +171,22 @@ pub const Resolved = struct {
         var entry = try r.proc_overloads.getOrPut(r.allocator, name);
         if (!entry.found_existing) entry.value_ptr.* = .empty;
         try entry.value_ptr.append(r.allocator, proc);
-        if (!r.symbols.contains(name)) try r.symbols.put(r.allocator, name, .{ .proc = proc });
+        if (r.symbols.get(name)) |sym| {
+            if (sym == .placeholder) {
+                _ = r.implicit_placeholders.remove(name);
+                _ = r.used_implicit_placeholders.remove(name);
+                try r.symbols.put(r.allocator, name, .{ .proc = proc });
+            }
+        } else try r.symbols.put(r.allocator, name, .{ .proc = proc });
+    }
+
+    fn putRealSymbol(r: *Resolved, name: []const u8, sym: Symbol) !void {
+        if (r.symbols.get(name)) |existing| {
+            if (existing != .placeholder) return;
+            _ = r.implicit_placeholders.remove(name);
+            _ = r.used_implicit_placeholders.remove(name);
+        }
+        try r.symbols.put(r.allocator, name, sym);
     }
 
     fn scopedName(r: *Resolved, file_id: u32, raw: []const u8) ![]u8 {
@@ -156,11 +213,29 @@ pub const Resolved = struct {
 };
 
 fn putPlaceholder(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
-    if (!r.symbols.contains(name)) try r.symbols.put(allocator, name, .placeholder);
+    if (!r.symbols.contains(name)) {
+        try r.symbols.put(allocator, name, .placeholder);
+        try r.implicit_placeholders.put(allocator, name, {});
+    }
 }
 
 fn putPlaceholders(r: *Resolved, allocator: std.mem.Allocator, names: []const []const u8) !void {
     for (names) |name| try putPlaceholder(r, allocator, name);
+}
+
+fn putExplicitPlaceholder(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
+    if (r.symbols.get(name)) |sym| {
+        if (sym == .placeholder) {
+            _ = r.implicit_placeholders.remove(name);
+            _ = r.used_implicit_placeholders.remove(name);
+        }
+        return;
+    }
+    try r.symbols.put(allocator, name, .placeholder);
+}
+
+fn markImplicitPlaceholderUse(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
+    if (r.implicit_placeholders.contains(name)) try r.used_implicit_placeholders.put(allocator, name, {});
 }
 
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool) !Resolved {
@@ -172,11 +247,14 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "write_number", .builtin_write_number);
     try r.symbols.put(allocator, "write_nonnegative_number", .builtin_write_nonnegative_number);
     try r.symbols.put(allocator, "New", .builtin_new);
+    try r.symbols.put(allocator, "NewArray", .builtin_new_array);
     try r.symbols.put(allocator, "free", .builtin_free);
     try r.symbols.put(allocator, "compiler_arg_count", .builtin_compiler_arg_count);
     try r.symbols.put(allocator, "compiler_arg", .builtin_compiler_arg);
     try r.symbols.put(allocator, "compiler_read_file", .builtin_compiler_read_file);
     try r.symbols.put(allocator, "compiler_write_file", .builtin_compiler_write_file);
+    try r.symbols.put(allocator, "read_entire_file", .builtin_read_entire_file);
+    try r.symbols.put(allocator, "write_entire_file", .builtin_write_entire_file);
     try putPlaceholders(&r, allocator, &.{
         "context", "temp", "reset_temporary_storage",
         "push_allocator",
@@ -216,15 +294,17 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     else => return diag.failAt(ast.tokens[ast.mainToken(decl)].start, "unsupported scope directive", .{}),
                 }
             },
-            .const_decl, .var_decl, .proc_decl => {
+            .const_decl, .var_decl, .proc_decl, .placeholder_decl => {
                 if (file_scope and !main_scope_started) {
                     const raw = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
                     const scoped = try r.scopedName(current_file, raw);
                         try r.owned_names.append(allocator, scoped);
                         if (ast.tag(decl) == .proc_decl) {
                             try r.addProc(scoped, decl);
+                        } else if (ast.tag(decl) == .placeholder_decl) {
+                            try putExplicitPlaceholder(&r, allocator, scoped);
                         } else {
-                            try r.symbols.put(allocator, scoped, switch (ast.tag(decl)) {
+                            try r.putRealSymbol(scoped, switch (ast.tag(decl)) {
                             .var_decl => .{ .const_value = decl },
                             else => .{ .const_value = ast.data(decl).lhs },
                         });
@@ -276,6 +356,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "to_float64_seconds", .builtin_to_float64_seconds);
                     try r.symbols.put(allocator, "formatStruct", .builtin_format_struct);
                     try r.symbols.put(allocator, "alloc", .builtin_alloc);
+                    try r.symbols.put(allocator, "NewArray", .builtin_new_array);
                     try r.symbols.put(allocator, "array_add", .builtin_array_add);
                     try r.symbols.put(allocator, "array_free", .builtin_array_free);
                     try r.symbols.put(allocator, "write_string", .builtin_write_string);
@@ -290,9 +371,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "String_Builder", "free_buffers", "init_string_builder",
                         "print_to_builder", "builder_string_length", "builder_to_string",
                         "make_vector2", "make_vector3",
-                        "get_command_line_arguments", "tprint", "NewArray", "compare", "split",
-                        "read", "file_exists", "release", "start", "lock", "proc",
+                        "tprint", "compare", "split",
+                        "read", "release", "start", "lock", "proc",
                     });
+                    try r.symbols.put(allocator, "get_command_line_arguments", .builtin_get_command_line_arguments);
+                    try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
                 } else if (std.mem.eql(u8, module_name, "String")) {
                     try r.symbols.put(allocator, "to_upper", .builtin_to_upper);
                     try r.symbols.put(allocator, "to_lower", .builtin_to_lower);
@@ -382,14 +465,20 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "Process")) {
                         try putPlaceholders(&r, allocator, &.{ "run_command", "read", "thread_is_done", "shutdown" });
                     } else if (std.mem.eql(u8, module_name, "File")) {
-                        try putPlaceholders(&r, allocator, &.{
-                            "make_directory_if_it_does_not_exist", "delete_directory", "file_exists",
-                            "write_entire_file", "read_entire_file", "file_open", "file_close",
-                            "file_length", "file_set_position", "file_write", "file_read",
-                            "get_path_of_running_executable",
-                        });
+                        try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
+                        try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
+                        try r.symbols.put(allocator, "write_entire_file", .builtin_write_entire_file);
+                        try r.symbols.put(allocator, "read_entire_file", .builtin_read_entire_file);
+                        try r.symbols.put(allocator, "file_open", .builtin_file_open);
+                        try r.symbols.put(allocator, "file_close", .builtin_file_close);
+                        try r.symbols.put(allocator, "file_length", .builtin_file_length);
+                        try r.symbols.put(allocator, "file_set_position", .builtin_file_set_position);
+                        try r.symbols.put(allocator, "file_write", .builtin_file_write);
+                        try r.symbols.put(allocator, "file_read", .builtin_file_read);
+                        try putPlaceholders(&r, allocator, &.{ "delete_directory", "get_path_of_running_executable" });
                     } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
-                        try putPlaceholders(&r, allocator, &.{ "delete_directory", "make_directory_if_it_does_not_exist" });
+                        try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
+                        try putPlaceholders(&r, allocator, &.{ "delete_directory" });
                     } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
                         try putPlaceholders(&r, allocator, &.{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" });
                     } else if (std.mem.eql(u8, module_name, "Input")) {
@@ -451,18 +540,21 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 try r.addProc(name, decl);
                 if (std.mem.eql(u8, name, "main")) r.main_proc = decl;
             },
+            .placeholder_decl => {
+                if (file_scope and !global_main_scope_started) continue;
+                const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
+                try putExplicitPlaceholder(&r, allocator, name);
+            },
             .run_expr, .meta_stmt, .add_context_decl => {},
             .const_decl => {
                 if (file_scope and !global_main_scope_started) continue;
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
-                if (r.symbols.contains(name)) continue;
-                try r.symbols.put(allocator, name, .{ .const_value = ast.data(decl).lhs });
+                try r.putRealSymbol(name, .{ .const_value = ast.data(decl).lhs });
             },
             .var_decl => {
                 if (file_scope and !global_main_scope_started) continue;
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
-                if (r.symbols.contains(name)) continue;
-                try r.symbols.put(allocator, name, .{ .const_value = decl });
+                try r.putRealSymbol(name, .{ .const_value = decl });
             },
             else => return diag.failAt(ast.tokens[ast.mainToken(decl)].start, "unsupported top-level AST node in resolver", .{}),
         }
@@ -484,7 +576,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 }
                 file_scope = false;
             },
-            .scope_decl, .add_context_decl => {},
+            .scope_decl, .add_context_decl, .placeholder_decl => {},
             .proc_decl => {
                 try proc_files.put(decl, current_file);
             },
@@ -932,8 +1024,8 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                         try r.local_values.put(r.allocator, node, value_node);
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
-                    .placeholder => {},
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
+                    .placeholder => try markImplicitPlaceholderUse(r, r.allocator, name),
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);
@@ -997,4 +1089,85 @@ test "scope_export restores non-file visibility after #scope_file" {
     try std.testing.expect(resolved.lookup("hidden") == null);
     try std.testing.expect(resolved.lookup("__file1_hidden") != null);
     try std.testing.expect(resolved.lookup("shown") != null);
+}
+
+test "resolver records used implicit placeholders" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#import \"Compiler\";\n" ++
+        "main :: () { w := compiler_create_workspace(); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "implicit_placeholder_use.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    defer resolved.deinit();
+
+    try std.testing.expect(resolved.implicitPlaceholderCount() > 0);
+    try std.testing.expectEqual(@as(u32, 1), resolved.usedImplicitPlaceholderCount());
+    try std.testing.expectError(error.CompilationFailed, resolved.failIfImplicitPlaceholders(diag));
+}
+
+test "resolver allows explicit placeholder declarations under strict gate" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#placeholder TRUTH;\n" ++
+        "main :: () { print(\"%\", TRUTH); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "explicit_placeholder.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    defer resolved.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
+    try resolved.failIfImplicitPlaceholders(diag);
+}
+
+test "resolver lets real declarations replace implicit placeholders" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "proc :: () {}\n" ++
+        "main :: () { proc(); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "placeholder_replacement.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    defer resolved.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
+    try std.testing.expect(resolved.lookup("proc").? == .proc);
+    try resolved.failIfImplicitPlaceholders(diag);
 }
