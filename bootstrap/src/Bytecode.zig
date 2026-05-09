@@ -39,6 +39,8 @@ pub const Opcode = enum(u8) {
     load_ptr_byte,
     store_ptr,
     ptr_offset,
+    ptr_offset_reg,
+    store_ptr_byte,
     load_ptr_string,
     addr_of_local,
     proc_addr,

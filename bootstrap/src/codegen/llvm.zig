@@ -734,11 +734,25 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 };
                 _ = c.LLVMBuildStore(env.builder, stored, ptr_value);
             },
+            .store_ptr_byte => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend store_ptr_byte register out of range", .{});
+                const ptr_value = try pointerValue(env, registers[inst.dest], diag, "byte pointer store destination");
+                const source = try valueAsInt(env, registers[inst.arg1], diag);
+                const byte = c.LLVMBuildTrunc(env.builder, source, c.LLVMInt8TypeInContext(env.context), "store_i64_to_u8");
+                _ = c.LLVMBuildStore(env.builder, byte, ptr_value);
+            },
             .ptr_offset => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend ptr_offset register out of range", .{});
                 const base_ptr = try pointerValue(env, registers[inst.arg1], diag, "pointer offset base");
                 var indices = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, inst.arg2, 0)};
                 try setPointerResult(env, registers, inst.dest, c.LLVMBuildGEP2(env.builder, c.LLVMInt8TypeInContext(env.context), base_ptr, &indices, indices.len, "ptr_offset"));
+            },
+            .ptr_offset_reg => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend ptr_offset_reg register out of range", .{});
+                const base_ptr = try pointerValue(env, registers[inst.arg1], diag, "pointer offset base");
+                const offset = try valueAsInt(env, registers[inst.arg2], diag);
+                var indices = [_]c.LLVMValueRef{offset};
+                try setPointerResult(env, registers, inst.dest, c.LLVMBuildGEP2(env.builder, c.LLVMInt8TypeInContext(env.context), base_ptr, &indices, indices.len, "ptr_offset_reg"));
             },
             .alloc_heap => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend alloc_heap destination register out of range", .{});

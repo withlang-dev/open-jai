@@ -353,6 +353,18 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .int = base + @as(i64, @intCast(inst.arg2)) };
                 },
+                .ptr_offset_reg => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM ptr_offset_reg register out of range", .{});
+                    const base = switch (regs[inst.arg1]) {
+                        .int => |v| v,
+                        else => 0,
+                    };
+                    const offset = switch (regs[inst.arg2]) {
+                        .int => |v| v,
+                        else => 0,
+                    };
+                    regs[inst.dest] = .{ .int = base + offset };
+                },
                 .load_ptr_string, .alloc_local_bytes, .new_array, .array_add, .array_count, .array_index, .string_slice => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     regs[inst.dest] = .{ .int = 0 };
@@ -367,7 +379,7 @@ pub const VM = struct {
                 .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .store_ptr => {},
+                .store_ptr, .store_ptr_byte => {},
                 .memcpy, .free_heap, .array_free => {},
                 else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
             }

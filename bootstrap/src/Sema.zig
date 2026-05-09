@@ -575,7 +575,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 }
                 return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "unresolved identifier '{s}'", .{name});
             };
-            if (compilerIntrinsicReturnType(name)) |return_ty| {
+            if (try compilerIntrinsicReturnType(ast, name, diag)) |return_ty| {
                 for (args) |arg_idx| {
                     const arg_node: NodeIndex = @intCast(arg_idx);
                     if (ast.tag(arg_node) == .assign_stmt)
@@ -1251,7 +1251,7 @@ fn validateSwapAddressArg(ast: *const Ast, resolved: *const Resolved, node: Node
     if (ast.tag(decl) != .var_decl) return diag.failAt(ast.tokens[ast.mainToken(operand)].start, "swap address argument must refer to a mutable local variable", .{});
 }
 
-fn compilerIntrinsicReturnType(name: []const u8) ?Type {
+fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnostic) !?Type {
     if (std.mem.eql(u8, name, "compiler_create_workspace") or
         std.mem.eql(u8, name, "get_current_workspace") or
         std.mem.eql(u8, name, "compiler_wait_for_message") or
@@ -1280,7 +1280,7 @@ fn compilerIntrinsicReturnType(name: []const u8) ?Type {
     {
         return Type.string();
     }
-    if (std.mem.eql(u8, name, "to_c_string")) return Type.init(InternPool.well_known.u64_type);
+    if (std.mem.eql(u8, name, "to_c_string")) return Type.init(try internPointerType(ast, Type.init(InternPool.well_known.u8_type), diag));
     if (std.mem.eql(u8, name, "compare") or
         std.mem.eql(u8, name, "builder_string_length") or
         std.mem.eql(u8, name, "find_index_from_left") or

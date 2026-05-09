@@ -33,11 +33,13 @@ const OJ_SEEK_CUR = 1;
 const OJ_SEEK_END = 2;
 
 const RuntimeAllocationHeader = extern struct {
+    magic: usize,
     mapped_addr: usize,
     mapped_len: usize,
     requested_len: usize,
 };
 
+const runtime_allocation_magic = 0x4f50454e4a414941;
 const runtime_allocation_alignment = 16;
 
 var runtime_argc: i32 = 0;
@@ -863,7 +865,12 @@ fn rtAllocAligned(size: usize, alignment: usize) ?*anyopaque {
     const data_addr = alignForward(raw_addr + header_len, requested_alignment);
     const header_addr = data_addr - header_len;
     const header: *RuntimeAllocationHeader = @ptrFromInt(header_addr);
-    header.* = .{ .mapped_addr = raw_addr, .mapped_len = mapped_len, .requested_len = requested_len };
+    header.* = .{
+        .magic = runtime_allocation_magic,
+        .mapped_addr = raw_addr,
+        .mapped_len = mapped_len,
+        .requested_len = requested_len,
+    };
     return @ptrFromInt(data_addr);
 }
 
@@ -884,12 +891,38 @@ fn rtRealloc(ptr: ?*anyopaque, old_size: usize, new_size: usize) ?*anyopaque {
 fn rtFree(ptr: ?*anyopaque) void {
     const p = ptr orelse return;
     const header = allocationHeader(p);
+    header.magic = 0;
     oj_rt_munmap(@ptrFromInt(header.mapped_addr), header.mapped_len);
 }
 
 fn allocationHeader(ptr: *anyopaque) *RuntimeAllocationHeader {
-    const data: [*]u8 = @ptrCast(ptr);
-    return @ptrCast(@alignCast(data - allocationHeaderLen()));
+    return findAllocationHeader(ptr) orelse @panic("free called with pointer not allocated by OpenJai runtime");
+}
+
+fn findAllocationHeader(ptr: *anyopaque) ?*RuntimeAllocationHeader {
+    const ptr_addr = @intFromPtr(ptr);
+    const header_len = allocationHeaderLen();
+    const exact_addr = ptr_addr -% header_len;
+    if (candidateAllocationHeader(exact_addr, ptr_addr)) |header| return header;
+
+    const page_start = ptr_addr & ~(@as(usize, std.heap.page_size_min) - 1);
+    var candidate = exact_addr & ~(@as(usize, runtime_allocation_alignment) - 1);
+    while (candidate >= page_start) : (candidate -%= runtime_allocation_alignment) {
+        if (candidateAllocationHeader(candidate, ptr_addr)) |header| return header;
+        if (candidate < page_start + runtime_allocation_alignment) break;
+    }
+    return null;
+}
+
+fn candidateAllocationHeader(candidate_addr: usize, ptr_addr: usize) ?*RuntimeAllocationHeader {
+    if (candidate_addr == 0 or candidate_addr % @alignOf(RuntimeAllocationHeader) != 0) return null;
+    const header: *RuntimeAllocationHeader = @ptrFromInt(candidate_addr);
+    if (header.magic != runtime_allocation_magic) return null;
+    const data_start = candidate_addr + allocationHeaderLen();
+    const data_end = data_start + header.requested_len;
+    if (ptr_addr < data_start or ptr_addr > data_end) return null;
+    if (ptr_addr < header.mapped_addr or ptr_addr >= header.mapped_addr + header.mapped_len) return null;
+    return header;
 }
 
 fn allocationHeaderLen() usize {
