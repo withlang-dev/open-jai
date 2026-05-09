@@ -341,7 +341,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
                     regs[inst.dest] = .{ .int = 1 };
                 },
-                .load_ptr => {
+                .load_ptr, .load_ptr_byte => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
                     regs[inst.dest] = regs[inst.arg1];
                 },

@@ -219,6 +219,12 @@ const OpenJaiArray = extern struct {
     data: ?*anyopaque,
 };
 
+const OpenJaiStringBuilder = extern struct {
+    len: usize,
+    capacity: usize,
+    data: ?*anyopaque,
+};
+
 const OpenJaiFile = extern struct {
     fd: i32,
 };
@@ -384,6 +390,194 @@ export fn __openjai_file_read(file: ?*OpenJaiFile, data: [*]u8, len: usize) bool
         offset += @intCast(read_count);
     }
     return true;
+}
+
+export fn __openjai_string_builder_init(slot: ?*?*OpenJaiStringBuilder) void {
+    const slot_ptr = slot orelse @panic("init_string_builder on null slot");
+    if (slot_ptr.* != null) __openjai_string_builder_free(slot);
+    const raw = rtAlloc(@sizeOf(OpenJaiStringBuilder)) orelse @panic("string builder allocation failed");
+    const builder: *OpenJaiStringBuilder = @ptrCast(@alignCast(raw));
+    builder.* = .{ .len = 0, .capacity = 0, .data = null };
+    slot_ptr.* = builder;
+}
+
+export fn __openjai_string_builder_free(slot: ?*?*OpenJaiStringBuilder) void {
+    const slot_ptr = slot orelse return;
+    const builder = slot_ptr.* orelse return;
+    rtFree(builder.data);
+    rtFree(builder);
+    slot_ptr.* = null;
+}
+
+export fn __openjai_string_builder_append_string(slot: ?*?*OpenJaiStringBuilder, data: [*]const u8, len: usize) bool {
+    const builder = ensureBuilder(slot) orelse return false;
+    if (!builderEnsure(builder, len)) return false;
+    if (len != 0) @memcpy(@as([*]u8, @ptrCast(builder.data.?))[builder.len .. builder.len + len], data[0..len]);
+    builder.len += len;
+    return true;
+}
+
+export fn __openjai_string_builder_append_int(slot: ?*?*OpenJaiStringBuilder, value: i64) bool {
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+    return __openjai_string_builder_append_string(slot, text.ptr, text.len);
+}
+
+export fn __openjai_string_builder_append_float(slot: ?*?*OpenJaiStringBuilder, value: f64) bool {
+    var buf: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d:.6}", .{value}) catch unreachable;
+    return __openjai_string_builder_append_string(slot, text.ptr, trimFloatText(text).len);
+}
+
+export fn __openjai_string_builder_append_bool(slot: ?*?*OpenJaiStringBuilder, value: bool) bool {
+    const text = if (value) "true" else "false";
+    return __openjai_string_builder_append_string(slot, text.ptr, text.len);
+}
+
+export fn __openjai_string_builder_to_string(slot: ?*?*OpenJaiStringBuilder) ?*OpenJaiRuntimeString {
+    const builder = ensureBuilder(slot) orelse return null;
+    if (builder.data == null or builder.len == 0) return makeRuntimeString("");
+    return makeRuntimeString(@as([*]const u8, @ptrCast(builder.data.?))[0..builder.len]);
+}
+
+export fn __openjai_string_builder_length(slot: ?*?*OpenJaiStringBuilder) i64 {
+    const builder = ensureBuilder(slot) orelse return 0;
+    return @intCast(builder.len);
+}
+
+export fn __openjai_copy_string(data: [*]const u8, len: usize) ?*OpenJaiRuntimeString {
+    return makeRuntimeString(data[0..len]);
+}
+
+export fn __openjai_to_c_string(data: [*]const u8, len: usize) ?*anyopaque {
+    const raw = rtAlloc(len + 1) orelse return null;
+    const out: [*]u8 = @ptrCast(raw);
+    if (len != 0) @memcpy(out[0..len], data[0..len]);
+    out[len] = 0;
+    return raw;
+}
+
+export fn __openjai_string_from_c(ptr: ?[*:0]const u8) ?*OpenJaiRuntimeString {
+    const p = ptr orelse return makeRuntimeString("");
+    return makeRuntimeString(std.mem.span(p));
+}
+
+export fn __openjai_string_from_parts(data: [*]const u8, len: usize) ?*OpenJaiRuntimeString {
+    return makeRuntimeString(data[0..len]);
+}
+
+export fn __openjai_string_trim(data: [*]const u8, len: usize) ?*OpenJaiRuntimeString {
+    var start: usize = 0;
+    var end: usize = len;
+    while (start < end and std.ascii.isWhitespace(data[start])) start += 1;
+    while (end > start and std.ascii.isWhitespace(data[end - 1])) end -= 1;
+    return makeRuntimeString(data[start..end]);
+}
+
+export fn __openjai_string_compare(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) i64 {
+    return switch (std.mem.order(u8, lhs_data[0..lhs_len], rhs_data[0..rhs_len])) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+export fn __openjai_string_contains(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {
+    if (rhs_len == 0) return true;
+    return std.mem.indexOf(u8, lhs_data[0..lhs_len], rhs_data[0..rhs_len]) != null;
+}
+
+export fn __openjai_string_begins_with(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {
+    if (rhs_len > lhs_len) return false;
+    return std.mem.eql(u8, lhs_data[0..rhs_len], rhs_data[0..rhs_len]);
+}
+
+export fn __openjai_string_find(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize, from_right: bool) i64 {
+    if (rhs_len == 0) return 0;
+    const haystack = lhs_data[0..lhs_len];
+    const needle = rhs_data[0..rhs_len];
+    const found = if (from_right) std.mem.lastIndexOf(u8, haystack, needle) else std.mem.indexOf(u8, haystack, needle);
+    return if (found) |idx| @intCast(idx) else -1;
+}
+
+export fn __openjai_string_parse_int(data: [*]const u8, len: usize) i64 {
+    return std.fmt.parseInt(i64, std.mem.trim(u8, data[0..len], " \t\r\n"), 10) catch 0;
+}
+
+export fn __openjai_string_parse_int_ok(data: [*]const u8, len: usize) bool {
+    _ = std.fmt.parseInt(i64, std.mem.trim(u8, data[0..len], " \t\r\n"), 10) catch return false;
+    return true;
+}
+
+export fn __openjai_string_parse_float(data: [*]const u8, len: usize) f64 {
+    return std.fmt.parseFloat(f64, std.mem.trim(u8, data[0..len], " \t\r\n")) catch 0.0;
+}
+
+export fn __openjai_string_parse_float_ok(data: [*]const u8, len: usize) bool {
+    _ = std.fmt.parseFloat(f64, std.mem.trim(u8, data[0..len], " \t\r\n")) catch return false;
+    return true;
+}
+
+export fn __openjai_string_replace(source_data: [*]const u8, source_len: usize, needle_data: [*]const u8, needle_len: usize, replacement_data: [*]const u8, replacement_len: usize) ?*OpenJaiRuntimeString {
+    if (needle_len == 0) return makeRuntimeString(source_data[0..source_len]);
+    var count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < source_len) {
+        if (std.mem.indexOf(u8, source_data[cursor..source_len], needle_data[0..needle_len])) |idx| {
+            count += 1;
+            cursor += idx + needle_len;
+        } else break;
+    }
+    const new_len = source_len - count * needle_len + count * replacement_len;
+    const raw = rtAlloc(new_len) orelse return null;
+    const out: [*]u8 = @ptrCast(raw);
+    var in_pos: usize = 0;
+    var out_pos: usize = 0;
+    while (in_pos < source_len) {
+        if (std.mem.indexOf(u8, source_data[in_pos..source_len], needle_data[0..needle_len])) |idx| {
+            if (idx != 0) @memcpy(out[out_pos .. out_pos + idx], source_data[in_pos .. in_pos + idx]);
+            out_pos += idx;
+            if (replacement_len != 0) @memcpy(out[out_pos .. out_pos + replacement_len], replacement_data[0..replacement_len]);
+            out_pos += replacement_len;
+            in_pos += idx + needle_len;
+        } else {
+            const rest = source_len - in_pos;
+            if (rest != 0) @memcpy(out[out_pos .. out_pos + rest], source_data[in_pos..source_len]);
+            break;
+        }
+    }
+    const header_raw = rtAlloc(@sizeOf(OpenJaiRuntimeString)) orelse {
+        rtFree(raw);
+        return null;
+    };
+    const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
+    header.* = .{ .len = new_len, .data = out };
+    return header;
+}
+
+export fn __openjai_string_split(data: [*]const u8, len: usize, sep_data: [*]const u8, sep_len: usize) ?*OpenJaiArray {
+    const array_raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return null;
+    const array: *OpenJaiArray = @ptrCast(@alignCast(array_raw));
+    array.* = .{ .count = 0, .capacity = 0, .data = null };
+    var array_slot: ?*OpenJaiArray = array;
+    var start: usize = 0;
+    if (sep_len == 0) {
+        while (start < len) : (start += 1) {
+            const piece = makeRuntimeString(data[start .. start + 1]) orelse return null;
+            _ = __openjai_array_add(&array_slot, @ptrCast(&piece), @sizeOf(?*OpenJaiRuntimeString));
+        }
+        return array;
+    }
+    while (start <= len) {
+        const rest = data[start..len];
+        const next = std.mem.indexOf(u8, rest, sep_data[0..sep_len]);
+        const end = if (next) |idx| start + idx else len;
+        const piece = makeRuntimeString(data[start..end]) orelse return null;
+        _ = __openjai_array_add(&array_slot, @ptrCast(&piece), @sizeOf(?*OpenJaiRuntimeString));
+        if (next == null) break;
+        start = end + sep_len;
+    }
+    return array;
 }
 
 export fn __openjai_write_entire_file(path_data: [*]const u8, path_len: usize, contents_data: [*]const u8, contents_len: usize) bool {
@@ -615,14 +809,34 @@ export fn __openjai_random_get_within_range(min: f64, max: f64) f64 {
 }
 
 fn writeFloatText(text: []const u8) void {
+    writeAll(trimFloatText(text));
+}
+
+fn trimFloatText(text: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, text, '.')) |dot| {
         var end = text.len;
         while (end > dot + 1 and text[end - 1] == '0') end -= 1;
         if (end == dot + 1) end = dot;
-        writeAll(text[0..end]);
-        return;
+        return text[0..end];
     }
-    writeAll(text);
+    return text;
+}
+
+fn ensureBuilder(slot: ?*?*OpenJaiStringBuilder) ?*OpenJaiStringBuilder {
+    const slot_ptr = slot orelse return null;
+    if (slot_ptr.* == null) __openjai_string_builder_init(slot);
+    return slot_ptr.*;
+}
+
+fn builderEnsure(builder: *OpenJaiStringBuilder, additional: usize) bool {
+    const needed = builder.len + additional;
+    if (needed <= builder.capacity) return true;
+    var new_capacity: usize = if (builder.capacity == 0) 64 else builder.capacity * 2;
+    while (new_capacity < needed) new_capacity *= 2;
+    const new_data = rtRealloc(builder.data, builder.capacity, new_capacity) orelse return false;
+    builder.data = new_data;
+    builder.capacity = new_capacity;
+    return true;
 }
 
 fn writeAll(bytes: []const u8) void {

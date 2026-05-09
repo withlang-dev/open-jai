@@ -101,6 +101,52 @@ const LlvmEnv = struct {
     string_equal_fn: c.LLVMValueRef,
     string_slice_fn_ty: c.LLVMTypeRef,
     string_slice_fn: c.LLVMValueRef,
+    string_builder_init_fn_ty: c.LLVMTypeRef,
+    string_builder_init_fn: c.LLVMValueRef,
+    string_builder_free_fn_ty: c.LLVMTypeRef,
+    string_builder_free_fn: c.LLVMValueRef,
+    string_builder_append_string_fn_ty: c.LLVMTypeRef,
+    string_builder_append_string_fn: c.LLVMValueRef,
+    string_builder_append_int_fn_ty: c.LLVMTypeRef,
+    string_builder_append_int_fn: c.LLVMValueRef,
+    string_builder_append_float_fn_ty: c.LLVMTypeRef,
+    string_builder_append_float_fn: c.LLVMValueRef,
+    string_builder_append_bool_fn_ty: c.LLVMTypeRef,
+    string_builder_append_bool_fn: c.LLVMValueRef,
+    string_builder_to_string_fn_ty: c.LLVMTypeRef,
+    string_builder_to_string_fn: c.LLVMValueRef,
+    string_builder_length_fn_ty: c.LLVMTypeRef,
+    string_builder_length_fn: c.LLVMValueRef,
+    string_copy_fn_ty: c.LLVMTypeRef,
+    string_copy_fn: c.LLVMValueRef,
+    string_to_c_fn_ty: c.LLVMTypeRef,
+    string_to_c_fn: c.LLVMValueRef,
+    string_from_c_fn_ty: c.LLVMTypeRef,
+    string_from_c_fn: c.LLVMValueRef,
+    string_from_parts_fn_ty: c.LLVMTypeRef,
+    string_from_parts_fn: c.LLVMValueRef,
+    string_trim_fn_ty: c.LLVMTypeRef,
+    string_trim_fn: c.LLVMValueRef,
+    string_compare_fn_ty: c.LLVMTypeRef,
+    string_compare_fn: c.LLVMValueRef,
+    string_contains_fn_ty: c.LLVMTypeRef,
+    string_contains_fn: c.LLVMValueRef,
+    string_begins_with_fn_ty: c.LLVMTypeRef,
+    string_begins_with_fn: c.LLVMValueRef,
+    string_find_fn_ty: c.LLVMTypeRef,
+    string_find_fn: c.LLVMValueRef,
+    string_split_fn_ty: c.LLVMTypeRef,
+    string_split_fn: c.LLVMValueRef,
+    string_parse_int_fn_ty: c.LLVMTypeRef,
+    string_parse_int_fn: c.LLVMValueRef,
+    string_parse_int_ok_fn_ty: c.LLVMTypeRef,
+    string_parse_int_ok_fn: c.LLVMValueRef,
+    string_parse_float_fn_ty: c.LLVMTypeRef,
+    string_parse_float_fn: c.LLVMValueRef,
+    string_parse_float_ok_fn_ty: c.LLVMTypeRef,
+    string_parse_float_ok_fn: c.LLVMValueRef,
+    string_replace_fn_ty: c.LLVMTypeRef,
+    string_replace_fn: c.LLVMValueRef,
     array_add_fn_ty: c.LLVMTypeRef,
     array_add_fn: c.LLVMValueRef,
     array_free_fn_ty: c.LLVMTypeRef,
@@ -254,6 +300,62 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const string_slice_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, llvm_i64 };
     const string_slice_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_slice_params), string_slice_params.len, 0);
     const string_slice_fn = c.LLVMAddFunction(module, "__openjai_string_slice", string_slice_fn_ty);
+    const builder_slot_params = [_]c.LLVMTypeRef{ptr_ty};
+    const string_builder_init_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&builder_slot_params), builder_slot_params.len, 0);
+    const string_builder_init_fn = c.LLVMAddFunction(module, "__openjai_string_builder_init", string_builder_init_fn_ty);
+    const string_builder_free_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&builder_slot_params), builder_slot_params.len, 0);
+    const string_builder_free_fn = c.LLVMAddFunction(module, "__openjai_string_builder_free", string_builder_free_fn_ty);
+    const builder_append_string_params = [_]c.LLVMTypeRef{ ptr_ty, ptr_ty, llvm_i64 };
+    const string_builder_append_string_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&builder_append_string_params), builder_append_string_params.len, 0);
+    const string_builder_append_string_fn = c.LLVMAddFunction(module, "__openjai_string_builder_append_string", string_builder_append_string_fn_ty);
+    const builder_append_int_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const string_builder_append_int_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&builder_append_int_params), builder_append_int_params.len, 0);
+    const string_builder_append_int_fn = c.LLVMAddFunction(module, "__openjai_string_builder_append_int", string_builder_append_int_fn_ty);
+    const builder_append_float_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_f64 };
+    const string_builder_append_float_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&builder_append_float_params), builder_append_float_params.len, 0);
+    const string_builder_append_float_fn = c.LLVMAddFunction(module, "__openjai_string_builder_append_float", string_builder_append_float_fn_ty);
+    const builder_append_bool_params = [_]c.LLVMTypeRef{ ptr_ty, c.LLVMInt1TypeInContext(context) };
+    const string_builder_append_bool_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&builder_append_bool_params), builder_append_bool_params.len, 0);
+    const string_builder_append_bool_fn = c.LLVMAddFunction(module, "__openjai_string_builder_append_bool", string_builder_append_bool_fn_ty);
+    const string_builder_to_string_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&builder_slot_params), builder_slot_params.len, 0);
+    const string_builder_to_string_fn = c.LLVMAddFunction(module, "__openjai_string_builder_to_string", string_builder_to_string_fn_ty);
+    const string_builder_length_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&builder_slot_params), builder_slot_params.len, 0);
+    const string_builder_length_fn = c.LLVMAddFunction(module, "__openjai_string_builder_length", string_builder_length_fn_ty);
+    const string_parts_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const string_copy_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_copy_fn = c.LLVMAddFunction(module, "__openjai_copy_string", string_copy_fn_ty);
+    const string_to_c_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_to_c_fn = c.LLVMAddFunction(module, "__openjai_to_c_string", string_to_c_fn_ty);
+    const string_from_c_params = [_]c.LLVMTypeRef{ptr_ty};
+    const string_from_c_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_from_c_params), string_from_c_params.len, 0);
+    const string_from_c_fn = c.LLVMAddFunction(module, "__openjai_string_from_c", string_from_c_fn_ty);
+    const string_from_parts_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_from_parts_fn = c.LLVMAddFunction(module, "__openjai_string_from_parts", string_from_parts_fn_ty);
+    const string_trim_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_trim_fn = c.LLVMAddFunction(module, "__openjai_string_trim", string_trim_fn_ty);
+    const string_two_parts_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, ptr_ty, llvm_i64 };
+    const string_compare_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&string_two_parts_params), string_two_parts_params.len, 0);
+    const string_compare_fn = c.LLVMAddFunction(module, "__openjai_string_compare", string_compare_fn_ty);
+    const string_contains_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&string_two_parts_params), string_two_parts_params.len, 0);
+    const string_contains_fn = c.LLVMAddFunction(module, "__openjai_string_contains", string_contains_fn_ty);
+    const string_begins_with_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&string_two_parts_params), string_two_parts_params.len, 0);
+    const string_begins_with_fn = c.LLVMAddFunction(module, "__openjai_string_begins_with", string_begins_with_fn_ty);
+    const string_find_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, ptr_ty, llvm_i64, c.LLVMInt1TypeInContext(context) };
+    const string_find_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&string_find_params), string_find_params.len, 0);
+    const string_find_fn = c.LLVMAddFunction(module, "__openjai_string_find", string_find_fn_ty);
+    const string_split_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_two_parts_params), string_two_parts_params.len, 0);
+    const string_split_fn = c.LLVMAddFunction(module, "__openjai_string_split", string_split_fn_ty);
+    const string_parse_int_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_parse_int_fn = c.LLVMAddFunction(module, "__openjai_string_parse_int", string_parse_int_fn_ty);
+    const string_parse_int_ok_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_parse_int_ok_fn = c.LLVMAddFunction(module, "__openjai_string_parse_int_ok", string_parse_int_ok_fn_ty);
+    const string_parse_float_fn_ty = c.LLVMFunctionType(llvm_f64, @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_parse_float_fn = c.LLVMAddFunction(module, "__openjai_string_parse_float", string_parse_float_fn_ty);
+    const string_parse_float_ok_fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(context), @constCast(&string_parts_params), string_parts_params.len, 0);
+    const string_parse_float_ok_fn = c.LLVMAddFunction(module, "__openjai_string_parse_float_ok", string_parse_float_ok_fn_ty);
+    const string_replace_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64, ptr_ty, llvm_i64, ptr_ty, llvm_i64 };
+    const string_replace_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&string_replace_params), string_replace_params.len, 0);
+    const string_replace_fn = c.LLVMAddFunction(module, "__openjai_string_replace", string_replace_fn_ty);
     const array_add_params = [_]c.LLVMTypeRef{ ptr_ty, ptr_ty, llvm_i64 };
     const array_add_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&array_add_params), array_add_params.len, 0);
     const array_add_fn = c.LLVMAddFunction(module, "__openjai_array_add", array_add_fn_ty);
@@ -298,7 +400,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         proc_functions[i] = c.LLVMAddFunction(module, fn_name_z.ptr, fn_ty);
     }
 
-    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .get_time_seconds_fn_ty = get_time_seconds_fn_ty, .get_time_seconds_fn = get_time_seconds_fn, .seconds_since_init_fn_ty = seconds_since_init_fn_ty, .seconds_since_init_fn = seconds_since_init_fn, .to_float64_seconds_fn_ty = to_float64_seconds_fn_ty, .to_float64_seconds_fn = to_float64_seconds_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .get_command_line_arguments_fn_ty = get_command_line_arguments_fn_ty, .get_command_line_arguments_fn = get_command_line_arguments_fn, .sleep_milliseconds_fn_ty = sleep_milliseconds_fn_ty, .sleep_milliseconds_fn = sleep_milliseconds_fn, .make_directory_fn_ty = make_directory_fn_ty, .make_directory_fn = make_directory_fn, .file_exists_fn_ty = file_exists_fn_ty, .file_exists_fn = file_exists_fn, .file_open_fn_ty = file_open_fn_ty, .file_open_fn = file_open_fn, .file_close_fn_ty = file_close_fn_ty, .file_close_fn = file_close_fn, .file_length_fn_ty = file_length_fn_ty, .file_length_fn = file_length_fn, .file_set_position_fn_ty = file_set_position_fn_ty, .file_set_position_fn = file_set_position_fn, .file_write_fn_ty = file_write_fn_ty, .file_write_fn = file_write_fn, .file_read_fn_ty = file_read_fn_ty, .file_read_fn = file_read_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_free_fn_ty = array_free_fn_ty, .array_free_fn = array_free_fn, .new_array_fn_ty = new_array_fn_ty, .new_array_fn = new_array_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
+    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .get_time_seconds_fn_ty = get_time_seconds_fn_ty, .get_time_seconds_fn = get_time_seconds_fn, .seconds_since_init_fn_ty = seconds_since_init_fn_ty, .seconds_since_init_fn = seconds_since_init_fn, .to_float64_seconds_fn_ty = to_float64_seconds_fn_ty, .to_float64_seconds_fn = to_float64_seconds_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .get_command_line_arguments_fn_ty = get_command_line_arguments_fn_ty, .get_command_line_arguments_fn = get_command_line_arguments_fn, .sleep_milliseconds_fn_ty = sleep_milliseconds_fn_ty, .sleep_milliseconds_fn = sleep_milliseconds_fn, .make_directory_fn_ty = make_directory_fn_ty, .make_directory_fn = make_directory_fn, .file_exists_fn_ty = file_exists_fn_ty, .file_exists_fn = file_exists_fn, .file_open_fn_ty = file_open_fn_ty, .file_open_fn = file_open_fn, .file_close_fn_ty = file_close_fn_ty, .file_close_fn = file_close_fn, .file_length_fn_ty = file_length_fn_ty, .file_length_fn = file_length_fn, .file_set_position_fn_ty = file_set_position_fn_ty, .file_set_position_fn = file_set_position_fn, .file_write_fn_ty = file_write_fn_ty, .file_write_fn = file_write_fn, .file_read_fn_ty = file_read_fn_ty, .file_read_fn = file_read_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .string_builder_init_fn_ty = string_builder_init_fn_ty, .string_builder_init_fn = string_builder_init_fn, .string_builder_free_fn_ty = string_builder_free_fn_ty, .string_builder_free_fn = string_builder_free_fn, .string_builder_append_string_fn_ty = string_builder_append_string_fn_ty, .string_builder_append_string_fn = string_builder_append_string_fn, .string_builder_append_int_fn_ty = string_builder_append_int_fn_ty, .string_builder_append_int_fn = string_builder_append_int_fn, .string_builder_append_float_fn_ty = string_builder_append_float_fn_ty, .string_builder_append_float_fn = string_builder_append_float_fn, .string_builder_append_bool_fn_ty = string_builder_append_bool_fn_ty, .string_builder_append_bool_fn = string_builder_append_bool_fn, .string_builder_to_string_fn_ty = string_builder_to_string_fn_ty, .string_builder_to_string_fn = string_builder_to_string_fn, .string_builder_length_fn_ty = string_builder_length_fn_ty, .string_builder_length_fn = string_builder_length_fn, .string_copy_fn_ty = string_copy_fn_ty, .string_copy_fn = string_copy_fn, .string_to_c_fn_ty = string_to_c_fn_ty, .string_to_c_fn = string_to_c_fn, .string_from_c_fn_ty = string_from_c_fn_ty, .string_from_c_fn = string_from_c_fn, .string_from_parts_fn_ty = string_from_parts_fn_ty, .string_from_parts_fn = string_from_parts_fn, .string_trim_fn_ty = string_trim_fn_ty, .string_trim_fn = string_trim_fn, .string_compare_fn_ty = string_compare_fn_ty, .string_compare_fn = string_compare_fn, .string_contains_fn_ty = string_contains_fn_ty, .string_contains_fn = string_contains_fn, .string_begins_with_fn_ty = string_begins_with_fn_ty, .string_begins_with_fn = string_begins_with_fn, .string_find_fn_ty = string_find_fn_ty, .string_find_fn = string_find_fn, .string_split_fn_ty = string_split_fn_ty, .string_split_fn = string_split_fn, .string_parse_int_fn_ty = string_parse_int_fn_ty, .string_parse_int_fn = string_parse_int_fn, .string_parse_int_ok_fn_ty = string_parse_int_ok_fn_ty, .string_parse_int_ok_fn = string_parse_int_ok_fn, .string_parse_float_fn_ty = string_parse_float_fn_ty, .string_parse_float_fn = string_parse_float_fn, .string_parse_float_ok_fn_ty = string_parse_float_ok_fn_ty, .string_parse_float_ok_fn = string_parse_float_ok_fn, .string_replace_fn_ty = string_replace_fn_ty, .string_replace_fn = string_replace_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_free_fn_ty = array_free_fn_ty, .array_free_fn = array_free_fn, .new_array_fn_ty = new_array_fn_ty, .new_array_fn = new_array_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
 
     for (program.procs.items, 0..) |*helper_proc, i| {
         if (program.main_proc != null and i == program.main_proc.?) continue;
@@ -607,6 +709,12 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         registers[inst.dest] = registers[inst.arg1];
                     },
                 }
+            },
+            .load_ptr_byte => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend load_ptr_byte register out of range", .{});
+                const ptr_value = try pointerValue(env, registers[inst.arg1], diag, "byte pointer dereference");
+                const byte = c.LLVMBuildLoad2(env.builder, c.LLVMInt8TypeInContext(env.context), ptr_value, "load_u8");
+                try setIntResult(env, registers, inst.dest, c.LLVMBuildZExt(env.builder, byte, env.llvm_i64, "u8_to_i64"));
             },
             .load_ptr_string => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend load_ptr_string register out of range", .{});
@@ -928,6 +1036,104 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const result = c.LLVMBuildCall2(env.builder, env.file_read_fn_ty, env.file_read_fn, &args, args.len, "file_read_ok");
                 try setBoolResult(env, registers, inst.dest, result);
             },
+            .string_builder_init => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_builder_init register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "string builder slot")};
+                _ = c.LLVMBuildCall2(env.builder, env.string_builder_init_fn_ty, env.string_builder_init_fn, &args, args.len, "");
+            },
+            .string_builder_free => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_builder_free register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "string builder slot")};
+                _ = c.LLVMBuildCall2(env.builder, env.string_builder_free_fn_ty, env.string_builder_free_fn, &args, args.len, "");
+            },
+            .string_builder_append_string, .string_builder_append_int, .string_builder_append_float => {
+                if (inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend string_builder_append register out of range", .{});
+                try emitBuilderAppendValue(env, registers[inst.arg1], registers[inst.arg2], diag);
+            },
+            .string_builder_to_string => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_builder_to_string register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "string builder slot")};
+                const result = c.LLVMBuildCall2(env.builder, env.string_builder_to_string_fn_ty, env.string_builder_to_string_fn, &args, args.len, "builder_string");
+                registers[inst.dest] = .{ .llvm_value = result, .kind = .runtime_string };
+            },
+            .string_builder_length => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_builder_length register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "string builder slot")};
+                try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_builder_length_fn_ty, env.string_builder_length_fn, &args, args.len, "builder_len"));
+            },
+            .string_copy => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_copy register out of range", .{});
+                const parts = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_copy_fn_ty, env.string_copy_fn, &args, args.len, "copy_string"), .kind = .runtime_string };
+            },
+            .string_to_c => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_to_c register out of range", .{});
+                const parts = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_to_c_fn_ty, env.string_to_c_fn, &args, args.len, "cstring"));
+            },
+            .string_from_c => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_from_c register out of range", .{});
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "C string pointer")};
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_from_c_fn_ty, env.string_from_c_fn, &args, args.len, "string_from_c"), .kind = .runtime_string };
+            },
+            .string_from_parts => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend string_from_parts register out of range", .{});
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "string data pointer"), try valueAsInt(env, registers[inst.arg2], diag) };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_from_parts_fn_ty, env.string_from_parts_fn, &args, args.len, "string_from_parts"), .kind = .runtime_string };
+            },
+            .string_trim => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_trim register out of range", .{});
+                const parts = try stringParts(env, registers[inst.arg1], diag);
+                var args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_trim_fn_ty, env.string_trim_fn, &args, args.len, "trim"), .kind = .runtime_string };
+            },
+            .string_compare, .string_contains, .string_begins_with, .string_find, .string_split => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend string operation register out of range", .{});
+                const lhs = try stringParts(env, registers[inst.arg1], diag);
+                const rhs = try stringParts(env, registers[inst.arg2], diag);
+                if (inst.opcode == .string_compare) {
+                    var args = [_]c.LLVMValueRef{ lhs.data, lhs.len, rhs.data, rhs.len };
+                    try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_compare_fn_ty, env.string_compare_fn, &args, args.len, "string_compare"));
+                } else if (inst.opcode == .string_contains) {
+                    var args = [_]c.LLVMValueRef{ lhs.data, lhs.len, rhs.data, rhs.len };
+                    try setBoolResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_contains_fn_ty, env.string_contains_fn, &args, args.len, "string_contains"));
+                } else if (inst.opcode == .string_begins_with) {
+                    var args = [_]c.LLVMValueRef{ lhs.data, lhs.len, rhs.data, rhs.len };
+                    try setBoolResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_begins_with_fn_ty, env.string_begins_with_fn, &args, args.len, "string_begins_with"));
+                } else if (inst.opcode == .string_find) {
+                    var args = [_]c.LLVMValueRef{ lhs.data, lhs.len, rhs.data, rhs.len, c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), inst.arg3, 0) };
+                    try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_find_fn_ty, env.string_find_fn, &args, args.len, "string_find"));
+                } else {
+                    var args = [_]c.LLVMValueRef{ lhs.data, lhs.len, rhs.data, rhs.len };
+                    try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_split_fn_ty, env.string_split_fn, &args, args.len, "split"));
+                }
+            },
+            .string_parse_int => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend string_parse_int register out of range", .{});
+                const parts = try stringParts(env, registers[inst.arg1], diag);
+                var value_args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, env.string_parse_int_fn_ty, env.string_parse_int_fn, &value_args, value_args.len, "parse_int"));
+                var ok_args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                try setBoolResult(env, registers, inst.arg2, c.LLVMBuildCall2(env.builder, env.string_parse_int_ok_fn_ty, env.string_parse_int_ok_fn, &ok_args, ok_args.len, "parse_int_ok"));
+            },
+            .string_parse_float => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend string_parse_float register out of range", .{});
+                const parts = try stringParts(env, registers[inst.arg1], diag);
+                var value_args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_parse_float_fn_ty, env.string_parse_float_fn, &value_args, value_args.len, "parse_float"), .kind = .float };
+                var ok_args = [_]c.LLVMValueRef{ parts.data, parts.len };
+                try setBoolResult(env, registers, inst.arg2, c.LLVMBuildCall2(env.builder, env.string_parse_float_ok_fn_ty, env.string_parse_float_ok_fn, &ok_args, ok_args.len, "parse_float_ok"));
+            },
+            .string_replace => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend string_replace register out of range", .{});
+                const source = try stringParts(env, registers[inst.arg1], diag);
+                const needle = try stringParts(env, registers[inst.arg2], diag);
+                const replacement = try stringParts(env, registers[inst.arg3], diag);
+                var args = [_]c.LLVMValueRef{ source.data, source.len, needle.data, needle.len, replacement.data, replacement.len };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, env.string_replace_fn_ty, env.string_replace_fn, &args, args.len, "replace"), .kind = .runtime_string };
+            },
             .string_len => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend string_len register out of range", .{});
                 const parts = try stringParts(env, registers[inst.arg1], diag);
@@ -940,7 +1146,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .string_slice => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len or inst.arg3 >= registers.len) return diag.failAt(0, "LLVM backend string_slice register out of range", .{});
-                const source = try pointerValue(env, registers[inst.arg1], diag, "string_slice source");
+                const source = try runtimeStringValue(env, registers[inst.arg1], diag);
                 const start = try valueAsInt(env, registers[inst.arg2], diag);
                 const len = try valueAsInt(env, registers[inst.arg3], diag);
                 var args = [_]c.LLVMValueRef{ source, start, len };
@@ -1489,6 +1695,39 @@ fn stringParts(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !StringPar
         },
         else => diag.failAt(0, "expected string-compatible register, got {s}", .{@tagName(value.kind)}),
     };
+}
+
+fn emitBuilderAppendValue(env: *LlvmEnv, builder_slot_value: RegisterValue, arg: RegisterValue, diag: Diagnostic) !void {
+    const builder_slot = try pointerValue(env, builder_slot_value, diag, "string builder slot");
+    switch (arg.kind) {
+        .string, .runtime_string, .string_addr => {
+            const parts = try stringParts(env, arg, diag);
+            var args = [_]c.LLVMValueRef{ builder_slot, parts.data, parts.len };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_string_fn_ty, env.string_builder_append_string_fn, &args, args.len, "");
+        },
+        .format_int => {
+            var args = [_]c.LLVMValueRef{ builder_slot, arg.llvm_value };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_int_fn_ty, env.string_builder_append_int_fn, &args, args.len, "");
+        },
+        .format_float => {
+            var args = [_]c.LLVMValueRef{ builder_slot, arg.llvm_value };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_float_fn_ty, env.string_builder_append_float_fn, &args, args.len, "");
+        },
+        .int, .int_addr, .pointer, .pointer_addr, .type_id, .void_value => {
+            var args = [_]c.LLVMValueRef{ builder_slot, try valueAsInt(env, arg, diag) };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_int_fn_ty, env.string_builder_append_int_fn, &args, args.len, "");
+        },
+        .bool, .bool_addr => {
+            var args = [_]c.LLVMValueRef{ builder_slot, try valueAsBool(env, arg, diag) };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_bool_fn_ty, env.string_builder_append_bool_fn, &args, args.len, "");
+        },
+        .float => {
+            var args = [_]c.LLVMValueRef{ builder_slot, try valueAsFloat(env, arg, diag) };
+            _ = c.LLVMBuildCall2(env.builder, env.string_builder_append_float_fn_ty, env.string_builder_append_float_fn, &args, args.len, "");
+        },
+        .undefined_string => return diag.failAt(0, "cannot append explicitly uninitialized string value", .{}),
+        else => return diag.failAt(0, "cannot append register kind {s} to String_Builder", .{@tagName(arg.kind)}),
+    }
 }
 
 fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
