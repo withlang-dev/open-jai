@@ -116,7 +116,7 @@ parser_parse_identifier_var :: (parser: *Parser) -> Node_Index {
 }
 
 parser_parse_proc_decl_after_name :: (parser: *Parser, name_tok: Token_Index) -> Node_Index {
-    params := parser_parse_balanced_node(parser, .l_paren, .r_paren, .param_list);
+    params := parser_parse_param_list(parser);
     body := NULL_NODE;
     return_type := NULL_NODE;
     if parser_match_discard(parser, .arrow) {
@@ -134,6 +134,37 @@ parser_parse_proc_decl_after_name :: (parser: *Parser, name_tok: Token_Index) ->
     data.lhs = body;
     data.rhs = sig_extra;
     return ast_add_node(*parser.ast, .proc_decl, name_tok, data);
+}
+
+parser_parse_param_list :: (parser: *Parser) -> Node_Index {
+    open_tok := parser_expect(parser, .l_paren, "expected '(' in procedure declaration");
+    params: [..] int;
+    if !parser_check(parser, .r_paren) {
+        done := false;
+        while !done && !parser_check(parser, .eof) {
+            if parser_match_discard(parser, .keyword_using) {
+            }
+            name_tok := parser_expect(parser, .identifier, "expected parameter name");
+            parser_expect(parser, .colon, "expected ':' after parameter name");
+            type_expr := parser_parse_opaque_type_until_param_boundary(parser);
+            init := NULL_NODE;
+            if parser_match_discard(parser, .equal) {
+                init = parser_parse_expression(parser, 0);
+            }
+            data := ast_empty_data();
+            data.lhs = type_expr;
+            data.rhs = init;
+            param := ast_add_node(*parser.ast, .var_decl, name_tok, data);
+            array_add(*params, param);
+            if !parser_match_discard(parser, .comma) done = true;
+        }
+    }
+    parser_expect(parser, .r_paren, "expected ')' after parameters");
+    extra := ast_add_extra_values(*parser.ast, params);
+    data := ast_empty_data();
+    data.lhs = extra;
+    data.rhs = params.count;
+    return ast_add_node(*parser.ast, .param_list, open_tok, data);
 }
 
 parser_parse_block :: (parser: *Parser) -> Node_Index {
@@ -332,6 +363,22 @@ parser_parse_opaque_type_until_body_or_terminator :: (parser: *Parser) -> Node_I
     while !parser_check(parser, .eof) {
         tag := parser_peek_tag(parser, 0);
         if parens == 0 && brackets == 0 && (tag == .semicolon || tag == .l_brace) break;
+        parser.index = parser.index + 1;
+        if tag == .l_paren parens = parens + 1;
+        else if tag == .r_paren && parens > 0 parens = parens - 1;
+        else if tag == .l_bracket brackets = brackets + 1;
+        else if tag == .r_bracket && brackets > 0 brackets = brackets - 1;
+    }
+    return ast_add_node(*parser.ast, .type_expr, start, ast_empty_data());
+}
+
+parser_parse_opaque_type_until_param_boundary :: (parser: *Parser) -> Node_Index {
+    start := parser.index;
+    parens := 0;
+    brackets := 0;
+    while !parser_check(parser, .eof) {
+        tag := parser_peek_tag(parser, 0);
+        if parens == 0 && brackets == 0 && (tag == .comma || tag == .r_paren || tag == .equal) break;
         parser.index = parser.index + 1;
         if tag == .l_paren parens = parens + 1;
         else if tag == .r_paren && parens > 0 parens = parens - 1;

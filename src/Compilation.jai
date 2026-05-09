@@ -32,5 +32,5 @@ compile_source_with_options :: (input_path: string, output_path: string, runtime
     if check_only return .OK;
     program := bytecode_generate(*ast, *typed, *resolved, *diag);
     if diag.failed return .FAILED;
-    return .FAILED;
+    return llvm_emit_object(*program, output_path, *diag);
 }

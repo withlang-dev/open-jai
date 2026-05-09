@@ -39,7 +39,9 @@ bytecode_generate_proc :: (ast: *Ast, typed: *Typed, resolved: *Resolved, progra
     proc.name = ast_token_slice(ast, ast_main_token(ast, proc_node));
     proc.num_registers = 0;
     proc.param_count = 0;
-    proc.return_type = type_void().index;
+    proc.param_types_start = program.param_type_count;
+    proc.return_type = VOID_TYPE;
+    bytecode_init_proc_signature(ast, program, *proc, proc_node);
 
     ctx: Bytecode_Gen_Context;
     ctx.ast = ast;
@@ -47,6 +49,7 @@ bytecode_generate_proc :: (ast: *Ast, typed: *Typed, resolved: *Resolved, progra
     ctx.resolved = resolved;
     ctx.program = program;
     ctx.proc = *proc;
+    bytecode_bind_proc_params(*ctx, proc_node);
 
     body := ast_data(ast, proc_node).lhs;
     if body != NULL_NODE bytecode_gen_block(*ctx, body, diag);
@@ -57,6 +60,40 @@ bytecode_generate_proc :: (ast: *Ast, typed: *Typed, resolved: *Resolved, progra
         proc_bytecode_add_instruction(*proc, ret);
     }
     return proc;
+}
+
+bytecode_init_proc_signature :: (ast: *Ast, program: *Bytecode_Program, proc: *Proc_Bytecode, proc_node: Node_Index) {
+    sig_extra := ast_data(ast, proc_node).rhs;
+    if sig_extra < 0 return;
+    param_list := ast_extra_at(ast, sig_extra, 0);
+    return_type := ast_extra_at(ast, sig_extra, 1);
+    params_extra := ast_data(ast, param_list).lhs;
+    param_count := ast_extra_count(ast, params_extra);
+    proc.param_count = param_count;
+    proc.num_registers = param_count;
+    i := 0;
+    while i < param_count {
+        param := ast_extra_at(ast, params_extra, i);
+        param_type := ast_data(ast, param).lhs;
+        bytecode_add_param_type(program, bytecode_type_id_from_type_expr(ast, param_type));
+        i += 1;
+    }
+    if return_type != NULL_NODE proc.return_type = bytecode_type_id_from_type_expr(ast, return_type);
+}
+
+bytecode_bind_proc_params :: (ctx: *Bytecode_Gen_Context, proc_node: Node_Index) {
+    sig_extra := ast_data(ctx.ast, proc_node).rhs;
+    if sig_extra < 0 return;
+    param_list := ast_extra_at(ctx.ast, sig_extra, 0);
+    params_extra := ast_data(ctx.ast, param_list).lhs;
+    param_count := ast_extra_count(ctx.ast, params_extra);
+    i := 0;
+    while i < param_count {
+        param := ast_extra_at(ctx.ast, params_extra, i);
+        name := ast_token_slice(ctx.ast, ast_main_token(ctx.ast, param));
+        bytecode_bind_local(ctx, name, param, i);
+        i += 1;
+    }
 }
 
 bytecode_proc_last_instruction_returns :: (proc: *Proc_Bytecode) -> bool {
@@ -318,6 +355,12 @@ bytecode_gen_call :: (ctx: *Bytecode_Gen_Context, expr: Node_Index, diag: *Diagn
         return reg;
     }
 
+    sym := resolved_lookup(ctx.resolved, name);
+    if sym.kind == .proc {
+        direct := bytecode_try_emit_direct_proc_call(ctx, sym.node, expr, diag);
+        if direct >= 0 return direct;
+    }
+
     proc_index := bytecode_find_proc(ctx.program, name);
     if proc_index >= 0 && arg_count == 0 {
         inst := instruction_init(.call_proc0);
@@ -332,6 +375,67 @@ bytecode_gen_call :: (ctx: *Bytecode_Gen_Context, expr: Node_Index, diag: *Diagn
         }
     }
     return bytecode_emit_int(ctx, expr, 0);
+}
+
+bytecode_try_emit_direct_proc_call :: (ctx: *Bytecode_Gen_Context, proc_node: Node_Index, expr: Node_Index, diag: *Diagnostic) -> Register {
+    sig_extra := ast_data(ctx.ast, proc_node).rhs;
+    if sig_extra < 0 return -1;
+    params := ast_data(ctx.ast, ast_extra_at(ctx.ast, sig_extra, 0)).lhs;
+    param_count := ast_extra_count(ctx.ast, params);
+    args_extra := ast_data(ctx.ast, expr).rhs;
+    arg_count := ast_extra_count(ctx.ast, args_extra);
+    if param_count != arg_count return -1;
+
+    target_index := bytecode_proc_index_for_node(ctx, proc_node);
+    if target_index < 0 return -1;
+
+    return_type := ast_extra_at(ctx.ast, sig_extra, 1);
+    return_type_id := VOID_TYPE;
+    if return_type != NULL_NODE return_type_id = bytecode_type_id_from_type_expr(ctx.ast, return_type);
+    if !bytecode_type_id_can_direct_call(return_type_id) return -1;
+
+    i := 0;
+    while i < param_count {
+        param := ast_extra_at(ctx.ast, params, i);
+        param_type_id := bytecode_type_id_from_type_expr(ctx.ast, ast_data(ctx.ast, param).lhs);
+        if !bytecode_type_id_can_direct_call(param_type_id) return -1;
+        i += 1;
+    }
+
+    arg_regs: [..] Register;
+    i = 0;
+    while i < arg_count {
+        arg := ast_extra_at(ctx.ast, args_extra, i);
+        array_add(*arg_regs, bytecode_gen_expr(ctx, arg, diag));
+        i += 1;
+    }
+
+    dest := 0;
+    if return_type_id != VOID_TYPE dest = bytecode_alloc_register(ctx);
+    arg_start := bytecode_add_call_args(ctx.program, arg_regs);
+    inst := instruction_init(.call);
+    inst.dest = dest;
+    inst.arg1 = target_index;
+    inst.arg2 = arg_count;
+    inst.arg3 = arg_start;
+    inst.source_node = expr;
+    proc_bytecode_add_instruction(ctx.proc, inst);
+    return dest;
+}
+
+bytecode_proc_index_for_node :: (ctx: *Bytecode_Gen_Context, proc_node: Node_Index) -> int {
+    i := 0;
+    while i < ctx.program.procs.count {
+        if ctx.program.procs[i].name == ast_token_slice(ctx.ast, ast_main_token(ctx.ast, proc_node)) return i;
+        i += 1;
+    }
+    return -1;
+}
+
+bytecode_type_id_can_direct_call :: (type_id: int) -> bool {
+    if type_id == VOID_TYPE return true;
+    if type_id == BOOL_TYPE return true;
+    return type_id >= S8_TYPE && type_id <= TYPE_TYPE;
 }
 
 bytecode_alloc_register :: (ctx: *Bytecode_Gen_Context) -> Register {
@@ -443,6 +547,30 @@ bytecode_find_proc :: (program: *Bytecode_Program, name: string) -> int {
         i += 1;
     }
     return -1;
+}
+
+bytecode_type_id_from_type_expr :: (ast: *Ast, node: Node_Index) -> int {
+    if node == NULL_NODE return ANY_TYPE;
+    tok := ast_main_token(ast, node);
+    tag := ast.tokens.items[tok].tag;
+    if tag == .star return U64_TYPE;
+    name := ast_token_slice(ast, tok);
+    if name == "void" return VOID_TYPE;
+    if name == "bool" return BOOL_TYPE;
+    if name == "int" || name == "s64" return S64_TYPE;
+    if name == "s32" return S32_TYPE;
+    if name == "u8" return U8_TYPE;
+    if name == "u16" return U16_TYPE;
+    if name == "u32" return U32_TYPE;
+    if name == "u64" return U64_TYPE;
+    if name == "float" || name == "float32" return FLOAT32_TYPE;
+    if name == "float64" return FLOAT64_TYPE;
+    if name == "string" return STRING_TYPE;
+    if name == "Type" return TYPE_TYPE;
+    if name == "Compile_Result" return S64_TYPE;
+    if name == "Node_Index" || name == "Token_Index" || name == "Extra_Index" return S64_TYPE;
+    if name == "Register" || name == "String_Index" || name == "Type_Id" return S64_TYPE;
+    return ANY_TYPE;
 }
 
 bytecode_parse_int :: (text: string) -> int {

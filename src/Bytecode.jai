@@ -110,6 +110,7 @@ Instruction :: struct {
 Proc_Bytecode :: struct {
     name: string;
     instructions: [..] Instruction;
+    param_types_start: int;
     num_registers: int;
     param_count: int;
     return_type: int;
@@ -119,8 +120,12 @@ Proc_Bytecode :: struct {
 Bytecode_Program :: struct {
     strings: [..] string;
     procs: [..] Proc_Bytecode;
+    call_args: [..] Register;
+    param_types: [..] int;
     string_count: int;
     proc_count: int;
+    call_arg_count: int;
+    param_type_count: int;
     main_proc: int;
 }
 
@@ -141,6 +146,8 @@ bytecode_program_init :: () -> Bytecode_Program {
     program: Bytecode_Program;
     program.string_count = 0;
     program.proc_count = 0;
+    program.call_arg_count = 0;
+    program.param_type_count = 0;
     program.main_proc = -1;
     return program;
 }
@@ -156,6 +163,24 @@ bytecode_add_proc :: (program: *Bytecode_Program, proc: Proc_Bytecode) -> int {
     index := program.proc_count;
     array_add(*program.procs, proc);
     program.proc_count = program.procs.count;
+    return index;
+}
+
+bytecode_add_call_args :: (program: *Bytecode_Program, args: [..] Register) -> int {
+    start := program.call_arg_count;
+    i := 0;
+    while i < args.count {
+        array_add(*program.call_args, args[i]);
+        i += 1;
+    }
+    program.call_arg_count = program.call_args.count;
+    return start;
+}
+
+bytecode_add_param_type :: (program: *Bytecode_Program, type_id: int) -> int {
+    index := program.param_type_count;
+    array_add(*program.param_types, type_id);
+    program.param_type_count = program.param_types.count;
     return index;
 }
 
