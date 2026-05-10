@@ -69,6 +69,21 @@ export fn __openjai_print_int(value: i64) void {
     writeAll(text);
 }
 
+export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize) void {
+    const base = data orelse {
+        writeAll("[]");
+        return;
+    };
+    const ints: [*]const i64 = @ptrCast(@alignCast(base));
+    writeAll("[");
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (i != 0) writeAll(", ");
+        __openjai_print_int(ints[i]);
+    }
+    writeAll("]");
+}
+
 export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64) void {
     var buf: [128]u8 = undefined;
     const unsigned_value: u64 = @intCast(value);
@@ -699,8 +714,8 @@ export fn __openjai_array_count(slot: ?*?*OpenJaiArray) i64 {
 }
 
 export fn __openjai_array_data(slot: ?*?*OpenJaiArray) ?*anyopaque {
-    const slot_ptr = slot orelse return null;
-    return if (slot_ptr.*) |a| a.data else null;
+    const array = arrayFromRuntimeValue(slot) orelse return null;
+    return array.data;
 }
 
 export fn __openjai_array_index(slot: ?*?*OpenJaiArray, index: i64, elem_size: usize) ?*anyopaque {

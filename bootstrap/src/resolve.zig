@@ -292,6 +292,50 @@ fn putStringBuiltins(r: *Resolved) !void {
     try r.putRealSymbol("c_style_strlen", .builtin_c_style_strlen);
 }
 
+fn putCompilerModuleSymbols(r: *Resolved) !void {
+    try putStringBuiltins(r);
+    for (&[_][]const u8{
+        "compiler_create_workspace",
+        "get_build_options",
+        "set_build_options",
+        "set_build_options_dc",
+        "compiler_begin_intercept",
+        "compiler_wait_for_message",
+        "compiler_end_intercept",
+        "add_build_file",
+        "add_build_string",
+        "run_command",
+        "set_optimization",
+        "compiler_get_nodes",
+        "compiler_get_code",
+        "print_expression",
+        "get_current_workspace",
+        "Optimization_Type",
+        "Message_Complete",
+        "compiler_set_workspace_status",
+        "compiler_report",
+        "make_location",
+        "add_global_data",
+        "code_to_string",
+        "Message",
+        "Message_File",
+        "Message_Import",
+        "Message_Phase",
+        "Message_Typechecked",
+        "Message_Debug_Dump",
+        "Workspace",
+        "Build_Options",
+        "Code",
+        "Code_Node",
+        "Code_Literal",
+        "Code_Procedure_Call",
+        "Code_Declaration",
+        "Source_Code_Location",
+    }) |name| {
+        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+    }
+}
+
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool) !Resolved {
     var r = Resolved{ .allocator = allocator, .require_main = require_main };
     errdefer r.deinit();
@@ -310,17 +354,21 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "read_entire_file", .builtin_read_entire_file);
     try r.symbols.put(allocator, "write_entire_file", .builtin_write_entire_file);
     try putPlaceholders(&r, allocator, &.{
-        "context", "temp", "reset_temporary_storage",
-        "push_allocator",
-        "DrawTexturePro",
-        "get_build_options", "set_build_options", "set_build_options_dc",
-        "add_build_file", "add_build_string", "run_command", "get_current_workspace",
-                        "compiler_create_workspace", "compiler_begin_intercept", "compiler_wait_for_message",
-                        "compiler_end_intercept", "compiler_set_workspace_status", "compiler_report",
-                        "make_location", "add_global_data", "Optimization_Type", "Message_Complete", "OS",
-                        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
-                        "For_Flags",
-                    });
+        "context",                   "reset_temporary_storage",
+        "push_allocator",            "DrawTexturePro",
+        "get_build_options",         "set_build_options",
+        "set_build_options_dc",      "add_build_file",
+        "add_build_string",          "run_command",
+        "get_current_workspace",     "compiler_create_workspace",
+        "compiler_begin_intercept",  "compiler_wait_for_message",
+        "compiler_end_intercept",    "compiler_set_workspace_status",
+        "compiler_report",           "make_location",
+        "add_global_data",           "Optimization_Type",
+        "Message_Complete",          "OS",
+        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
+        "For_Flags",
+    });
+    try r.putRealSymbol("temp", .{ .const_value = @import("Ast.zig").null_node });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
     var current_file: u32 = 0;
     var next_file_id: u32 = 0;
@@ -352,13 +400,13 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 if (file_scope and !main_scope_started) {
                     const raw = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
                     const scoped = try r.scopedName(current_file, raw);
-                        try r.owned_names.append(allocator, scoped);
-                        if (ast.tag(decl) == .proc_decl) {
-                            try r.addProc(scoped, decl);
-                        } else if (ast.tag(decl) == .placeholder_decl) {
-                            try putExplicitPlaceholder(&r, allocator, scoped);
-                        } else {
-                            try r.putRealSymbol(scoped, switch (ast.tag(decl)) {
+                    try r.owned_names.append(allocator, scoped);
+                    if (ast.tag(decl) == .proc_decl) {
+                        try r.addProc(scoped, decl);
+                    } else if (ast.tag(decl) == .placeholder_decl) {
+                        try putExplicitPlaceholder(&r, allocator, scoped);
+                    } else {
+                        try r.putRealSymbol(scoped, switch (ast.tag(decl)) {
                             .var_decl => .{ .const_value = decl },
                             else => .{ .const_value = ast.data(decl).lhs },
                         });
@@ -383,10 +431,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 if (ast.data(decl).rhs != 0) {
                     if (std.mem.eql(u8, module_name, "raylib")) {
                         try putPlaceholders(&r, allocator, &.{
-                            "InitWindow", "CloseWindow", "SetTargetFPS", "WindowShouldClose",
-                            "GetScreenWidth", "GetScreenHeight", "GetFrameTime",
-                            "BeginDrawing", "EndDrawing", "ClearBackground", "DrawText",
-                            "DrawRectangle", "DrawRectangleRec", "DrawCircle", "PI",
+                            "InitWindow",       "CloseWindow",     "SetTargetFPS", "WindowShouldClose",
+                            "GetScreenWidth",   "GetScreenHeight", "GetFrameTime", "BeginDrawing",
+                            "EndDrawing",       "ClearBackground", "DrawText",     "DrawRectangle",
+                            "DrawRectangleRec", "DrawCircle",      "PI",
                         });
                     }
                     continue;
@@ -421,12 +469,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "enum_values_as_s64", .builtin_enum_values_as_s64);
                     try r.symbols.put(allocator, "enum_names", .builtin_enum_names);
                     try putPlaceholders(&r, allocator, &.{
-                        "append", "sprint", "to_c_string", "to_string",
-                        "String_Builder", "free_buffers", "init_string_builder",
-                        "print_to_builder", "builder_string_length", "builder_to_string",
-                        "make_vector2", "make_vector3",
-                        "tprint", "compare", "split",
-                        "read", "release", "start", "lock", "proc",
+                        "append",                "sprint",            "to_c_string",         "to_string",
+                        "String_Builder",        "free_buffers",      "init_string_builder", "print_to_builder",
+                        "builder_string_length", "builder_to_string", "make_vector2",        "make_vector3",
+                        "tprint",                "compare",           "split",               "read",
+                        "release",               "start",             "lock",                "proc",
                     });
                     try putStringBuiltins(&r);
                     try r.symbols.put(allocator, "get_command_line_arguments", .builtin_get_command_line_arguments);
@@ -466,24 +513,14 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "print", .builtin_print);
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
+                    try putCompilerModuleSymbols(&r);
                     try putPlaceholders(&r, allocator, &.{
-                        "compiler_create_workspace", "get_build_options", "set_build_options",
-                        "set_build_options_dc", "compiler_begin_intercept", "compiler_wait_for_message",
-                        "compiler_end_intercept", "add_build_file", "add_build_string", "run_command",
-                        "set_optimization", "compiler_get_nodes", "compiler_get_code", "print_expression",
-                        "get_current_workspace", "Optimization_Type", "Message_Complete",
-                        "compiler_set_workspace_status", "compiler_report", "make_location",
-                        "add_global_data", "code_to_string", "builder_to_string",
                         "compiler_get_version_info", "compiler_custom_link_command_is_complete",
-                        "Message", "Message_File", "Message_Import", "Message_Phase",
-                        "Message_Typechecked", "Message_Debug_Dump", "Workspace",
-                        "Build_Options", "Code", "Code_Node", "Code_Literal",
-                        "Code_Procedure_Call", "Code_Declaration", "Source_Code_Location",
                         "Version_Info",
                     });
                 } else if (std.mem.eql(u8, module_name, "Metaprogram_Plugins")) {
                     try putPlaceholders(&r, allocator, &.{
-                        "Metaprogram_Plugin", "Intercept_Flags",
+                        "Metaprogram_Plugin",     "Intercept_Flags",
                         "parse_plugin_arguments", "init_plugins",
                     });
                 } else if (std.mem.eql(u8, module_name, "System") or
@@ -537,18 +574,19 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try putPlaceholders(&r, allocator, &.{ "delete_directory", "get_path_of_running_executable" });
                     } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
                         try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
-                        try putPlaceholders(&r, allocator, &.{ "delete_directory" });
+                        try putPlaceholders(&r, allocator, &.{"delete_directory"});
                     } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
                         try putPlaceholders(&r, allocator, &.{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" });
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putPlaceholders(&r, allocator, &.{
-                            "events_this_frame", "update_window_events",
-                            "SDL_INIT_VIDEO", "SDL_Init", "SDL_GL_GetProcAddress",
+                            "events_this_frame",     "update_window_events",
+                            "SDL_INIT_VIDEO",        "SDL_Init",
+                            "SDL_GL_GetProcAddress",
                         });
                     } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
-                        try putPlaceholders(&r, allocator, &.{ "create_window" });
+                        try putPlaceholders(&r, allocator, &.{"create_window"});
                     } else if (std.mem.eql(u8, module_name, "Windows_Resources")) {
-                        try putPlaceholders(&r, allocator, &.{ "gl" });
+                        try putPlaceholders(&r, allocator, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putPlaceholders(&r, allocator, &.{
                             "get_font_at_size", "texture_load_from_file", "gl_load", "DrawTexturePro", "immediate_quad", "gl",
@@ -560,7 +598,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
                         try putPlaceholders(&r, allocator, &.{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" });
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
-                        try putPlaceholders(&r, allocator, &.{ "table_add" });
+                        try putPlaceholders(&r, allocator, &.{"table_add"});
                     } else if (std.mem.eql(u8, module_name, "Pool") or std.mem.eql(u8, module_name, "Flat_Pool")) {
                         try putPlaceholders(&r, allocator, &.{ "get", "release", "reset", "pool_allocator_proc", "flat_pool_allocator_proc" });
                     } else if (std.mem.eql(u8, module_name, "Machine_X64")) {
@@ -1155,8 +1193,8 @@ test "resolver records used implicit placeholders" {
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Compiler\";\n" ++
-        "main :: () { w := compiler_create_workspace(); }\n";
+        "#import \"Process\";\n" ++
+        "main :: () { shutdown(); }\n";
     const diag = Diagnostic.init(std.testing.allocator, "implicit_placeholder_use.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);

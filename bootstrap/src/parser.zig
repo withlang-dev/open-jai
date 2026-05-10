@@ -52,7 +52,11 @@ const Parser = struct {
         if (p.match(.directive_scope_export)) |tok| return p.parseScope(tok);
         if (p.match(.directive_scope_module)) |tok| return p.parseScope(tok);
         if (p.match(.directive_program_export)) |_| return p.parseTopLevelDecl();
-        if (p.match(.directive_no_reset)) |_| return p.parseTopLevelDecl();
+        if (p.match(.directive_no_reset)) |_| {
+            const decl = try p.parseTopLevelDecl();
+            try p.markNoResetDecl(decl);
+            return decl;
+        }
         if (p.match(.directive_poke_name)) |tok| return p.parseTopLevelMetaDirective(tok);
         if (p.match(.directive_add_context)) |tok| return p.parseAddContext(tok);
         if (p.match(.directive_assert)) |tok| return p.parseTopLevelAssert(tok);
@@ -63,6 +67,15 @@ const Parser = struct {
             if (p.peekTag(1) == .colon_colon or p.peekTag(1) == .colon or p.peekTag(1) == .colon_equal or p.peekTag(1) == .comma) return p.parseTopLevelIdentifierDecl();
         }
         return p.failCurrent("expected top-level import, constant, or procedure declaration", .{});
+    }
+
+    fn markNoResetDecl(p: *Parser, node: NodeIndex) !void {
+        if (node == null_node) return;
+        if (p.ast.tag(node) == .stmt_list) {
+            for (p.ast.extraSlice(p.ast.data(node).lhs)) |child| try p.markNoResetDecl(@intCast(child));
+            return;
+        }
+        try p.ast.markNoReset(node);
     }
 
     fn parseOperatorDecl(p: *Parser) !NodeIndex {

@@ -4,6 +4,7 @@ const parser = @import("parser.zig");
 const resolve_mod = @import("resolve.zig");
 const sema = @import("Sema.zig");
 const bytecode_gen = @import("bytecode_gen.zig");
+const Bytecode = @import("Bytecode.zig");
 const llvm = @import("codegen/llvm.zig");
 const link_mod = @import("link.zig");
 const vm_mod = @import("vm.zig");
@@ -22,6 +23,7 @@ pub const Compilation = struct {
     io: std.Io,
     options: Options,
     owned_run_result_strings: std.ArrayList([]const u8) = .empty,
+    owned_run_result_bytes: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
         return .{ .allocator = allocator, .io = io, .options = options };
@@ -32,6 +34,9 @@ pub const Compilation = struct {
             for (comp.owned_run_result_strings.items) |value| comp.allocator.free(value);
             comp.owned_run_result_strings.deinit(comp.allocator);
             comp.owned_run_result_strings = .empty;
+            for (comp.owned_run_result_bytes.items) |value| comp.allocator.free(value);
+            comp.owned_run_result_bytes.deinit(comp.allocator);
+            comp.owned_run_result_bytes = .empty;
         }
 
         const source = try comp.loadSourceWithLoads(comp.options.input_path);
@@ -130,6 +135,10 @@ pub const Compilation = struct {
                 try typed.putComptimeString(value_node, string_value);
                 try typed.putComptimeString(decl_node, string_value);
             },
+            .bytes => |bytes_value| {
+                try typed.putComptimeBytes(value_node, bytes_value);
+                try typed.putComptimeBytes(decl_node, bytes_value);
+            },
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
     }
@@ -203,9 +212,11 @@ pub const Compilation = struct {
 
     fn evaluateAllNestedRunExpressions(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
         const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
+        for (root_decls, 0..) |decl_idx, i| {
             const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
             if (ast.tag(decl) != .proc_decl) continue;
+            const next_decl: @import("Ast.zig").NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
+            if (procHasExpandModifier(ast, decl, next_decl)) continue;
             try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(decl).lhs, diag);
         }
     }
@@ -234,17 +245,19 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
                     .float => |float_value| try typed.comptime_floats.put(comp.allocator, node, float_value),
                     .bool => |bool_value| try typed.comptime_ints.put(comp.allocator, node, if (bool_value) 1 else 0),
                     .string => |string_value| try typed.putComptimeString(node, string_value),
+                    .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
                     .void => {},
                 }
             },
             .block => {
+                if (blockContainsDirectiveInsert(ast, node)) return;
                 for (ast.extraSlice(ast.data(node).lhs)) |stmt| try comp.evaluateRunExpressionsInNode(ast, typed, resolved, @intCast(stmt), diag);
             },
             .stmt_list, .aggregate_literal => {
@@ -335,7 +348,10 @@ pub const Compilation = struct {
             var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
             defer block_program.deinit();
             var block_vm = vm_mod.VM.init(comp.allocator, &block_program);
-            return try comp.ownRunResultString(try block_vm.runProc(block_program.main_proc.?, diag));
+            defer block_vm.deinit();
+            const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
+            try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
+            return result;
         }
         if (ast.tag(expr) != .call_expr) return try comp.executeRunConstExpr(ast, typed, resolved, expr, diag);
         const callee = ast.data(expr).lhs;
@@ -367,7 +383,7 @@ pub const Compilation = struct {
             };
         };
         if (proc_node == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "#run target is not a procedure", .{});
-        var run_program = try bytecode_gen.generateProcWithParamCount(comp.allocator, ast, resolved, typed, proc_node, diag, call_args.len);
+        var run_program = try bytecode_gen.generateProcForCall(comp.allocator, ast, resolved, typed, proc_node, expr, diag);
         defer run_program.deinit();
         var arg_values = std.ArrayList(vm_mod.Value).empty;
         defer arg_values.deinit(comp.allocator);
@@ -379,16 +395,24 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .float = value });
             } else if (typed.comptime_strings.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .string = value });
+            } else if (typed.comptime_bytes.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .bytes = value });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
                 try arg_values.append(comp.allocator, .{ .float = try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(arg))) });
-            } else if (ast.tag(arg) == .call_expr or ast.tag(arg) == .meta_expr or ast.tag(arg) == .type_expr) {
-                try arg_values.append(comp.allocator, .{ .int = 0 });
+            } else if (ast.tag(arg) == .call_expr) {
+                try arg_values.append(comp.allocator, try comp.executeRunCall(ast, typed, resolved, arg, arg, diag));
+            } else if (ast.tag(arg) == .meta_expr or ast.tag(arg) == .type_expr) {
+                return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument kind {s}", .{@tagName(ast.tag(arg))});
             } else if (ast.tag(arg) == .identifier) {
-                const decl = resolved.local_values.get(arg) orelse {
-                    try arg_values.append(comp.allocator, .{ .int = 0 });
-                    continue;
+                const decl = resolved.local_values.get(arg) orelse blk: {
+                    const name = ast.tokenSlice(ast.mainToken(arg));
+                    if (resolved.lookup(name)) |sym| switch (sym) {
+                        .const_value => |node| break :blk node,
+                        else => {},
+                    };
+                    return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unresolved compile-time procedure argument", .{});
                 };
                 if (typed.comptime_ints.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .int = value });
@@ -396,15 +420,15 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .float = value });
                 } else if (typed.comptime_strings.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .string = value });
+                } else if (typed.comptime_bytes.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .bytes = value });
                 } else {
                     if (decl == @import("Ast.zig").null_node) {
-                        try arg_values.append(comp.allocator, .{ .int = 0 });
-                        continue;
+                        return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument", .{});
                     }
                     const initializer_node = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else @import("Ast.zig").null_node;
                     if (initializer_node == @import("Ast.zig").null_node) {
-                        try arg_values.append(comp.allocator, .{ .int = 0 });
-                        continue;
+                        return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "compile-time procedure argument has no initializer", .{});
                     }
                     if (typed.comptime_ints.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .int = value });
@@ -412,25 +436,44 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .float = value });
                     } else if (typed.comptime_strings.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .string = value });
+                    } else if (typed.comptime_bytes.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .bytes = value });
                     } else {
-                        try arg_values.append(comp.allocator, .{ .int = 0 });
+                        return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument value", .{});
                     }
                 }
             } else {
-                try arg_values.append(comp.allocator, .{ .int = 0 });
+                return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument expression", .{});
             }
         }
         var vm = vm_mod.VM.init(comp.allocator, &run_program);
-        return try comp.ownRunResultString(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
+        defer vm.deinit();
+        return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
     }
 
-    fn ownRunResultString(comp: *Compilation, value: vm_mod.Value) !vm_mod.Value {
+    fn recordNoResetGlobals(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, program: *const Bytecode.Program, vm: *vm_mod.VM, diag: Diagnostic) !void {
+        for (program.globals.items, 0..) |global, i| {
+            const decl: @import("Ast.zig").NodeIndex = @intCast(global.source_node);
+            if (!ast.isNoReset(decl)) continue;
+            const bytes = (try vm.globalBytes(i, diag)) orelse continue;
+            try typed.putComptimeBytes(decl, bytes);
+        }
+        _ = comp;
+    }
+
+    fn ownRunResult(comp: *Compilation, value: vm_mod.Value) !vm_mod.Value {
         return switch (value) {
             .string => |string_value| blk: {
                 const owned = try comp.allocator.dupe(u8, string_value);
                 errdefer comp.allocator.free(owned);
                 try comp.owned_run_result_strings.append(comp.allocator, owned);
                 break :blk .{ .string = owned };
+            },
+            .bytes => |bytes_value| blk: {
+                const owned = try comp.allocator.dupe(u8, bytes_value);
+                errdefer comp.allocator.free(owned);
+                try comp.owned_run_result_bytes.append(comp.allocator, owned);
+                break :blk .{ .bytes = owned };
             },
             else => value,
         };
@@ -443,6 +486,7 @@ pub const Compilation = struct {
         if (typed.comptime_ints.get(arg)) |value| return .{ .int = value };
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
         if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
+        if (typed.comptime_bytes.get(arg)) |value| return .{ .bytes = value };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
@@ -456,6 +500,42 @@ pub const Compilation = struct {
         if (node == @import("Ast.zig").null_node or ast.tag(node) != .run_expr) return false;
         return switch (ast.tokens[ast.mainToken(node)].tag) {
             .directive_run, .directive_assert, .keyword_push_context => true,
+            else => false,
+        };
+    }
+
+    fn procHasExpandModifier(ast: *const @import("Ast.zig").Ast, proc: @import("Ast.zig").NodeIndex, next_decl: @import("Ast.zig").NodeIndex) bool {
+        if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
+        const token_start = ast.tokens[ast.mainToken(proc)].start;
+        const start = token_start - @min(token_start, 200);
+        const end = if (next_decl != @import("Ast.zig").null_node and next_decl < ast.node_tags.items.len)
+            ast.tokens[ast.mainToken(next_decl)].start
+        else
+            ast.source.len;
+        if (end <= start or end > ast.source.len) return false;
+        return std.mem.indexOf(u8, ast.source[start..end], "#expand") != null;
+    }
+
+    fn blockContainsDirectiveInsert(ast: *const @import("Ast.zig").Ast, block: @import("Ast.zig").NodeIndex) bool {
+        if (block == @import("Ast.zig").null_node or ast.tag(block) != .block) return false;
+        for (ast.extraSlice(ast.data(block).lhs)) |stmt_idx| {
+            if (nodeContainsDirectiveInsert(ast, @intCast(stmt_idx))) return true;
+        }
+        return false;
+    }
+
+    fn nodeContainsDirectiveInsert(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return false;
+        if ((ast.tag(node) == .meta_stmt or ast.tag(node) == .meta_expr) and ast.tokens[ast.mainToken(node)].tag == .directive_insert) return true;
+        const data = ast.data(node);
+        return switch (ast.tag(node)) {
+            .expr_stmt, .const_decl, .return_stmt, .unary_expr, .run_expr => nodeContainsDirectiveInsert(ast, data.lhs),
+            .var_decl, .assign_stmt, .binary_expr, .meta_expr, .meta_stmt => nodeContainsDirectiveInsert(ast, data.lhs) or nodeContainsDirectiveInsert(ast, data.rhs),
+            .stmt_list, .block, .aggregate_literal => blk: {
+                if (data.lhs >= ast.extra_data.items.len) break :blk false;
+                for (ast.extraSlice(data.lhs)) |child| if (nodeContainsDirectiveInsert(ast, @intCast(child))) break :blk true;
+                break :blk false;
+            },
             else => false,
         };
     }
@@ -524,9 +604,9 @@ pub const Compilation = struct {
         const mp_idx = std.mem.indexOf(u8, source, "#module_parameters(") orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(0, "parameterized import requires module to declare #module_parameters", .{});
         const mp_start = mp_idx + "#module_parameters(".len;
         const mp_end_rel = std.mem.indexOfScalar(u8, source[mp_start..], ')') orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "unterminated #module_parameters", .{});
-        const decls = source[mp_start..mp_start + mp_end_rel];
+        const decls = source[mp_start .. mp_start + mp_end_rel];
         if (std.mem.indexOf(u8, decls, ":=") == null) return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "#module_parameters currently supports name := default declarations", .{});
-        const name = std.mem.trim(u8, decls[0 .. std.mem.indexOf(u8, decls, ":=").?], " \t\r\n");
+        const name = std.mem.trim(u8, decls[0..std.mem.indexOf(u8, decls, ":=").?], " \t\r\n");
         const eq = std.mem.indexOfScalar(u8, params, '=') orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "parameterized import currently requires name=value", .{});
         const override_name = std.mem.trim(u8, params[0..eq], " \t\r\n");
         const override_value = std.mem.trim(u8, params[eq + 1 ..], " \t\r\n");
@@ -557,15 +637,15 @@ pub const Compilation = struct {
         var rest = source;
         while (std.mem.indexOf(u8, rest, "#import \"")) |idx| {
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
-            const line = rest[idx..idx + line_end];
+            const line = rest[idx .. idx + line_end];
             if (std.mem.indexOfScalar(u8, line, '(')) |param_start_rel| {
                 try out.appendSlice(comp.allocator, rest[0..idx]);
                 const name_start = idx + "#import \"".len;
                 const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module name", .{});
-                const module_name = rest[name_start..name_start + name_end_rel];
+                const module_name = rest[name_start .. name_start + name_end_rel];
                 const param_start = idx + param_start_rel + 1;
                 const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start..], ')') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module parameters", .{});
-                const params = rest[param_start..param_start + param_end_rel];
+                const params = rest[param_start .. param_start + param_end_rel];
                 const module_path = comp.findModule(module_name) catch {
                     try out.appendSlice(comp.allocator, "#import \"");
                     try out.appendSlice(comp.allocator, module_name);
@@ -598,7 +678,7 @@ pub const Compilation = struct {
                 comp.allocator.free(source);
                 return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #load path", .{});
             };
-            const rel = rest[start..start + end_rel];
+            const rel = rest[start .. start + end_rel];
             const full = try std.fs.path.join(comp.allocator, &[_][]const u8{ dir, rel });
             defer comp.allocator.free(full);
             const loaded = std.Io.Dir.cwd().readFileAlloc(comp.io, full, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {

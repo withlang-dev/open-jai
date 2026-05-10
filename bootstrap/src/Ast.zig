@@ -77,6 +77,7 @@ pub const Ast = struct {
     node_data: std.ArrayList(Node.Data) = .empty,
     extra_data: std.ArrayList(u32) = .empty,
     node_note_tokens: std.AutoHashMapUnmanaged(NodeIndex, ExtraIndex) = .empty,
+    node_no_reset: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
     root: NodeIndex = null_node,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token) Ast {
@@ -89,6 +90,7 @@ pub const Ast = struct {
         ast.node_data.deinit(ast.allocator);
         ast.extra_data.deinit(ast.allocator);
         ast.node_note_tokens.deinit(ast.allocator);
+        ast.node_no_reset.deinit(ast.allocator);
     }
 
     pub fn addNode(ast: *Ast, node_tag: Node.Tag, main_token: Token.Index, node_data_value: Node.Data) !NodeIndex {
@@ -97,6 +99,14 @@ pub const Ast = struct {
         try ast.node_main_tokens.append(ast.allocator, main_token);
         try ast.node_data.append(ast.allocator, node_data_value);
         return idx;
+    }
+
+    pub fn markNoReset(ast: *Ast, node: NodeIndex) !void {
+        try ast.node_no_reset.put(ast.allocator, node, {});
+    }
+
+    pub fn isNoReset(ast: *const Ast, node: NodeIndex) bool {
+        return ast.node_no_reset.contains(node);
     }
 
     pub fn addExtraSlice(ast: *Ast, values: []const u32) !ExtraIndex {
@@ -117,9 +127,15 @@ pub const Ast = struct {
         return ast.extra_data.items[start + 1 .. start + 1 + len];
     }
 
-    pub fn tag(ast: *const Ast, node: NodeIndex) Node.Tag { return ast.node_tags.items[node]; }
-    pub fn mainToken(ast: *const Ast, node: NodeIndex) Token.Index { return ast.node_main_tokens.items[node]; }
-    pub fn data(ast: *const Ast, node: NodeIndex) Node.Data { return ast.node_data.items[node]; }
+    pub fn tag(ast: *const Ast, node: NodeIndex) Node.Tag {
+        return ast.node_tags.items[node];
+    }
+    pub fn mainToken(ast: *const Ast, node: NodeIndex) Token.Index {
+        return ast.node_main_tokens.items[node];
+    }
+    pub fn data(ast: *const Ast, node: NodeIndex) Node.Data {
+        return ast.node_data.items[node];
+    }
 
     pub fn noteTokens(ast: *const Ast, node: NodeIndex) []const u32 {
         const extra = ast.node_note_tokens.get(node) orelse return &.{};

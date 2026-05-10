@@ -8,11 +8,28 @@ pub const Value = union(enum) {
     float: f64,
     bool: bool,
     string: []const u8,
+    bytes: []const u8,
+};
+
+const Pointer = struct {
+    block: u32,
+    offset: usize,
+};
+
+const CodeNode = struct {
+    kind: []const u8,
+    flags: []const u8,
+    text: []const u8,
 };
 
 const RegisterValue = union(enum) {
     empty,
     string: []const u8,
+    bytes: []const u8,
+    code_node: CodeNode,
+    code_nodes: []const CodeNode,
+    type_id: u32,
+    ptr: Pointer,
     int: i64,
     float: f64,
     bool: bool,
@@ -21,9 +38,24 @@ const RegisterValue = union(enum) {
 pub const VM = struct {
     allocator: std.mem.Allocator,
     program: *const Bytecode.Program,
+    memory_blocks: std.ArrayList([]u8) = .empty,
+    global_ptrs: std.ArrayList(?Pointer) = .empty,
+    string_builders: std.AutoHashMapUnmanaged(u64, std.ArrayList(u8)) = .empty,
+    code_node_arrays: std.ArrayList([]CodeNode) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
+    }
+
+    pub fn deinit(vm: *VM) void {
+        for (vm.memory_blocks.items) |block| vm.allocator.free(block);
+        vm.memory_blocks.deinit(vm.allocator);
+        vm.global_ptrs.deinit(vm.allocator);
+        var builder_it = vm.string_builders.iterator();
+        while (builder_it.next()) |entry| entry.value_ptr.deinit(vm.allocator);
+        vm.string_builders.deinit(vm.allocator);
+        for (vm.code_node_arrays.items) |nodes| vm.allocator.free(nodes);
+        vm.code_node_arrays.deinit(vm.allocator);
     }
 
     pub fn runProc(vm: *VM, proc_index: u32, diag: Diagnostic) !Value {
@@ -36,6 +68,9 @@ pub const VM = struct {
         var regs = try vm.allocator.alloc(RegisterValue, proc.num_registers);
         defer vm.allocator.free(regs);
         @memset(regs, .empty);
+        var local_ptrs = try vm.allocator.alloc(?Pointer, proc.num_registers);
+        defer vm.allocator.free(local_ptrs);
+        @memset(local_ptrs, null);
         if (args.len > regs.len) return diag.failAt(0, "VM #run argument count exceeds register file", .{});
         for (args, 0..) |arg, i| {
             regs[i] = switch (arg) {
@@ -43,6 +78,7 @@ pub const VM = struct {
                 .float => |v| .{ .float = v },
                 .bool => |v| .{ .bool = v },
                 .string => |v| .{ .string = v },
+                .bytes => |v| .{ .bytes = v },
                 .void => return diag.failAt(0, "VM #run arguments cannot be void", .{}),
             };
         }
@@ -54,6 +90,10 @@ pub const VM = struct {
                 .load_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_string register/string index out of range", .{});
                     regs[inst.dest] = .{ .string = vm.program.strings.items[inst.arg1] };
+                },
+                .load_bytes => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.byte_arrays.items.len) return diag.failAt(0, "VM load_bytes register/byte-array index out of range", .{});
+                    regs[inst.dest] = .{ .bytes = vm.program.byte_arrays.items[inst.arg1] };
                 },
                 .load_int => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM load_int register out of range", .{});
@@ -68,9 +108,17 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM load_bool register out of range", .{});
                     regs[inst.dest] = .{ .bool = inst.arg1 != 0 };
                 },
-                .load_null_ptr, .load_const_ref, .load_type => {
+                .load_type => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM load_type register out of range", .{});
+                    regs[inst.dest] = .{ .type_id = inst.arg1 };
+                },
+                .load_null_ptr, .load_const_ref => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM placeholder/reference load register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast(inst.arg1) };
+                },
+                .global_addr => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.globals.items.len) return diag.failAt(0, "VM global_addr register/global index out of range", .{});
+                    regs[inst.dest] = .{ .ptr = try vm.globalPtr(inst.arg1) };
                 },
                 .load_undef => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM undefined load register out of range", .{});
@@ -260,7 +308,12 @@ pub const VM = struct {
                 },
                 .addr_of_local => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM addr_of_local register out of range", .{});
-                    regs[inst.dest] = .{ .int = @intCast(inst.arg1 + 1) };
+                    const ptr = local_ptrs[inst.arg1] orelse blk: {
+                        const allocated = try vm.materializeRegister(regs[inst.arg1], diag);
+                        local_ptrs[inst.arg1] = allocated;
+                        break :blk allocated;
+                    };
+                    regs[inst.dest] = .{ .ptr = ptr };
                 },
                 .proc_addr => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM proc_addr register out of range", .{});
@@ -274,6 +327,7 @@ pub const VM = struct {
                         .int => |value| std.debug.print("{d}", .{value}),
                         .float => |value| std.debug.print("{d}", .{value}),
                         .bool => |value| std.debug.print("{s}", .{if (value) "true" else "false"}),
+                        .type_id => |value| std.debug.print("{s}", .{typeName(value)}),
                         else => return diag.failAt(0, "VM compile-time print currently requires string, integer, float, or bool argument", .{}),
                     }
                 },
@@ -300,6 +354,7 @@ pub const VM = struct {
                         .int => |value| std.debug.print("{d}", .{value}),
                         .float => |value| std.debug.print("{d}", .{value}),
                         .bool => |value| std.debug.print("{s}", .{if (value) "true" else "false"}),
+                        .type_id => |value| std.debug.print("{s}", .{typeName(value)}),
                         else => return diag.failAt(0, "VM format_print currently requires string, integer, float, or bool argument", .{}),
                     }
                 },
@@ -326,7 +381,9 @@ pub const VM = struct {
                         .float => |value| .{ .float = value },
                         .bool => |value| .{ .bool = value },
                         .string => |value| .{ .string = value },
-                        else => diag.failAt(0, "VM #run return currently supports only concrete scalar values", .{}),
+                        .bytes => |value| .{ .bytes = value },
+                        .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
+                        else => diag.failAt(0, "VM #run return register was not initialized", .{}),
                     };
                 },
                 .assert_true => {
@@ -339,35 +396,117 @@ pub const VM = struct {
                 .exit_process => return .void,
                 .alloc_heap => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
-                    regs[inst.dest] = .{ .int = 1 };
+                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
                 },
                 .load_ptr, .load_ptr_byte => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
-                    regs[inst.dest] = regs[inst.arg1];
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "load_ptr");
+                    regs[inst.dest] = if (inst.opcode == .load_ptr_byte)
+                        .{ .int = try vm.loadByte(ptr, diag) }
+                    else
+                        .{ .int = @bitCast(try vm.loadU64(ptr, diag)) };
                 },
                 .ptr_offset => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM ptr_offset register out of range", .{});
-                    const base = switch (regs[inst.arg1]) {
-                        .int => |v| v,
-                        else => 0,
-                    };
-                    regs[inst.dest] = .{ .int = base + @as(i64, @intCast(inst.arg2)) };
+                    var ptr = try registerPointer(regs[inst.arg1], diag, "ptr_offset");
+                    ptr.offset += inst.arg2;
+                    regs[inst.dest] = .{ .ptr = ptr };
                 },
                 .ptr_offset_reg => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM ptr_offset_reg register out of range", .{});
-                    const base = switch (regs[inst.arg1]) {
-                        .int => |v| v,
-                        else => 0,
-                    };
+                    var ptr = try registerPointer(regs[inst.arg1], diag, "ptr_offset_reg");
                     const offset = switch (regs[inst.arg2]) {
                         .int => |v| v,
-                        else => 0,
+                        else => return diag.failAt(0, "VM ptr_offset_reg requires integer offset", .{}),
                     };
-                    regs[inst.dest] = .{ .int = base + offset };
+                    if (offset < 0) return diag.failAt(0, "VM ptr_offset_reg does not support negative offsets yet", .{});
+                    ptr.offset += @intCast(offset);
+                    regs[inst.dest] = .{ .ptr = ptr };
                 },
-                .load_ptr_string, .alloc_local_bytes, .new_array, .array_add, .array_count, .array_index, .string_slice => {
+                .alloc_local_bytes => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
-                    regs[inst.dest] = .{ .int = 0 };
+                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
+                },
+                .array_count => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_count register out of range", .{});
+                    regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], diag)) };
+                },
+                .array_data => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_data register out of range", .{});
+                    regs[inst.dest] = switch (regs[inst.arg1]) {
+                        .bytes => |bytes| .{ .ptr = try vm.materializeRegister(.{ .bytes = bytes }, diag) },
+                        .ptr => |ptr| .{ .ptr = ptr },
+                        else => return diag.failAt(0, "VM array_data requires array-compatible value", .{}),
+                    };
+                },
+                .array_index => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_index register out of range", .{});
+                    const index = switch (regs[inst.arg2]) {
+                        .int => |v| v,
+                        else => return diag.failAt(0, "VM array_index requires integer index", .{}),
+                    };
+                    if (index < 0) return diag.failAt(0, "VM array_index does not support negative indices", .{});
+                    const elem_size: usize = @intCast(@max(inst.arg3, 1));
+                    switch (regs[inst.arg1]) {
+                        .bytes => |bytes| {
+                            const offset = @as(usize, @intCast(index)) * elem_size;
+                            if (offset + elem_size > bytes.len) return diag.failAt(0, "VM array_index out of bounds", .{});
+                            regs[inst.dest] = if (inst.arg4 == 1)
+                                .{ .bytes = bytes[offset .. offset + elem_size] }
+                            else if (elem_size == 1)
+                                .{ .int = bytes[offset] }
+                            else
+                                .{ .int = readIntLittle(bytes[offset .. offset + @min(elem_size, 8)]) };
+                        },
+                        .ptr => |ptr| {
+                            var item = ptr;
+                            item.offset += @as(usize, @intCast(index)) * elem_size;
+                            regs[inst.dest] = if (inst.arg4 == 1)
+                                .{ .ptr = item }
+                            else if (elem_size == 1)
+                                .{ .int = try vm.loadByte(item, diag) }
+                            else
+                                .{ .int = @bitCast(try vm.loadU64(item, diag)) };
+                        },
+                        .code_nodes => |nodes| {
+                            if (index >= nodes.len) return diag.failAt(0, "VM Code_Node array index out of bounds", .{});
+                            regs[inst.dest] = .{ .code_node = nodes[@intCast(index)] };
+                        },
+                        else => return diag.failAt(0, "VM array_index requires array or pointer value", .{}),
+                    }
+                },
+                .compiler_get_nodes_root => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes root register out of range", .{});
+                    const text = try registerCodeText(regs[inst.arg1], diag, "compiler_get_nodes");
+                    regs[inst.dest] = .{ .code_node = .{ .kind = "ROOT", .flags = "0", .text = text } };
+                },
+                .compiler_get_nodes_exprs => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes expressions register out of range", .{});
+                    const text = try registerCodeText(regs[inst.arg1], diag, "compiler_get_nodes");
+                    regs[inst.dest] = .{ .code_nodes = try vm.buildCodeNodes(text) };
+                },
+                .code_node_field_kind => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.kind register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Node.kind requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .string = node.kind };
+                },
+                .code_node_field_flags => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.node_flags register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Node.node_flags requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .string = node.flags };
+                },
+                .load_ptr_string, .new_array, .array_add, .string_slice => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
+                    return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)});
+                },
+                .format_static_int_array => {
+                    return diag.failAt(0, "VM does not support static array formatted output in #run yet", .{});
                 },
                 .sleep_milliseconds => {
                     return diag.failAt(0, "VM does not support sleep_milliseconds in #run yet", .{});
@@ -379,12 +518,320 @@ pub const VM = struct {
                 .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .store_ptr, .store_ptr_byte => {},
-                .memcpy, .free_heap, .array_free => {},
+                .string_builder_init => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_init register out of range", .{});
+                    try vm.builderInit(try registerPointer(regs[inst.arg1], diag, "string_builder_init slot"));
+                },
+                .string_builder_free => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_free register out of range", .{});
+                    try vm.builderFree(try registerPointer(regs[inst.arg1], diag, "string_builder_free slot"));
+                },
+                .string_builder_append_string, .string_builder_append_int, .string_builder_append_float => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_builder_append register out of range", .{});
+                    try vm.builderAppendValue(try registerPointer(regs[inst.arg1], diag, "string_builder_append slot"), regs[inst.arg2], diag);
+                    if (inst.dest < regs.len) regs[inst.dest] = .{ .bool = true };
+                },
+                .string_builder_to_string => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_to_string register out of range", .{});
+                    regs[inst.dest] = .{ .string = try vm.builderString(try registerPointer(regs[inst.arg1], diag, "string_builder_to_string slot")) };
+                },
+                .string_builder_length => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_length register out of range", .{});
+                    regs[inst.dest] = .{ .int = @intCast((try vm.builderString(try registerPointer(regs[inst.arg1], diag, "string_builder_length slot"))).len) };
+                },
+                .store_ptr => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr register out of range", .{});
+                    try vm.storeRegister(try registerPointer(regs[inst.dest], diag, "store_ptr destination"), regs[inst.arg1], diag);
+                },
+                .store_ptr_byte => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr_byte register out of range", .{});
+                    const value = switch (regs[inst.arg1]) {
+                        .int => |v| v,
+                        else => return diag.failAt(0, "VM store_ptr_byte requires integer source", .{}),
+                    };
+                    try vm.storeByte(try registerPointer(regs[inst.dest], diag, "store_ptr_byte destination"), @intCast(value & 0xff), diag);
+                },
+                .memcpy => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM memcpy register out of range", .{});
+                    const count = switch (regs[inst.arg2]) {
+                        .int => |v| v,
+                        else => return diag.failAt(0, "VM memcpy byte count must be an integer", .{}),
+                    };
+                    if (count < 0) return diag.failAt(0, "VM memcpy byte count cannot be negative", .{});
+                    try vm.copyBytes(try registerPointer(regs[inst.dest], diag, "memcpy destination"), regs[inst.arg1], @intCast(count), diag);
+                },
+                .free_heap, .array_free => {},
                 else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
             }
         }
         return .void;
+    }
+
+    fn allocBlock(vm: *VM, size: usize) !Pointer {
+        const block = try vm.allocator.alloc(u8, size);
+        @memset(block, 0);
+        const index: u32 = @intCast(vm.memory_blocks.items.len);
+        try vm.memory_blocks.append(vm.allocator, block);
+        return .{ .block = index, .offset = 0 };
+    }
+
+    fn globalPtr(vm: *VM, index: usize) !Pointer {
+        while (vm.global_ptrs.items.len <= index) try vm.global_ptrs.append(vm.allocator, null);
+        if (vm.global_ptrs.items[index]) |ptr| return ptr;
+        const global = vm.program.globals.items[index];
+        const ptr = try vm.allocBlock(@max(global.size, 1));
+        if (global.initial_bytes) |initial| {
+            const copy_len = @min(initial.len, global.size);
+            if (copy_len != 0) @memcpy(vm.memory_blocks.items[ptr.block][0..copy_len], initial[0..copy_len]);
+        }
+        vm.global_ptrs.items[index] = ptr;
+        return ptr;
+    }
+
+    pub fn globalBytes(vm: *VM, index: usize, diag: Diagnostic) !?[]const u8 {
+        if (index >= vm.global_ptrs.items.len) return null;
+        const ptr = vm.global_ptrs.items[index] orelse return null;
+        const global = vm.program.globals.items[index];
+        return try vm.blockSlice(ptr, global.size, diag);
+    }
+
+    fn materializeRegister(vm: *VM, value: RegisterValue, diag: Diagnostic) !Pointer {
+        switch (value) {
+            .ptr => |ptr| return ptr,
+            .bytes => |bytes| {
+                const ptr = try vm.allocBlock(@max(bytes.len, 1));
+                if (bytes.len != 0) @memcpy(try vm.blockSlice(ptr, bytes.len, diag), bytes);
+                return ptr;
+            },
+            .string => |text| {
+                const ptr = try vm.allocBlock(@max(text.len, 1));
+                if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text);
+                return ptr;
+            },
+            .int => |int_value| {
+                const ptr = try vm.allocBlock(8);
+                std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), @bitCast(int_value), .little);
+                return ptr;
+            },
+            .float => |float_value| {
+                const ptr = try vm.allocBlock(8);
+                std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), @bitCast(float_value), .little);
+                return ptr;
+            },
+            .bool => |bool_value| {
+                const ptr = try vm.allocBlock(1);
+                try vm.storeByte(ptr, if (bool_value) 1 else 0, diag);
+                return ptr;
+            },
+            .type_id => |type_id| {
+                const ptr = try vm.allocBlock(8);
+                std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little);
+                return ptr;
+            },
+            .code_node, .code_nodes => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .empty => return diag.failAt(0, "VM cannot take address of an uninitialized register", .{}),
+        }
+    }
+
+    fn blockSlice(vm: *VM, ptr: Pointer, len: usize, diag: Diagnostic) ![]u8 {
+        if (ptr.block >= vm.memory_blocks.items.len) return diag.failAt(0, "VM pointer block out of range", .{});
+        const block = vm.memory_blocks.items[ptr.block];
+        if (ptr.offset > block.len or len > block.len - ptr.offset) return diag.failAt(0, "VM pointer access out of bounds: block={d} block_len={d} offset={d} len={d}", .{ ptr.block, block.len, ptr.offset, len });
+        return block[ptr.offset .. ptr.offset + len];
+    }
+
+    fn blockArray8(vm: *VM, ptr: Pointer, diag: Diagnostic) !*[8]u8 {
+        const slice = try vm.blockSlice(ptr, 8, diag);
+        return slice[0..8];
+    }
+
+    fn readRemainingBytes(vm: *VM, ptr: Pointer, diag: Diagnostic) ![]const u8 {
+        if (ptr.block >= vm.memory_blocks.items.len) return diag.failAt(0, "VM pointer block out of range", .{});
+        const block = vm.memory_blocks.items[ptr.block];
+        if (ptr.offset > block.len) return diag.failAt(0, "VM pointer access out of bounds", .{});
+        return block[ptr.offset..];
+    }
+
+    fn loadByte(vm: *VM, ptr: Pointer, diag: Diagnostic) !i64 {
+        return (try vm.blockSlice(ptr, 1, diag))[0];
+    }
+
+    fn loadU64(vm: *VM, ptr: Pointer, diag: Diagnostic) !u64 {
+        return std.mem.readInt(u64, try vm.blockArray8(ptr, diag), .little);
+    }
+
+    fn storeByte(vm: *VM, ptr: Pointer, value: u8, diag: Diagnostic) !void {
+        (try vm.blockSlice(ptr, 1, diag))[0] = value;
+    }
+
+    fn storeRegister(vm: *VM, ptr: Pointer, value: RegisterValue, diag: Diagnostic) !void {
+        switch (value) {
+            .int => |int_value| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), @bitCast(int_value), .little),
+            .float => |float_value| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), @bitCast(float_value), .little),
+            .bool => |bool_value| try vm.storeByte(ptr, if (bool_value) 1 else 0, diag),
+            .bytes => |bytes| if (bytes.len != 0) @memcpy(try vm.blockSlice(ptr, bytes.len, diag), bytes),
+            .type_id => |type_id| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little),
+            .ptr => |source_ptr| {
+                const source = try vm.readRemainingBytes(source_ptr, diag);
+                if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
+            },
+            .string => |text| if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text),
+            .code_node, .code_nodes => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .empty => return diag.failAt(0, "VM cannot store an uninitialized register", .{}),
+        }
+    }
+
+    fn copyBytes(vm: *VM, dest: Pointer, source: RegisterValue, count: usize, diag: Diagnostic) !void {
+        const dest_slice = try vm.blockSlice(dest, count, diag);
+        switch (source) {
+            .ptr => |ptr| @memcpy(dest_slice, try vm.blockSlice(ptr, count, diag)),
+            .bytes => |bytes| {
+                if (count > bytes.len) return diag.failAt(0, "VM memcpy source byte array is too small", .{});
+                if (count != 0) @memcpy(dest_slice, bytes[0..count]);
+            },
+            else => {
+                const ptr = try vm.materializeRegister(source, diag);
+                @memcpy(dest_slice, try vm.blockSlice(ptr, count, diag));
+            },
+        }
+    }
+
+    fn arrayCount(vm: *VM, value: RegisterValue, diag: Diagnostic) !usize {
+        return switch (value) {
+            .bytes => |bytes| bytes.len,
+            .ptr => |ptr| (try vm.readRemainingBytes(ptr, diag)).len,
+            .code_nodes => |nodes| nodes.len,
+            else => diag.failAt(0, "VM array_count requires array-compatible value", .{}),
+        };
+    }
+
+    fn buildCodeNodes(vm: *VM, code: []const u8) ![]const CodeNode {
+        var nodes = std.ArrayList(CodeNode).empty;
+        errdefer nodes.deinit(vm.allocator);
+
+        var i: usize = 0;
+        var saw_decl = false;
+        while (i < code.len) {
+            const ch = code[i];
+            if (std.ascii.isWhitespace(ch) or ch == ',' or ch == ';' or ch == '(' or ch == ')' or ch == '{' or ch == '}') {
+                i += 1;
+                continue;
+            }
+            if (ch == ':' and i + 1 < code.len and (code[i + 1] == '=' or code[i + 1] == ':')) {
+                saw_decl = true;
+                i += 2;
+                continue;
+            }
+            if (std.ascii.isAlphabetic(ch) or ch == '_') {
+                const start = i;
+                i += 1;
+                while (i < code.len and (std.ascii.isAlphanumeric(code[i]) or code[i] == '_')) : (i += 1) {}
+                var scan = i;
+                while (scan < code.len and std.ascii.isWhitespace(code[scan])) : (scan += 1) {}
+                if (scan + 1 < code.len and code[scan] == '.' and code[scan + 1] == '{') {
+                    try nodes.append(vm.allocator, .{ .kind = "TYPE_INSTANTIATION", .flags = "0", .text = code[start..i] });
+                    try nodes.append(vm.allocator, .{ .kind = "LITERAL", .flags = "0", .text = code[scan .. scan + 2] });
+                } else {
+                    try nodes.append(vm.allocator, .{ .kind = "IDENT", .flags = "0", .text = code[start..i] });
+                }
+                continue;
+            }
+            if (std.ascii.isDigit(ch)) {
+                const start = i;
+                i += 1;
+                while (i < code.len and (std.ascii.isAlphanumeric(code[i]) or code[i] == '.' or code[i] == '_')) : (i += 1) {}
+                try nodes.append(vm.allocator, .{ .kind = "LITERAL", .flags = "0", .text = code[start..i] });
+                continue;
+            }
+            if (ch == '"' or ch == '\'') {
+                const quote = ch;
+                const start = i;
+                i += 1;
+                while (i < code.len) : (i += 1) {
+                    if (code[i] == '\\' and i + 1 < code.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (code[i] == quote) {
+                        i += 1;
+                        break;
+                    }
+                }
+                try nodes.append(vm.allocator, .{ .kind = "LITERAL", .flags = "0", .text = code[start..@min(i, code.len)] });
+                continue;
+            }
+            i += 1;
+        }
+        if (saw_decl) try nodes.append(vm.allocator, .{ .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = code });
+
+        const owned = try nodes.toOwnedSlice(vm.allocator);
+        errdefer vm.allocator.free(owned);
+        try vm.code_node_arrays.append(vm.allocator, owned);
+        return owned;
+    }
+
+    fn pointerKey(ptr: Pointer) u64 {
+        return (@as(u64, ptr.block) << 32) | @as(u64, @intCast(@min(ptr.offset, std.math.maxInt(u32))));
+    }
+
+    fn builderInit(vm: *VM, slot: Pointer) !void {
+        const key = pointerKey(slot);
+        if (vm.string_builders.getPtr(key)) |builder| builder.clearRetainingCapacity() else try vm.string_builders.put(vm.allocator, key, .empty);
+    }
+
+    fn builderFree(vm: *VM, slot: Pointer) !void {
+        const key = pointerKey(slot);
+        if (vm.string_builders.fetchRemove(key)) |entry| {
+            var builder = entry.value;
+            builder.deinit(vm.allocator);
+        }
+    }
+
+    fn ensureBuilder(vm: *VM, slot: Pointer) !*std.ArrayList(u8) {
+        const key = pointerKey(slot);
+        const gop = try vm.string_builders.getOrPut(vm.allocator, key);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        return gop.value_ptr;
+    }
+
+    fn builderAppendValue(vm: *VM, slot: Pointer, value: RegisterValue, diag: Diagnostic) !void {
+        const builder = try vm.ensureBuilder(slot);
+        switch (value) {
+            .string => |text| try builder.appendSlice(vm.allocator, text),
+            .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
+            .code_node => |node| try vm.builderAppendCodeText(builder, node.text),
+            .code_nodes => return diag.failAt(0, "VM cannot append a Code_Node array to a String_Builder without indexing it", .{}),
+            .ptr => |ptr| try builder.appendSlice(vm.allocator, try vm.readRemainingBytes(ptr, diag)),
+            .int => |int_value| {
+                const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{int_value});
+                defer vm.allocator.free(text);
+                try builder.appendSlice(vm.allocator, text);
+            },
+            .float => |float_value| {
+                const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{float_value});
+                defer vm.allocator.free(text);
+                try builder.appendSlice(vm.allocator, text);
+            },
+            .bool => |bool_value| try builder.appendSlice(vm.allocator, if (bool_value) "true" else "false"),
+            .type_id => |type_id| try builder.appendSlice(vm.allocator, typeName(type_id)),
+            .empty => return diag.failAt(0, "VM cannot append an uninitialized value to a String_Builder", .{}),
+        }
+    }
+
+    fn builderString(vm: *VM, slot: Pointer) ![]const u8 {
+        const builder = try vm.ensureBuilder(slot);
+        return builder.items;
+    }
+
+    fn builderAppendCodeText(vm: *VM, builder: *std.ArrayList(u8), text: []const u8) !void {
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            try builder.append(vm.allocator, text[i]);
+            if (text[i] == ',') {
+                const next = i + 1;
+                if (next < text.len and !std.ascii.isWhitespace(text[next])) try builder.append(vm.allocator, ' ');
+            }
+        }
     }
 };
 
@@ -393,6 +840,10 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .int => |v| @floatFromInt(v),
         .float => |v| v,
         .bool => |v| if (v) 1 else 0,
+        .ptr => 1,
+        .bytes => |v| if (v.len == 0) 0 else 1,
+        .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
+        .code_node, .code_nodes => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
     };
 }
@@ -405,7 +856,19 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .int => |v| v != 0,
         .float => |v| v != 0,
         .string => |v| v.len != 0,
+        .bytes => |v| v.len != 0,
+        .code_node => true,
+        .code_nodes => |v| v.len != 0,
+        .type_id => true,
+        .ptr => true,
         .empty => false,
+    };
+}
+
+fn registerPointer(value: RegisterValue, diag: Diagnostic, context: []const u8) !Pointer {
+    return switch (value) {
+        .ptr => |ptr| ptr,
+        else => diag.failAt(0, "VM {s} requires pointer value", .{context}),
     };
 }
 
@@ -415,6 +878,10 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .float => |v| .{ .float = v },
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
+        .bytes => |v| .{ .bytes = v },
+        .type_id => diag.failAt(0, "VM cannot pass Type values across procedure calls yet", .{}),
+        .code_node, .code_nodes => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
     };
 }
@@ -425,6 +892,7 @@ fn registerValueFromValue(value: Value) RegisterValue {
         .float => |v| .{ .float = v },
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
+        .bytes => |v| .{ .bytes = v },
         .void => .empty,
     };
 }
@@ -434,6 +902,26 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         .empty => rhs == .empty,
         .string => |l| switch (rhs) {
             .string => |r| std.mem.eql(u8, l, r),
+            else => false,
+        },
+        .bytes => |l| switch (rhs) {
+            .bytes => |r| std.mem.eql(u8, l, r),
+            else => false,
+        },
+        .ptr => |l| switch (rhs) {
+            .ptr => |r| l.block == r.block and l.offset == r.offset,
+            else => false,
+        },
+        .type_id => |l| switch (rhs) {
+            .type_id => |r| l == r,
+            else => false,
+        },
+        .code_node => |l| switch (rhs) {
+            .code_node => |r| std.mem.eql(u8, l.kind, r.kind) and std.mem.eql(u8, l.flags, r.flags) and std.mem.eql(u8, l.text, r.text),
+            else => false,
+        },
+        .code_nodes => |l| switch (rhs) {
+            .code_nodes => |r| l.ptr == r.ptr and l.len == r.len,
             else => false,
         },
         .int => |l| switch (rhs) {
@@ -455,4 +943,39 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
             else => false,
         },
     };
+}
+
+fn registerCodeText(value: RegisterValue, diag: Diagnostic, context: []const u8) ![]const u8 {
+    return switch (value) {
+        .string => |text| text,
+        .bytes => |bytes| bytes,
+        .code_node => |node| node.text,
+        else => diag.failAt(0, "VM {s} requires a Code or Code_Node value", .{context}),
+    };
+}
+
+fn typeName(type_id: u32) []const u8 {
+    return switch (type_id) {
+        1 => "bool",
+        4 => "s32",
+        5 => "int",
+        7 => "u8",
+        8 => "u16",
+        9 => "u32",
+        10 => "*void",
+        12 => "float",
+        13 => "float64",
+        14 => "string",
+        15 => "Type",
+        16 => "Any",
+        30 => "procedure",
+        31 => "()",
+        else => "Type",
+    };
+}
+
+fn readIntLittle(bytes: []const u8) i64 {
+    var buf: [8]u8 = .{0} ** 8;
+    @memcpy(buf[0..bytes.len], bytes);
+    return @bitCast(std.mem.readInt(u64, &buf, .little));
 }

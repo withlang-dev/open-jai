@@ -10,7 +10,9 @@ const using_param_sentinel: u32 = 0xfffffffe;
 
 var active_ip: ?*InternPool = null;
 
-pub fn activeInternPoolForTypeQueries() ?*InternPool { return active_ip; }
+pub fn activeInternPoolForTypeQueries() ?*InternPool {
+    return active_ip;
+}
 
 pub const Typed = struct {
     allocator: std.mem.Allocator,
@@ -21,6 +23,8 @@ pub const Typed = struct {
     comptime_floats: std.AutoHashMapUnmanaged(NodeIndex, f64) = .empty,
     comptime_strings: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_strings: std.ArrayList([]const u8) = .empty,
+    comptime_bytes: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
+    owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -31,16 +35,28 @@ pub const Typed = struct {
         t.comptime_strings.deinit(t.allocator);
         for (t.owned_comptime_strings.items) |value| t.allocator.free(value);
         t.owned_comptime_strings.deinit(t.allocator);
+        t.comptime_bytes.deinit(t.allocator);
+        for (t.owned_comptime_bytes.items) |value| t.allocator.free(value);
+        t.owned_comptime_bytes.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
-    pub fn typeOf(t: *const Typed, node: NodeIndex) Type { return t.node_types[node]; }
+    pub fn typeOf(t: *const Typed, node: NodeIndex) Type {
+        return t.node_types[node];
+    }
 
     pub fn putComptimeString(t: *Typed, node: NodeIndex, value: []const u8) !void {
         const owned = try t.allocator.dupe(u8, value);
         errdefer t.allocator.free(owned);
         try t.owned_comptime_strings.append(t.allocator, owned);
         try t.comptime_strings.put(t.allocator, node, owned);
+    }
+
+    pub fn putComptimeBytes(t: *Typed, node: NodeIndex, value: []const u8) !void {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_comptime_bytes.append(t.allocator, owned);
+        try t.comptime_bytes.put(t.allocator, node, owned);
     }
 };
 
@@ -114,10 +130,10 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             for (ast.extraSlice(ast.data(node).lhs)) |child| _ = try analyzeNode(ast, resolved, typed, @intCast(child), diag);
             break :blk Type.voidType();
         },
-            .return_stmt => blk: {
-                if (ast.data(node).lhs != @import("Ast.zig").null_node) _ = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
-                break :blk Type.voidType();
-            },
+        .return_stmt => blk: {
+            if (ast.data(node).lhs != @import("Ast.zig").null_node) _ = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+            break :blk Type.voidType();
+        },
         .var_decl => blk: {
             const explicit_ty = if (ast.data(node).lhs != @import("Ast.zig").null_node) try typeFromTypeExprWithAliases(ast, typed, ast.data(node).lhs, diag) else Type.voidType();
             if (ast.data(node).rhs != @import("Ast.zig").null_node) {

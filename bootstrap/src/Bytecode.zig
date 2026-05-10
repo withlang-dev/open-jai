@@ -7,10 +7,12 @@ pub const Opcode = enum(u8) {
     load_int,
     load_float,
     load_string,
+    load_bytes,
     load_bool,
     load_null_ptr,
     load_type,
     load_undef,
+    global_addr,
     load_const_ref,
     neg_int,
     neg_float,
@@ -25,6 +27,7 @@ pub const Opcode = enum(u8) {
     div_int,
     div_float,
     format_print,
+    format_static_int_array,
     format_int_value,
     format_float_value,
     call,
@@ -50,7 +53,12 @@ pub const Opcode = enum(u8) {
     array_add,
     array_free,
     array_count,
+    array_data,
     array_index,
+    compiler_get_nodes_root,
+    compiler_get_nodes_exprs,
+    code_node_field_kind,
+    code_node_field_flags,
     memcpy,
     exit_process,
     free_heap,
@@ -160,9 +168,17 @@ pub const ProcBytecode = struct {
     }
 };
 
+pub const Global = struct {
+    source_node: u32,
+    size: u32,
+    initial_bytes: ?[]const u8 = null,
+};
+
 pub const Program = struct {
     allocator: std.mem.Allocator,
     strings: std.ArrayList([]const u8) = .empty,
+    byte_arrays: std.ArrayList([]const u8) = .empty,
+    globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
     call_args: std.ArrayList(Register) = .empty,
     main_proc: ?u32 = null,
@@ -173,9 +189,12 @@ pub const Program = struct {
 
     pub fn deinit(p: *Program) void {
         for (p.strings.items) |s| p.allocator.free(s);
+        for (p.byte_arrays.items) |b| p.allocator.free(b);
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
         p.call_args.deinit(p.allocator);
         p.strings.deinit(p.allocator);
+        p.byte_arrays.deinit(p.allocator);
+        p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
     }
 
@@ -184,6 +203,23 @@ pub const Program = struct {
         errdefer p.allocator.free(owned);
         const idx: StringIndex = @intCast(p.strings.items.len);
         try p.strings.append(p.allocator, owned);
+        return idx;
+    }
+
+    pub fn addByteArray(p: *Program, bytes: []const u8) !u32 {
+        const owned = try p.allocator.dupe(u8, bytes);
+        errdefer p.allocator.free(owned);
+        const idx: u32 = @intCast(p.byte_arrays.items.len);
+        try p.byte_arrays.append(p.allocator, owned);
+        return idx;
+    }
+
+    pub fn addGlobal(p: *Program, source_node: u32, size: u32) !u32 {
+        for (p.globals.items, 0..) |global, i| {
+            if (global.source_node == source_node) return @intCast(i);
+        }
+        const idx: u32 = @intCast(p.globals.items.len);
+        try p.globals.append(p.allocator, .{ .source_node = source_node, .size = size });
         return idx;
     }
 
