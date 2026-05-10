@@ -59,6 +59,10 @@ pub const Opcode = enum(u8) {
     compiler_get_nodes_exprs,
     code_node_field_kind,
     code_node_field_flags,
+    code_literal_field_value_type,
+    code_literal_field_s64,
+    code_literal_set_s64,
+    code_node_to_code,
     memcpy,
     exit_process,
     free_heap,
@@ -180,6 +184,7 @@ pub const Program = struct {
     byte_arrays: std.ArrayList([]const u8) = .empty,
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
+    proc_nodes: std.ArrayList(u32) = .empty,
     call_args: std.ArrayList(Register) = .empty,
     main_proc: ?u32 = null,
 
@@ -196,6 +201,15 @@ pub const Program = struct {
         p.byte_arrays.deinit(p.allocator);
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
+        p.proc_nodes.deinit(p.allocator);
+    }
+
+    pub fn addProc(p: *Program, proc: ProcBytecode, source_node: u32) !u32 {
+        const idx: u32 = @intCast(p.procs.items.len);
+        try p.procs.append(p.allocator, proc);
+        errdefer _ = p.procs.pop();
+        try p.proc_nodes.append(p.allocator, source_node);
+        return idx;
     }
 
     pub fn addString(p: *Program, s: []const u8) !StringIndex {

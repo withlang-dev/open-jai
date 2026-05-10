@@ -174,9 +174,11 @@ pub const Compilation = struct {
 
     fn evaluateAllProcRunInitializers(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, diag: Diagnostic) !void {
         const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
+        for (root_decls, 0..) |decl_idx, i| {
             const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
             if (ast.tag(decl) != .proc_decl) continue;
+            const next_decl: @import("Ast.zig").NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
+            if (procHasExpandModifier(ast, decl, next_decl)) continue;
             try comp.evaluateRunInitializersInBlock(ast, typed, resolved, ast.data(decl).lhs, diag);
         }
     }

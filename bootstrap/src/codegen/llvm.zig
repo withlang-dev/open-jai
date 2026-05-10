@@ -900,7 +900,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     },
                 }
             },
-            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags => {
+            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags, .code_literal_field_value_type, .code_literal_field_s64, .code_literal_set_s64, .code_node_to_code => {
                 return diag.failAt(inst.source_node, "compiler Code_Node opcode {s} is compile-time only", .{@tagName(inst.opcode)});
             },
             .make_vector3 => {
