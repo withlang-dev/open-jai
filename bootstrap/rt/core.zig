@@ -409,6 +409,11 @@ export fn __openjai_file_read(file: ?*OpenJaiFile, data: [*]u8, len: usize) bool
     return true;
 }
 
+export fn __openjai_posix_read(fd: i64, data: [*]u8, len: usize) i64 {
+    if (fd < 0 or fd > std.math.maxInt(i32)) return -9;
+    return oj_rt_read(@intCast(fd), data, len);
+}
+
 export fn __openjai_string_builder_init(slot: ?*?*OpenJaiStringBuilder) void {
     const slot_ptr = slot orelse @panic("init_string_builder on null slot");
     if (slot_ptr.* != null) __openjai_string_builder_free(slot);

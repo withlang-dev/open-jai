@@ -243,8 +243,8 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     break :blk Type.init(try internPointerType(ast, pointee, diag));
                 },
                 .keyword_xx => {
-                    if (operand_ty.isInteger() or operand_ty.isFloat() or operand_ty.isBool() or operand_ty.isAny()) break :blk operand_ty;
-                    return diag.failAt(ast.tokens[ast.mainToken(node)].start, "xx autocast requires a numeric or bool operand", .{});
+                    if (operand_ty.isInteger() or operand_ty.isFloat() or operand_ty.isBool() or operand_ty.isString() or operand_ty.isPointer() or operand_ty.isAny()) break :blk operand_ty;
+                    return diag.failAt(ast.tokens[ast.mainToken(node)].start, "xx autocast requires a cast-compatible operand", .{});
                 },
                 .keyword_cast => {
                     const raw_target_ty = ast.data(node).rhs;
@@ -360,6 +360,12 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             if (resolved.loop_indexes.contains(node)) break :blk Type.init(InternPool.well_known.s64_type);
             if (resolved.loop_value_types.get(node)) |type_id| break :blk Type.init(type_id);
             const name = ast.tokenSlice(ast.mainToken(node));
+            if (std.mem.eql(u8, name, "OS")) break :blk Type.string();
+            if (std.mem.eql(u8, name, "STDIN_FILENO") or std.mem.eql(u8, name, "STDOUT_FILENO") or std.mem.eql(u8, name, "STDERR_FILENO") or
+                std.mem.eql(u8, name, "STD_INPUT_HANDLE") or std.mem.eql(u8, name, "STD_OUTPUT_HANDLE") or std.mem.eql(u8, name, "STD_ERROR_HANDLE"))
+            {
+                break :blk Type.init(InternPool.well_known.s64_type);
+            }
             const sym = resolved.lookup(name) orelse blk_sym: {
                 if (isBuiltinTypeName(name)) break :blk_sym Symbol{ .const_value = node };
                 if (std.mem.indexOfScalar(u8, name, '_') != null) break :blk Type.init(InternPool.well_known.any_type);
@@ -367,14 +373,14 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             };
             break :blk switch (sym) {
                 .placeholder => Type.init(InternPool.well_known.any_type),
-                .builtin_print, .builtin_swap, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_random_seed, .builtin_to_calendar, .builtin_sleep_milliseconds, .builtin_file_close, .builtin_log, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder => Type.voidType(),
+                .builtin_print, .builtin_swap, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_random_seed, .builtin_to_calendar, .builtin_sleep_milliseconds, .builtin_file_close, .builtin_log, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_reset_temporary_storage, .builtin_push_allocator => Type.voidType(),
                 .builtin_new_array => Type.init(try internPointerType(ast, Type.init(InternPool.well_known.any_type), diag)),
                 .builtin_calendar_to_string, .builtin_format_int, .builtin_format_float, .builtin_format_struct, .builtin_type_to_string, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_read_entire_file, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_copy_string, .builtin_builder_to_string, .builtin_trim, .builtin_join, .builtin_replace, .builtin_slice => Type.string(),
                 .builtin_compiler_write_file, .builtin_write_entire_file, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_file_set_position, .builtin_file_write, .builtin_file_read => Type.boolType(),
                 .builtin_get_command_line_arguments, .builtin_file_open, .builtin_string_builder_type, .builtin_split => Type.init(InternPool.well_known.any_type),
                 .builtin_to_c_string => Type.init(try internPointerType(ast, Type.init(InternPool.well_known.u8_type), diag)),
                 .builtin_contains, .builtin_begins_with => Type.boolType(),
-                .builtin_file_length, .builtin_builder_string_length, .builtin_compare, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_parse_int, .builtin_to_integer, .builtin_c_style_strlen => Type.init(InternPool.well_known.s64_type),
+                .builtin_file_length, .builtin_posix_read, .builtin_get_std_handle, .builtin_builder_string_length, .builtin_compare, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_parse_int, .builtin_to_integer, .builtin_c_style_strlen => Type.init(InternPool.well_known.s64_type),
                 .builtin_string_to_float => Type.init(InternPool.well_known.float64_type),
                 .builtin_compiler_arg_count => Type.init(InternPool.well_known.s64_type),
                 .builtin_current_time_consensus, .builtin_current_time_monotonic => Type.apolloTime(),
@@ -642,7 +648,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 },
                 .placeholder => unreachable,
                 .proc => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "Phase 1 only supports calling Basic.print/log", .{}),
-                .builtin_swap, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal resolver mismatch for print", .{}),
+                .builtin_swap, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal resolver mismatch for print", .{}),
                 .const_value => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "constant value is not callable", .{}),
             } else if (std.mem.eql(u8, name, "swap")) switch (sym) {
                 .builtin_swap => {
@@ -654,7 +660,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     break :blk Type.voidType();
                 },
                 .placeholder => unreachable,
-                .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal resolver mismatch for swap", .{}),
+                .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "internal resolver mismatch for swap", .{}),
                 .proc => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "Phase 2 only supports builtin Basic.swap", .{}),
                 .const_value => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "constant value is not callable", .{}),
             } else if (std.mem.eql(u8, name, "New")) switch (sym) {
@@ -818,6 +824,33 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "file_read expects a file handle, buffer, and byte count", .{});
                     for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
                     break :blk Type.boolType();
+                },
+                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+            } else if (std.mem.eql(u8, name, "read")) switch (sym) {
+                .builtin_posix_read => {
+                    if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "read expects a file descriptor, buffer, and byte count", .{});
+                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                    break :blk Type.init(InternPool.well_known.s64_type);
+                },
+                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+            } else if (std.mem.eql(u8, name, "GetStdHandle")) switch (sym) {
+                .builtin_get_std_handle => {
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "GetStdHandle expects one standard-handle selector", .{});
+                    _ = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
+                    break :blk Type.init(InternPool.well_known.s64_type);
+                },
+                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+            } else if (std.mem.eql(u8, name, "reset_temporary_storage")) switch (sym) {
+                .builtin_reset_temporary_storage => {
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "reset_temporary_storage expects no arguments", .{});
+                    break :blk Type.voidType();
+                },
+                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+            } else if (std.mem.eql(u8, name, "push_allocator")) switch (sym) {
+                .builtin_push_allocator => {
+                    if (args.len < 1 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "push_allocator expects an allocator and optional data pointer", .{});
+                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                    break :blk Type.voidType();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
             } else if (std.mem.eql(u8, name, "get_command_line_arguments")) switch (sym) {

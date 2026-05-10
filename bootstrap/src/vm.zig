@@ -45,12 +45,22 @@ const RegisterValue = union(enum) {
     bool: bool,
 };
 
+const DynamicArray = struct {
+    header: ?Pointer = null,
+    slot: ?Pointer = null,
+    data: ?Pointer = null,
+    elem_size: usize = 1,
+    elems: std.ArrayList(RegisterValue) = .empty,
+};
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     program: *const Bytecode.Program,
     memory_blocks: std.ArrayList([]u8) = .empty,
     global_ptrs: std.ArrayList(?Pointer) = .empty,
     string_builders: std.AutoHashMapUnmanaged(u64, std.ArrayList(u8)) = .empty,
+    dynamic_arrays: std.ArrayList(DynamicArray) = .empty,
+    dynamic_array_refs: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     code_trees: std.ArrayList(CodeTree) = .empty,
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
 
@@ -65,6 +75,9 @@ pub const VM = struct {
         var builder_it = vm.string_builders.iterator();
         while (builder_it.next()) |entry| entry.value_ptr.deinit(vm.allocator);
         vm.string_builders.deinit(vm.allocator);
+        for (vm.dynamic_arrays.items) |*array| array.elems.deinit(vm.allocator);
+        vm.dynamic_arrays.deinit(vm.allocator);
+        vm.dynamic_array_refs.deinit(vm.allocator);
         for (vm.code_trees.items) |tree| vm.allocator.free(tree.nodes);
         vm.code_trees.deinit(vm.allocator);
         for (vm.rendered_code_strings.items) |text| vm.allocator.free(text);
@@ -260,11 +273,11 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM integer arithmetic register out of range", .{});
                     const lhs = switch (regs[inst.arg1]) {
                         .int => |v| v,
-                        else => return diag.failAt(0, "VM integer arithmetic requires integer lhs", .{}),
+                        else => return diag.failAt(0, "VM {s} requires integer lhs, got {s}", .{ @tagName(inst.opcode), @tagName(regs[inst.arg1]) }),
                     };
                     const rhs = switch (regs[inst.arg2]) {
                         .int => |v| v,
-                        else => return diag.failAt(0, "VM integer arithmetic requires integer rhs", .{}),
+                        else => return diag.failAt(0, "VM {s} requires integer rhs, got {s}", .{ @tagName(inst.opcode), @tagName(regs[inst.arg2]) }),
                     };
                     regs[inst.dest] = .{ .int = switch (inst.opcode) {
                         .mul_int => lhs * rhs,
@@ -335,14 +348,7 @@ pub const VM = struct {
                 .call_extern => {
                     if (inst.dest != @intFromEnum(Bytecode.ExternSymbol.openjai_print)) return diag.failAt(0, "VM only supports compile-time print extern calls", .{});
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM print argument register out of range", .{});
-                    switch (regs[inst.arg1]) {
-                        .string => |text| std.debug.print("{s}", .{text}),
-                        .int => |value| std.debug.print("{d}", .{value}),
-                        .float => |value| std.debug.print("{d}", .{value}),
-                        .bool => |value| std.debug.print("{s}", .{if (value) "true" else "false"}),
-                        .type_id => |value| std.debug.print("{s}", .{typeName(value)}),
-                        else => return diag.failAt(0, "VM compile-time print currently requires string, integer, float, or bool argument", .{}),
-                    }
+                    try vm.printValue(regs[inst.arg1], diag, "compile-time print");
                 },
                 .call => {
                     if (inst.arg1 >= vm.program.procs.items.len) return diag.failAt(0, "VM call target procedure index out of range", .{});
@@ -362,14 +368,7 @@ pub const VM = struct {
                 },
                 .format_print => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM format_print register out of range", .{});
-                    switch (regs[inst.arg1]) {
-                        .string => |text| std.debug.print("{s}", .{text}),
-                        .int => |value| std.debug.print("{d}", .{value}),
-                        .float => |value| std.debug.print("{d}", .{value}),
-                        .bool => |value| std.debug.print("{s}", .{if (value) "true" else "false"}),
-                        .type_id => |value| std.debug.print("{s}", .{typeName(value)}),
-                        else => return diag.failAt(0, "VM format_print currently requires string, integer, float, or bool argument", .{}),
-                    }
+                    try vm.printValue(regs[inst.arg1], diag, "format_print");
                 },
                 .current_time_consensus_low, .current_time_monotonic_low => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});
@@ -411,11 +410,13 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
                     regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
                 },
-                .load_ptr, .load_ptr_byte => {
+                .load_ptr, .load_ptr_byte, .load_ptr_float => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
                     const ptr = try registerPointer(regs[inst.arg1], diag, "load_ptr");
                     regs[inst.dest] = if (inst.opcode == .load_ptr_byte)
                         .{ .int = try vm.loadByte(ptr, diag) }
+                    else if (inst.opcode == .load_ptr_float)
+                        .{ .float = @bitCast(try vm.loadU64(ptr, diag)) }
                     else
                         .{ .int = @bitCast(try vm.loadU64(ptr, diag)) };
                 },
@@ -440,6 +441,15 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
                 },
+                .new_array => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM new_array destination register out of range", .{});
+                    regs[inst.dest] = .{ .ptr = try vm.newDynamicArray(@intCast(inst.arg1), @intCast(@max(inst.arg2, 1)), diag) };
+                },
+                .array_add => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_add register out of range", .{});
+                    const slot = try registerPointer(regs[inst.arg1], diag, "array_add slot");
+                    regs[inst.dest] = .{ .ptr = try vm.dynamicArrayAdd(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag) };
+                },
                 .array_count => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_count register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], diag)) };
@@ -448,7 +458,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_data register out of range", .{});
                     regs[inst.dest] = switch (regs[inst.arg1]) {
                         .bytes => |bytes| .{ .ptr = try vm.materializeRegister(.{ .bytes = bytes }, diag) },
-                        .ptr => |ptr| .{ .ptr = ptr },
+                        .ptr => |ptr| .{ .ptr = try vm.dynamicArrayData(ptr, diag) orelse ptr },
                         else => return diag.failAt(0, "VM array_data requires array-compatible value", .{}),
                     };
                 },
@@ -472,10 +482,16 @@ pub const VM = struct {
                                 .{ .int = readIntLittle(bytes[offset .. offset + @min(elem_size, 8)]) };
                         },
                         .ptr => |ptr| {
+                            if (try vm.dynamicArrayIndex(ptr, @intCast(index), elem_size, inst.arg4, diag)) |item_value| {
+                                regs[inst.dest] = item_value;
+                                continue;
+                            }
                             var item = ptr;
                             item.offset += @as(usize, @intCast(index)) * elem_size;
                             regs[inst.dest] = if (inst.arg4 == 1)
                                 .{ .ptr = item }
+                            else if (inst.arg4 == 2)
+                                return diag.failAt(0, "VM array_index cannot load string elements from an untracked raw pointer", .{})
                             else if (elem_size == 1)
                                 .{ .int = try vm.loadByte(item, diag) }
                             else
@@ -546,7 +562,7 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .string = try vm.renderCodeNode(node, diag) };
                 },
-                .load_ptr_string, .new_array, .array_add, .string_slice => {
+                .load_ptr_string, .string_slice => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
@@ -560,7 +576,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read => {
+                .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
                 .string_builder_init => {
@@ -574,7 +590,6 @@ pub const VM = struct {
                 .string_builder_append_string, .string_builder_append_int, .string_builder_append_float => {
                     if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_builder_append register out of range", .{});
                     try vm.builderAppendValue(try registerPointer(regs[inst.arg1], diag, "string_builder_append slot"), regs[inst.arg2], diag);
-                    if (inst.dest < regs.len) regs[inst.dest] = .{ .bool = true };
                 },
                 .string_builder_to_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_to_string register out of range", .{});
@@ -595,6 +610,15 @@ pub const VM = struct {
                         else => return diag.failAt(0, "VM store_ptr_byte requires integer source", .{}),
                     };
                     try vm.storeByte(try registerPointer(regs[inst.dest], diag, "store_ptr_byte destination"), @intCast(value & 0xff), diag);
+                },
+                .store_ptr_float => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr_float register out of range", .{});
+                    const value = switch (regs[inst.arg1]) {
+                        .float => |v| v,
+                        .int => |v| @as(f64, @floatFromInt(v)),
+                        else => return diag.failAt(0, "VM store_ptr_float requires numeric source", .{}),
+                    };
+                    try vm.storeRegister(try registerPointer(regs[inst.dest], diag, "store_ptr_float destination"), .{ .float = value }, diag);
                 },
                 .memcpy => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM memcpy register out of range", .{});
@@ -744,10 +768,185 @@ pub const VM = struct {
     fn arrayCount(vm: *VM, value: RegisterValue, diag: Diagnostic) !usize {
         return switch (value) {
             .bytes => |bytes| bytes.len,
-            .ptr => |ptr| (try vm.readRemainingBytes(ptr, diag)).len,
+            .ptr => |ptr| if (vm.dynamicArrayIndexForPointer(ptr)) |array_index|
+                vm.dynamic_arrays.items[array_index].elems.items.len
+            else
+                (try vm.readRemainingBytes(ptr, diag)).len,
             .code_nodes => |nodes| nodes.len,
             else => diag.failAt(0, "VM array_count requires array-compatible value", .{}),
         };
+    }
+
+    fn newDynamicArray(vm: *VM, count: usize, elem_size: usize, diag: Diagnostic) !Pointer {
+        const header = try vm.allocBlock(24);
+        var array = DynamicArray{ .header = header, .elem_size = elem_size };
+        errdefer array.elems.deinit(vm.allocator);
+        if (count != 0) {
+            const data = try vm.allocBlock(count * elem_size);
+            array.data = data;
+            try array.elems.ensureTotalCapacity(vm.allocator, count);
+            var i: usize = 0;
+            while (i < count) : (i += 1) array.elems.appendAssumeCapacity(.{ .int = 0 });
+        }
+        const index = try vm.addDynamicArray(array);
+        try vm.writeDynamicArrayHeader(index, diag);
+        return header;
+    }
+
+    fn dynamicArrayAdd(vm: *VM, array_ptr: Pointer, item: RegisterValue, elem_size: usize, diag: Diagnostic) !Pointer {
+        const array_index = try vm.ensureDynamicArrayForPointer(array_ptr, elem_size, diag);
+        var array = &vm.dynamic_arrays.items[array_index];
+        if (array.elem_size != elem_size) {
+            if (array.elems.items.len != 0) return diag.failAt(0, "VM array_add element size changed from {d} to {d}", .{ array.elem_size, elem_size });
+            array.elem_size = elem_size;
+        }
+        try array.elems.append(vm.allocator, item);
+        try vm.ensureDynamicArrayData(array_index, array.elems.items.len, diag);
+        const item_ptr = vm.dynamicArrayItemPointer(array_index, array.elems.items.len - 1, diag) catch |err| return err;
+        try vm.storeDynamicArrayElementBytes(item_ptr, item, elem_size, diag);
+        try vm.writeDynamicArrayHeader(array_index, diag);
+        return item_ptr;
+    }
+
+    fn dynamicArrayData(vm: *VM, ptr: Pointer, diag: Diagnostic) !?Pointer {
+        const array_index = vm.dynamicArrayIndexForPointer(ptr) orelse return null;
+        try vm.ensureDynamicArrayData(array_index, vm.dynamic_arrays.items[array_index].elems.items.len, diag);
+        return vm.dynamic_arrays.items[array_index].data;
+    }
+
+    fn dynamicArrayIndex(vm: *VM, ptr: Pointer, index: usize, elem_size: usize, elem_kind: u32, diag: Diagnostic) !?RegisterValue {
+        const array_index = vm.dynamicArrayIndexForPointer(ptr) orelse return null;
+        const array = &vm.dynamic_arrays.items[array_index];
+        if (index >= array.elems.items.len) return diag.failAt(0, "VM dynamic array index out of bounds", .{});
+        if (elem_kind == 1) return .{ .ptr = try vm.dynamicArrayItemPointer(array_index, index, diag) };
+        const value = array.elems.items[index];
+        if (elem_kind == 2) {
+            return switch (value) {
+                .string => |text| .{ .string = text },
+                .bytes => |bytes| .{ .string = bytes },
+                else => diag.failAt(0, "VM dynamic array string index found {s} element", .{@tagName(value)}),
+            };
+        }
+        return switch (value) {
+            .int, .float, .bool, .string, .bytes, .ptr, .type_id => value,
+            .empty => if (elem_size == 1)
+                .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
+            else
+                .{ .int = @bitCast(try vm.loadU64(try vm.dynamicArrayItemPointer(array_index, index, diag), diag)) },
+            .code_node, .code_nodes => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
+        };
+    }
+
+    fn addDynamicArray(vm: *VM, array: DynamicArray) !usize {
+        const index = vm.dynamic_arrays.items.len;
+        try vm.dynamic_arrays.append(vm.allocator, array);
+        if (array.header) |header| try vm.dynamic_array_refs.put(vm.allocator, pointerKey(header), index);
+        if (array.slot) |slot| try vm.dynamic_array_refs.put(vm.allocator, pointerKey(slot), index);
+        if (array.data) |data| try vm.dynamic_array_refs.put(vm.allocator, pointerKey(data), index);
+        return index;
+    }
+
+    fn ensureDynamicArrayForPointer(vm: *VM, ptr: Pointer, elem_size: usize, diag: Diagnostic) !usize {
+        if (vm.dynamicArrayIndexForPointer(ptr)) |index| return index;
+        var array = DynamicArray{ .slot = ptr, .elem_size = elem_size };
+        errdefer array.elems.deinit(vm.allocator);
+        const index = try vm.addDynamicArray(array);
+        try vm.writeDynamicArrayHeader(index, diag);
+        return index;
+    }
+
+    fn dynamicArrayIndexForPointer(vm: *VM, ptr: Pointer) ?usize {
+        if (vm.dynamic_array_refs.get(pointerKey(ptr))) |index| return index;
+        return null;
+    }
+
+    fn ensureDynamicArrayData(vm: *VM, array_index: usize, count: usize, diag: Diagnostic) !void {
+        const array = &vm.dynamic_arrays.items[array_index];
+        const byte_count = @max(count * array.elem_size, 1);
+        if (array.data) |data| {
+            const block = vm.memory_blocks.items[data.block];
+            if (block.len >= byte_count) return;
+            _ = vm.dynamic_array_refs.remove(pointerKey(data));
+        }
+        const old_data = array.data;
+        const new_data = try vm.allocBlock(byte_count);
+        if (old_data) |old| {
+            const old_bytes = try vm.readRemainingBytes(old, diag);
+            const copy_len = @min(old_bytes.len, byte_count);
+            if (copy_len != 0) @memcpy((try vm.blockSlice(new_data, copy_len, diag)), old_bytes[0..copy_len]);
+        }
+        array.data = new_data;
+        try vm.dynamic_array_refs.put(vm.allocator, pointerKey(new_data), array_index);
+    }
+
+    fn dynamicArrayItemPointer(vm: *VM, array_index: usize, index: usize, diag: Diagnostic) !Pointer {
+        try vm.ensureDynamicArrayData(array_index, vm.dynamic_arrays.items[array_index].elems.items.len, diag);
+        const data = vm.dynamic_arrays.items[array_index].data orelse return diag.failAt(0, "VM dynamic array has no data block", .{});
+        return .{ .block = data.block, .offset = data.offset + index * vm.dynamic_arrays.items[array_index].elem_size };
+    }
+
+    fn storeDynamicArrayElementBytes(vm: *VM, dest: Pointer, value: RegisterValue, elem_size: usize, diag: Diagnostic) !void {
+        switch (value) {
+            .ptr => |ptr| {
+                const src = try vm.blockSlice(ptr, elem_size, diag);
+                if (elem_size != 0) @memcpy(try vm.blockSlice(dest, elem_size, diag), src);
+            },
+            .string => {},
+            .bytes => |bytes| {
+                const copy_len = @min(bytes.len, elem_size);
+                if (copy_len != 0) @memcpy(try vm.blockSlice(dest, copy_len, diag), bytes[0..copy_len]);
+            },
+            else => try vm.storeRegister(dest, value, diag),
+        }
+    }
+
+    fn writeDynamicArrayHeader(vm: *VM, array_index: usize, diag: Diagnostic) !void {
+        const array = &vm.dynamic_arrays.items[array_index];
+        const count = array.elems.items.len;
+        if (array.header) |header| {
+            std.mem.writeInt(u64, try vm.blockArray8(header, diag), @intCast(count), .little);
+            std.mem.writeInt(u64, try vm.blockArray8(.{ .block = header.block, .offset = header.offset + 8 }, diag), @intCast(count), .little);
+        }
+        if (array.slot) |slot| {
+            std.mem.writeInt(u64, try vm.blockArray8(slot, diag), @intCast(count), .little);
+        }
+    }
+
+    fn printValue(vm: *VM, value: RegisterValue, diag: Diagnostic, context: []const u8) anyerror!void {
+        switch (value) {
+            .string => |text| std.debug.print("{s}", .{text}),
+            .bytes => |bytes| std.debug.print("{s}", .{bytes}),
+            .int => |int_value| std.debug.print("{d}", .{int_value}),
+            .float => |float_value| std.debug.print("{d}", .{float_value}),
+            .bool => |bool_value| std.debug.print("{s}", .{if (bool_value) "true" else "false"}),
+            .type_id => |type_id| std.debug.print("{s}", .{typeName(type_id)}),
+            .ptr => |ptr| {
+                if (vm.dynamicArrayIndexForPointer(ptr)) |array_index| {
+                    try vm.printDynamicArray(array_index, diag);
+                } else {
+                    std.debug.print("*0x{x}:0x{x}", .{ ptr.block, ptr.offset });
+                }
+            },
+            .code_node => |node| std.debug.print("{s}", .{node.text}),
+            .code_nodes => |nodes| {
+                std.debug.print("[", .{});
+                for (nodes, 0..) |node, i| {
+                    if (i != 0) std.debug.print(", ", .{});
+                    std.debug.print("{s}", .{node.text});
+                }
+                std.debug.print("]", .{});
+            },
+            .empty => return diag.failAt(0, "VM {s} cannot print an uninitialized value", .{context}),
+        }
+    }
+
+    fn printDynamicArray(vm: *VM, array_index: usize, diag: Diagnostic) anyerror!void {
+        std.debug.print("[", .{});
+        for (vm.dynamic_arrays.items[array_index].elems.items, 0..) |item, i| {
+            if (i != 0) std.debug.print(", ", .{});
+            try vm.printValue(item, diag, "dynamic array print");
+        }
+        std.debug.print("]", .{});
     }
 
     fn ensureCodeTree(vm: *VM, code: []const u8) !u32 {

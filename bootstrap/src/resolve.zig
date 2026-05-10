@@ -44,6 +44,10 @@ pub const Symbol = union(enum) {
     builtin_file_set_position,
     builtin_file_write,
     builtin_file_read,
+    builtin_posix_read,
+    builtin_get_std_handle,
+    builtin_reset_temporary_storage,
+    builtin_push_allocator,
     builtin_sprint,
     builtin_tprint,
     builtin_to_string,
@@ -353,20 +357,21 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "compiler_write_file", .builtin_compiler_write_file);
     try r.symbols.put(allocator, "read_entire_file", .builtin_read_entire_file);
     try r.symbols.put(allocator, "write_entire_file", .builtin_write_entire_file);
+    try r.putRealSymbol("context", .{ .const_value = @import("Ast.zig").null_node });
+    try r.symbols.put(allocator, "reset_temporary_storage", .builtin_reset_temporary_storage);
+    try r.symbols.put(allocator, "push_allocator", .builtin_push_allocator);
     try putPlaceholders(&r, allocator, &.{
-        "context",                   "reset_temporary_storage",
-        "push_allocator",            "DrawTexturePro",
-        "get_build_options",         "set_build_options",
-        "set_build_options_dc",      "add_build_file",
-        "add_build_string",          "run_command",
-        "get_current_workspace",     "compiler_create_workspace",
-        "compiler_begin_intercept",  "compiler_wait_for_message",
-        "compiler_end_intercept",    "compiler_set_workspace_status",
-        "compiler_report",           "make_location",
-        "add_global_data",           "Optimization_Type",
-        "Message_Complete",          "OS",
-        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
-        "For_Flags",
+        "DrawTexturePro",
+        "get_build_options",                        "set_build_options",
+        "set_build_options_dc",                     "add_build_file",
+        "add_build_string",                         "run_command",
+        "get_current_workspace",                    "compiler_create_workspace",
+        "compiler_begin_intercept",                 "compiler_wait_for_message",
+        "compiler_end_intercept",                   "compiler_set_workspace_status",
+        "compiler_report",                          "make_location",
+        "add_global_data",                          "Optimization_Type",
+        "Message_Complete",                         "compiler_get_version_info",
+        "compiler_custom_link_command_is_complete", "For_Flags",
     });
     try r.putRealSymbol("temp", .{ .const_value = @import("Ast.zig").null_node });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
@@ -493,7 +498,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putPlaceholders(&r, allocator, &.{ "equal", "compare_strings" });
                 } else if (std.mem.eql(u8, module_name, "Thread")) {
                     try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
-                    try putPlaceholders(&r, allocator, &.{ "init", "context", "start", "lock", "unlock" });
+                    try putPlaceholders(&r, allocator, &.{ "init", "start", "lock", "unlock" });
                 } else if (std.mem.eql(u8, module_name, "Random")) {
                     try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
                     try r.symbols.put(allocator, "random_get", .builtin_random_get);
@@ -557,9 +562,18 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     if (std.mem.eql(u8, module_name, "System")) {
                         try putPlaceholders(&r, allocator, &.{ "get_number_of_processors", "max" });
                     } else if (std.mem.eql(u8, module_name, "Windows")) {
-                        try putPlaceholders(&r, allocator, &.{ "HANDLE", "GetStdHandle", "STD_INPUT_HANDLE", "STD_OUTPUT_HANDLE", "ReadConsoleA" });
+                        try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.symbols.put(allocator, "GetStdHandle", .builtin_get_std_handle);
+                        try r.putRealSymbol("STD_INPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Process")) {
                         try putPlaceholders(&r, allocator, &.{ "run_command", "read", "thread_is_done", "shutdown" });
+                    } else if (std.mem.eql(u8, module_name, "POSIX")) {
+                        try r.symbols.put(allocator, "read", .builtin_posix_read);
+                        try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("STDOUT_FILENO", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("STDERR_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "File")) {
                         try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
                         try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
@@ -762,7 +776,6 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                     try predeclared_nodes.put(child, {});
                 } else if (ast.tag(child) == .var_decl or ast.tag(child) == .const_decl) {
                     const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
-                    if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
                     const already_declared = containsName(declared.items, name);
                     const sym: Symbol = if (ast.tag(child) == .var_decl) .{ .const_value = child } else .{ .const_value = ast.data(child).lhs };
                     const old = try r.symbols.fetchPut(r.allocator, name, sym);
@@ -773,7 +786,6 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
             }
         } else if (ast.tag(stmt) == .var_decl or ast.tag(stmt) == .const_decl) {
             const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
-            if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
             const already_declared = containsName(declared.items, name);
             const sym: Symbol = if (ast.tag(stmt) == .var_decl) .{ .const_value = stmt } else .{ .const_value = ast.data(stmt).lhs };
             const old = try r.symbols.fetchPut(r.allocator, name, sym);
@@ -801,10 +813,6 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                     switch (ast.tag(child)) {
                         .var_decl, .const_decl => {
                             const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
-                            if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) {
-                                try resolveNode(ast, r, child, file_id, diag);
-                                continue;
-                            }
                             if (predeclared_nodes.contains(child)) {
                                 if (ast.tag(child) == .var_decl) {
                                     if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
@@ -842,10 +850,6 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
             },
             .var_decl, .const_decl => {
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
-                if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) {
-                    try resolveNode(ast, r, stmt, file_id, diag);
-                    continue;
-                }
                 if (predeclared_nodes.contains(stmt)) {
                     if (ast.tag(stmt) == .var_decl) {
                         if (ast.data(stmt).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
@@ -934,7 +938,26 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         .return_stmt => {
             if (ast.data(node).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
         },
-        .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .import_decl, .load_decl, .scope_decl => {},
+        .import_decl => {
+            const module_name = ast.stringTokenContents(ast.data(node).lhs);
+            if (std.mem.eql(u8, module_name, "Compiler")) {
+                try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
+                try putCompilerModuleSymbols(r);
+            } else if (std.mem.eql(u8, module_name, "String")) {
+                try r.symbols.put(r.allocator, "to_upper", .builtin_to_upper);
+                try r.symbols.put(r.allocator, "to_lower", .builtin_to_lower);
+                try r.symbols.put(r.allocator, "is_digit", .builtin_is_digit);
+                try r.symbols.put(r.allocator, "is_alpha", .builtin_is_alpha);
+                try r.symbols.put(r.allocator, "is_alnum", .builtin_is_alnum);
+                try r.symbols.put(r.allocator, "is_space", .builtin_is_space);
+                try r.symbols.put(r.allocator, "is_any", .builtin_is_any);
+                try putStringBuiltins(r);
+                try r.symbols.put(r.allocator, "begins_with", .builtin_begins_with);
+                try r.symbols.put(r.allocator, "find_index_from_left", .builtin_find_index_from_left);
+                try r.symbols.put(r.allocator, "find_index_from_right", .builtin_find_index_from_right);
+            }
+        },
+        .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .load_decl, .scope_decl => {},
         .proc_decl => try resolveProc(ast, r, node, file_id, diag),
         .pointer_type => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .array_type => {
@@ -1122,10 +1145,14 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
                     .placeholder => try markImplicitPlaceholderUse(r, r.allocator, name),
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);
+            } else if (std.mem.eql(u8, name, "OS")) {
+                // OS is a compiler-provided value, not an implicit placeholder.
+                // Leave it unresolved here so sema and lowering can give it a
+                // real host-target value.
             } else if (isBuiltinTypeName(name)) {
                 // Builtin type names can appear as first-class Type values in expressions,
                 // e.g. type_of(n) == int. Leave them for Sema/codegen as identifiers.
@@ -1266,5 +1293,32 @@ test "resolver lets real declarations replace implicit placeholders" {
 
     try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
     try std.testing.expect(resolved.lookup("proc").? == .proc);
+    try resolved.failIfImplicitPlaceholders(diag);
+}
+
+test "resolver treats OS as a real compiler-provided value" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "main :: () { print(\"%\\n\", OS); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "os_builtin.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    defer resolved.deinit();
+
+    try std.testing.expect(!resolved.implicit_placeholders.contains("OS"));
+    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
     try resolved.failIfImplicitPlaceholders(diag);
 }
