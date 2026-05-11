@@ -116,6 +116,8 @@ pub const Opcode = enum(u8) {
     host_build_cpp_dynamic_lib,
     host_generate_bindings,
     host_add_build_string,
+    host_compiler_create_workspace,
+    host_get_current_workspace,
     file_open,
     file_close,
     file_length,

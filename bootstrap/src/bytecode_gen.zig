@@ -107,7 +107,7 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
         proc.num_registers = @max(proc.num_registers, if (decl == proc_node) @as(u32, @intCast(call_args.len)) else proc.param_count);
         const return_type_node = if (procSignature(ast, decl)) |sig| sig.return_type else @import("Ast.zig").null_node;
         const proc_index: u32 = @intCast(program.procs.items.len);
-        var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .typed = typed, .allow_root_proc_calls = true, .current_proc_node = decl, .current_proc_index = proc_index };
+        var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .typed = typed, .allow_root_proc_calls = true, .compile_time_host = true, .current_proc_node = decl, .current_proc_index = proc_index };
         defer ctx.deinit();
         ctx.return_type_node = return_type_node;
         if (decl == proc_node) {
@@ -136,7 +136,7 @@ fn generateProcInternal(allocator: std.mem.Allocator, ast: *const Ast, resolved:
     try initProcBytecodeSignature(allocator, ast, proc_node, &proc, diag);
     proc.num_registers = @max(proc.num_registers, @as(u32, @intCast(param_count)));
     const return_type_node = if (procSignature(ast, proc_node)) |sig| sig.return_type else @import("Ast.zig").null_node;
-    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .typed = typed, .current_proc_node = proc_node, .current_proc_index = 0 };
+    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .typed = typed, .compile_time_host = true, .current_proc_node = proc_node, .current_proc_index = 0 };
     defer ctx.deinit();
     ctx.return_type_node = return_type_node;
     if (call_expr) |call| try ctx.bindPolymorphTypes(proc_node, call, diag);
@@ -152,7 +152,7 @@ pub fn generateBlockProc(allocator: std.mem.Allocator, ast: *const Ast, resolved
     var program = Bytecode.Program.init(allocator);
     errdefer program.deinit();
     var proc = Bytecode.ProcBytecode{ .name = "#run_block" };
-    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .current_proc_node = @import("Ast.zig").null_node, .current_proc_index = 0 };
+    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .compile_time_host = true, .current_proc_node = @import("Ast.zig").null_node, .current_proc_index = 0 };
     defer ctx.deinit();
     try ctx.genBlock(block, diag);
     try proc.instructions.append(allocator, .{ .opcode = .ret_void, .source_node = block });
@@ -168,6 +168,7 @@ const GenContext = struct {
     resolved: *const Resolved,
     typed: ?*const Typed = null,
     allow_root_proc_calls: bool = false,
+    compile_time_host: bool = false,
     current_proc_node: NodeIndex = @import("Ast.zig").null_node,
     current_proc_index: u32 = 0,
     decl_registers: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
@@ -261,7 +262,7 @@ const GenContext = struct {
         var helper = Bytecode.ProcBytecode{ .name = ctx.ast.tokenSlice(ctx.ast.mainToken(proc_node)) };
         errdefer helper.deinit(ctx.program.allocator);
         const helper_index: u32 = @intCast(ctx.program.procs.items.len);
-        var helper_ctx = GenContext{ .ast = ctx.ast, .program = ctx.program, .proc = &helper, .resolved = ctx.resolved, .typed = ctx.typed, .current_proc_node = proc_node, .current_proc_index = helper_index };
+        var helper_ctx = GenContext{ .ast = ctx.ast, .program = ctx.program, .proc = &helper, .resolved = ctx.resolved, .typed = ctx.typed, .compile_time_host = ctx.compile_time_host, .current_proc_node = proc_node, .current_proc_index = helper_index };
         defer helper_ctx.deinit();
         try helper_ctx.genBlock(ctx.ast.data(proc_node).lhs, diag);
         try helper.instructions.append(ctx.program.allocator, .{ .opcode = .ret_void });
@@ -938,6 +939,7 @@ const GenContext = struct {
             .current_proc_node = @import("Ast.zig").null_node,
             .current_proc_index = 0,
             .allow_root_proc_calls = true,
+            .compile_time_host = true,
             .return_type_node = return_type,
         };
         defer exec_ctx.deinit();
@@ -1095,6 +1097,7 @@ const GenContext = struct {
             .program = ctx.program,
             .proc = ctx.proc,
             .allow_root_proc_calls = true,
+            .compile_time_host = ctx.compile_time_host,
             .current_proc_node = main_proc,
             .current_proc_index = ctx.current_proc_index,
         };
@@ -1148,6 +1151,7 @@ const GenContext = struct {
             .program = ctx.program,
             .proc = ctx.proc,
             .allow_root_proc_calls = true,
+            .compile_time_host = ctx.compile_time_host,
             .current_proc_node = main_proc,
             .current_proc_index = ctx.current_proc_index,
         };
@@ -3558,11 +3562,19 @@ const GenContext = struct {
 
         if (std.mem.eql(u8, name, "compiler_create_workspace")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.emitInt(expr, 3);
+            if (!ctx.compile_time_host) return try ctx.emitInt(expr, 0);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_compiler_create_workspace, .dest = reg, .source_node = expr });
+            return reg;
         }
         if (std.mem.eql(u8, name, "get_current_workspace")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.emitInt(expr, 2);
+            if (!ctx.compile_time_host) return try ctx.emitInt(expr, 0);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_get_current_workspace, .dest = reg, .source_node = expr });
+            return reg;
         }
         if (std.mem.eql(u8, name, "compiler_wait_for_message")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);

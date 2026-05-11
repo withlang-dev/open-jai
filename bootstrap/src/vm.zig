@@ -66,6 +66,8 @@ pub const VM = struct {
     io: ?std.Io = null,
     base_dir: []const u8 = ".",
     current_workspace_build_strings: ?*std.ArrayList([]const u8) = null,
+    next_workspace_id: ?*i64 = null,
+    current_workspace_id: i64 = 2,
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
@@ -734,6 +736,14 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .bool = try vm.hostAddBuildString(source, workspace, diag) };
                 },
+                .host_compiler_create_workspace => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM compiler_create_workspace register out of range", .{});
+                    regs[inst.dest] = .{ .int = try vm.hostCompilerCreateWorkspace(diag) };
+                },
+                .host_get_current_workspace => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM get_current_workspace register out of range", .{});
+                    regs[inst.dest] = .{ .int = vm.hostGetCurrentWorkspace() };
+                },
                 .get_command_line_arguments, .file_open => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
@@ -1050,6 +1060,18 @@ pub const VM = struct {
         errdefer vm.allocator.free(owned);
         try sink.append(vm.allocator, owned);
         return true;
+    }
+
+    fn hostCompilerCreateWorkspace(vm: *VM, diag: Diagnostic) !i64 {
+        const next = vm.next_workspace_id orelse return diag.failAt(0, "compiler_create_workspace requires an active compiler workspace manager", .{});
+        const id = next.*;
+        next.* += 1;
+        return id;
+    }
+
+    fn hostGetCurrentWorkspace(vm: *VM) i64 {
+        if (vm.next_workspace_id == null) return 0;
+        return vm.current_workspace_id;
     }
 
     fn loadByte(vm: *VM, ptr: Pointer, diag: Diagnostic) !i64 {

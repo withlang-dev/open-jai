@@ -25,6 +25,7 @@ pub const Compilation = struct {
     owned_run_result_strings: std.ArrayList([]const u8) = .empty,
     owned_run_result_bytes: std.ArrayList([]const u8) = .empty,
     pending_current_workspace_sources: std.ArrayList([]const u8) = .empty,
+    next_workspace_id: i64 = 3,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
         return .{ .allocator = allocator, .io = io, .options = options };
@@ -128,6 +129,7 @@ pub const Compilation = struct {
             var typed = try sema.analyze(comp.allocator, &ast, &resolved, &ip, diag);
             defer typed.deinit();
 
+            comp.next_workspace_id = 3;
             comp.clearPendingCurrentWorkspaceSources();
             try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
             try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
@@ -415,6 +417,7 @@ pub const Compilation = struct {
             defer block_program.deinit();
             var block_vm = vm_mod.VM.initWithContext(comp.allocator, &block_program, comp.io, comp.sourceBaseDir());
             block_vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
+            block_vm.next_workspace_id = &comp.next_workspace_id;
             defer block_vm.deinit();
             const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
             try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
@@ -514,6 +517,7 @@ pub const Compilation = struct {
         }
         var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
         vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
+        vm.next_workspace_id = &comp.next_workspace_id;
         defer vm.deinit();
         return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
     }
