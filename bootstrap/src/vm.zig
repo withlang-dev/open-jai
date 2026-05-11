@@ -481,6 +481,12 @@ pub const VM = struct {
                     const slot = try registerPointer(regs[inst.arg1], diag, "array_add slot");
                     regs[inst.dest] = .{ .ptr = try vm.dynamicArrayAdd(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag) };
                 },
+                .sort_array => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM sort_array register out of range", .{});
+                    const array_ptr = try registerPointer(regs[inst.arg1], diag, "sort_array");
+                    try vm.sortDynamicArray(array_ptr, inst.arg4, diag);
+                    regs[inst.dest] = regs[inst.arg1];
+                },
                 .array_count => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_count register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], diag)) };
@@ -601,7 +607,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .format_static_int_array => {
+                .format_static_int_array, .format_static_float_array, .format_static_string_array => {
                     return diag.failAt(0, "VM does not support static array formatted output in #run yet", .{});
                 },
                 .sleep_milliseconds => {
@@ -841,6 +847,24 @@ pub const VM = struct {
         try vm.storeDynamicArrayElementBytes(item_ptr, item, elem_size, diag);
         try vm.writeDynamicArrayHeader(array_index, diag);
         return item_ptr;
+    }
+
+    fn sortDynamicArray(vm: *VM, array_ptr: Pointer, kind: u32, diag: Diagnostic) !void {
+        const array_index = vm.dynamicArrayIndexForPointer(array_ptr) orelse return diag.failAt(0, "VM sort_array requires a dynamic array pointer", .{});
+        const array = &vm.dynamic_arrays.items[array_index];
+        var i: usize = 1;
+        while (i < array.elems.items.len) : (i += 1) {
+            var j = i;
+            while (j > 0 and try compareSortValues(array.elems.items[j - 1], array.elems.items[j], kind, diag) > 0) : (j -= 1) {
+                std.mem.swap(RegisterValue, &array.elems.items[j - 1], &array.elems.items[j]);
+            }
+        }
+        try vm.ensureDynamicArrayData(array_index, array.elems.items.len, diag);
+        for (array.elems.items, 0..) |item, index| {
+            const item_ptr = try vm.dynamicArrayItemPointer(array_index, index, diag);
+            try vm.storeDynamicArrayElementBytes(item_ptr, item, array.elem_size, diag);
+        }
+        try vm.writeDynamicArrayHeader(array_index, diag);
     }
 
     fn dynamicArrayData(vm: *VM, ptr: Pointer, diag: Diagnostic) !?Pointer {
@@ -1210,6 +1234,31 @@ fn registerPointer(value: RegisterValue, diag: Diagnostic, context: []const u8) 
         .ptr => |ptr| ptr,
         else => diag.failAt(0, "VM {s} requires pointer value", .{context}),
     };
+}
+
+fn compareSortValues(lhs: RegisterValue, rhs: RegisterValue, kind: u32, diag: Diagnostic) !i32 {
+    if (kind == 2) {
+        const l = switch (lhs) {
+            .string => |v| v,
+            .bytes => |v| v,
+            else => return diag.failAt(0, "VM string sort found {s} element", .{@tagName(lhs)}),
+        };
+        const r = switch (rhs) {
+            .string => |v| v,
+            .bytes => |v| v,
+            else => return diag.failAt(0, "VM string sort found {s} element", .{@tagName(rhs)}),
+        };
+        return switch (std.mem.order(u8, l, r)) {
+            .lt => -1,
+            .eq => 0,
+            .gt => 1,
+        };
+    }
+    const l = try numericAsFloatOrInt(lhs, diag, "sort comparison lhs");
+    const r = try numericAsFloatOrInt(rhs, diag, "sort comparison rhs");
+    if (l < r) return -1;
+    if (l > r) return 1;
+    return 0;
 }
 
 fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {

@@ -739,6 +739,18 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 };
                 _ = c.LLVMBuildCall2(env.builder, env.print_static_int_array_fn_ty, env.print_static_int_array_fn, &args, args.len, "");
             },
+            .format_static_float_array, .format_static_string_array => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend static array print register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_name = if (inst.opcode == .format_static_float_array) "__openjai_print_static_float_array" else "__openjai_print_static_string_array";
+                const fn_ref = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "static array print"),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                };
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
             .format_int_value => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend format_int_value register out of range", .{});
                 const source = try valueAsInt(env, registers[inst.arg1], diag);
@@ -984,6 +996,25 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 var args = [_]c.LLVMValueRef{ slot_ptr, item_ptr, c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
                 const result = c.LLVMBuildCall2(env.builder, env.array_add_fn_ty, env.array_add_fn, &args, args.len, "array_item");
                 try setPointerResult(env, registers, inst.dest, result);
+            },
+            .sort_array => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend sort_array register out of range", .{});
+                if (inst.arg5 == 0) return diag.failAt(0, "LLVM backend dynamic array sort is not implemented for runtime code yet", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_name = switch (inst.arg4) {
+                    0 => "__openjai_sort_i64",
+                    1 => "__openjai_sort_f64",
+                    2 => "__openjai_sort_runtime_strings",
+                    else => return diag.failAt(0, "LLVM backend sort_array has unknown element kind {d}", .{inst.arg4}),
+                };
+                const fn_ref = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "sort array"),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                };
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+                registers[inst.dest] = registers[inst.arg1];
             },
             .array_free => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_free register out of range", .{});

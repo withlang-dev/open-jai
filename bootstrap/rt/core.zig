@@ -98,6 +98,38 @@ export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize
     writeAll("]");
 }
 
+export fn __openjai_print_static_float_array(data: ?*const anyopaque, count: usize) void {
+    const base = data orelse {
+        writeAll("[]");
+        return;
+    };
+    const floats: [*]const f64 = @ptrCast(@alignCast(base));
+    writeAll("[");
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (i != 0) writeAll(", ");
+        __openjai_print_float(floats[i]);
+    }
+    writeAll("]");
+}
+
+export fn __openjai_print_static_string_array(data: ?*const anyopaque, count: usize) void {
+    const base = data orelse {
+        writeAll("[]");
+        return;
+    };
+    const strings: [*]const ?*OpenJaiRuntimeString = @ptrCast(@alignCast(base));
+    writeAll("[");
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (i != 0) writeAll(", ");
+        writeAll("\"");
+        if (strings[i]) |s| writeAll(s.data[0..s.len]);
+        writeAll("\"");
+    }
+    writeAll("]");
+}
+
 export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64) void {
     var buf: [128]u8 = undefined;
     const unsigned_value: u64 = @intCast(value);
@@ -624,6 +656,54 @@ export fn __openjai_string_compare(lhs_data: [*]const u8, lhs_len: usize, rhs_da
         .eq => 0,
         .gt => 1,
     };
+}
+
+export fn __openjai_sort_i64(data: ?*anyopaque, count: usize) void {
+    const base = data orelse return;
+    const items: [*]i64 = @ptrCast(@alignCast(base));
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var j = i;
+        while (j > 0 and items[j - 1] > items[j]) : (j -= 1) {
+            const tmp = items[j - 1];
+            items[j - 1] = items[j];
+            items[j] = tmp;
+        }
+    }
+}
+
+export fn __openjai_sort_f64(data: ?*anyopaque, count: usize) void {
+    const base = data orelse return;
+    const items: [*]f64 = @ptrCast(@alignCast(base));
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var j = i;
+        while (j > 0 and items[j - 1] > items[j]) : (j -= 1) {
+            const tmp = items[j - 1];
+            items[j - 1] = items[j];
+            items[j] = tmp;
+        }
+    }
+}
+
+export fn __openjai_sort_runtime_strings(data: ?*anyopaque, count: usize) void {
+    const base = data orelse return;
+    const items: [*]?*OpenJaiRuntimeString = @ptrCast(@alignCast(base));
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var j = i;
+        while (j > 0 and runtimeStringOrder(items[j - 1], items[j]) == .gt) : (j -= 1) {
+            const tmp = items[j - 1];
+            items[j - 1] = items[j];
+            items[j] = tmp;
+        }
+    }
+}
+
+fn runtimeStringOrder(lhs: ?*OpenJaiRuntimeString, rhs: ?*OpenJaiRuntimeString) std.math.Order {
+    const l = lhs orelse return if (rhs == null) .eq else .lt;
+    const r = rhs orelse return .gt;
+    return std.mem.order(u8, l.data[0..l.len], r.data[0..r.len]);
 }
 
 export fn __openjai_string_contains(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {

@@ -54,7 +54,8 @@ pub const Compilation = struct {
             ast.deinit();
         }
 
-        var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, !comp.options.check_only);
+        const require_main = !comp.options.check_only and !hasTopLevelExecutableRun(&ast);
+        var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main);
         defer resolved.deinit();
         try resolved.failIfImplicitPlaceholders(diag);
 
@@ -70,6 +71,7 @@ pub const Compilation = struct {
         try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
 
         if (comp.options.check_only) return;
+        if (resolved.main_proc == null) return;
 
         var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
         defer bytecode.deinit();
@@ -504,6 +506,14 @@ pub const Compilation = struct {
             .directive_run, .directive_assert, .keyword_push_context => true,
             else => false,
         };
+    }
+
+    fn hasTopLevelExecutableRun(ast: *const @import("Ast.zig").Ast) bool {
+        if (ast.root == @import("Ast.zig").null_node) return false;
+        for (ast.extraSlice(ast.data(ast.root).lhs)) |decl_idx| {
+            if (isExecutableRun(ast, @intCast(decl_idx))) return true;
+        }
+        return false;
     }
 
     fn procHasExpandModifier(ast: *const @import("Ast.zig").Ast, proc: @import("Ast.zig").NodeIndex, next_decl: @import("Ast.zig").NodeIndex) bool {

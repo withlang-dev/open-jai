@@ -498,7 +498,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "begins_with", .builtin_begins_with);
                     try r.symbols.put(allocator, "find_index_from_left", .builtin_find_index_from_left);
                     try r.symbols.put(allocator, "find_index_from_right", .builtin_find_index_from_right);
-                    try putPlaceholders(&r, allocator, &.{ "equal", "compare_strings" });
+                    try r.putRealSymbol("equal", .{ .const_value = @import("Ast.zig").null_node });
+                    try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
                 } else if (std.mem.eql(u8, module_name, "Thread")) {
                     try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
                     try putPlaceholders(&r, allocator, &.{ "init", "start", "lock", "unlock" });
@@ -614,7 +615,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "GetRect")) {
                         try putPlaceholders(&r, allocator, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
-                        try putPlaceholders(&r, allocator, &.{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" });
+                        for (&[_][]const u8{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" }) |sort_symbol| {
+                            try r.putRealSymbol(sort_symbol, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
                         try putPlaceholders(&r, allocator, &.{"table_add"});
                     } else if (std.mem.eql(u8, module_name, "Pool")) {
