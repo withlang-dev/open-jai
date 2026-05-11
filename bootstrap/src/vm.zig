@@ -63,9 +63,15 @@ pub const VM = struct {
     dynamic_array_refs: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     code_trees: std.ArrayList(CodeTree) = .empty,
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
+    io: ?std.Io = null,
+    base_dir: []const u8 = ".",
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
+    }
+
+    pub fn initWithContext(allocator: std.mem.Allocator, program: *const Bytecode.Program, io: std.Io, base_dir: []const u8) VM {
+        return .{ .allocator = allocator, .program = program, .io = io, .base_dir = base_dir };
     }
 
     pub fn deinit(vm: *VM) void {
@@ -271,6 +277,38 @@ pub const VM = struct {
                 },
                 .mul_int, .rem_int, .add_int, .sub_int, .div_int, .bit_and, .bit_or, .bit_xor, .shl_int, .shr_int, .rotl_int => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM integer arithmetic register out of range", .{});
+                    if (inst.opcode == .sub_int and regs[inst.arg1] == .ptr and regs[inst.arg2] == .ptr) {
+                        const lhs_ptr = regs[inst.arg1].ptr;
+                        const rhs_ptr = regs[inst.arg2].ptr;
+                        if (lhs_ptr.block != rhs_ptr.block) return diag.failAt(0, "VM pointer subtraction requires pointers into the same object", .{});
+                        regs[inst.dest] = .{ .int = @as(i64, @intCast(lhs_ptr.offset)) - @as(i64, @intCast(rhs_ptr.offset)) };
+                        continue;
+                    }
+                    if (inst.opcode == .add_int and regs[inst.arg1] == .ptr and regs[inst.arg2] == .int) {
+                        const ptr = regs[inst.arg1].ptr;
+                        const offset = regs[inst.arg2].int;
+                        if (offset < 0 and @as(usize, @intCast(-offset)) > ptr.offset) return diag.failAt(0, "VM pointer addition moved before object start", .{});
+                        regs[inst.dest] = .{ .ptr = .{ .block = ptr.block, .offset = if (offset < 0) ptr.offset - @as(usize, @intCast(-offset)) else ptr.offset + @as(usize, @intCast(offset)) } };
+                        continue;
+                    }
+                    if (inst.opcode == .add_int and regs[inst.arg1] == .int and regs[inst.arg2] == .ptr) {
+                        const ptr = regs[inst.arg2].ptr;
+                        const offset = regs[inst.arg1].int;
+                        if (offset < 0 and @as(usize, @intCast(-offset)) > ptr.offset) return diag.failAt(0, "VM pointer addition moved before object start", .{});
+                        regs[inst.dest] = .{ .ptr = .{ .block = ptr.block, .offset = if (offset < 0) ptr.offset - @as(usize, @intCast(-offset)) else ptr.offset + @as(usize, @intCast(offset)) } };
+                        continue;
+                    }
+                    if (inst.opcode == .sub_int and regs[inst.arg1] == .ptr and regs[inst.arg2] == .int) {
+                        const ptr = regs[inst.arg1].ptr;
+                        const offset = regs[inst.arg2].int;
+                        if (offset < 0) {
+                            regs[inst.dest] = .{ .ptr = .{ .block = ptr.block, .offset = ptr.offset + @as(usize, @intCast(-offset)) } };
+                        } else {
+                            if (@as(usize, @intCast(offset)) > ptr.offset) return diag.failAt(0, "VM pointer subtraction moved before object start", .{});
+                            regs[inst.dest] = .{ .ptr = .{ .block = ptr.block, .offset = ptr.offset - @as(usize, @intCast(offset)) } };
+                        }
+                        continue;
+                    }
                     const lhs = switch (regs[inst.arg1]) {
                         .int => |v| v,
                         else => return diag.failAt(0, "VM {s} requires integer lhs, got {s}", .{ @tagName(inst.opcode), @tagName(regs[inst.arg1]) }),
@@ -613,11 +651,59 @@ pub const VM = struct {
                 .sleep_milliseconds => {
                     return diag.failAt(0, "VM does not support sleep_milliseconds in #run yet", .{});
                 },
+                .compiler_read_file => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_read_file register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "compiler_read_file path");
+                    regs[inst.dest] = .{ .bytes = try vm.hostReadFile(path, diag) };
+                },
+                .compiler_write_file => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM compiler_write_file register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "compiler_write_file path");
+                    const contents = try vm.registerText(regs[inst.arg2], diag, "compiler_write_file contents");
+                    regs[inst.dest] = .{ .bool = try vm.hostWriteFile(path, contents, diag) };
+                },
+                .make_directory => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM make_directory register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "make_directory path");
+                    regs[inst.dest] = .{ .bool = try vm.hostMakeDirectory(path, diag) };
+                },
+                .delete_directory => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM delete_directory register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "delete_directory path");
+                    regs[inst.dest] = .{ .bool = try vm.hostDeleteDirectory(path, diag) };
+                },
+                .file_exists => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM file_exists register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "file_exists path");
+                    regs[inst.dest] = .{ .bool = try vm.hostPathExists(path, diag) };
+                },
+                .host_copy_file => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM copy_file register out of range", .{});
+                    const src = try vm.registerText(regs[inst.arg1], diag, "copy_file source");
+                    const dest = try vm.registerText(regs[inst.arg2], diag, "copy_file destination");
+                    regs[inst.dest] = .{ .bool = try vm.hostCopyFile(src, dest, diag) };
+                },
+                .host_run_command => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM run_command register out of range", .{});
+                    const command = try vm.registerText(regs[inst.arg1], diag, "run_command command");
+                    regs[inst.dest] = .{ .int = try vm.hostRunCommand(command, diag) };
+                },
+                .host_build_cpp_dynamic_lib => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM build_cpp_dynamic_lib register out of range", .{});
+                    const name = try vm.registerText(regs[inst.arg1], diag, "build_cpp_dynamic_lib library name");
+                    const source = try vm.registerText(regs[inst.arg2], diag, "build_cpp_dynamic_lib source file");
+                    regs[inst.dest] = .{ .bool = try vm.hostBuildCppDynamicLib(name, source, diag) };
+                },
+                .host_generate_bindings => {
+                    if (inst.dest >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM generate_bindings register out of range", .{});
+                    const output = try vm.registerText(regs[inst.arg2], diag, "generate_bindings output path");
+                    regs[inst.dest] = .{ .bool = try vm.hostGenerateBindings(output, diag) };
+                },
                 .get_command_line_arguments, .file_open => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .make_directory, .delete_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
+                .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
                 .string_builder_init => {
@@ -760,6 +846,162 @@ pub const VM = struct {
         const block = vm.memory_blocks.items[ptr.block];
         if (ptr.offset > block.len) return diag.failAt(0, "VM pointer access out of bounds", .{});
         return block[ptr.offset..];
+    }
+
+    fn requireIo(vm: *VM, diag: Diagnostic, context: []const u8) !std.Io {
+        return vm.io orelse diag.failAt(0, "VM {s} requires compiler IO context", .{context});
+    }
+
+    fn registerText(vm: *VM, value: RegisterValue, diag: Diagnostic, context: []const u8) ![]const u8 {
+        return switch (value) {
+            .string => |text| text,
+            .bytes => |bytes| bytes,
+            .ptr => |ptr| try vm.readRemainingBytes(ptr, diag),
+            else => diag.failAt(0, "VM {s} requires a string value", .{context}),
+        };
+    }
+
+    fn resolvedHostPath(vm: *VM, path: []const u8) ![]const u8 {
+        if (std.fs.path.isAbsolute(path)) return try vm.allocator.dupe(u8, path);
+        return try std.fs.path.join(vm.allocator, &.{ vm.base_dir, path });
+    }
+
+    fn ensureHostParentDir(vm: *VM, io: std.Io, path: []const u8) !void {
+        _ = vm;
+        if (std.fs.path.dirname(path)) |parent| {
+            if (parent.len != 0) std.Io.Dir.cwd().createDirPath(io, parent) catch {};
+        }
+    }
+
+    fn hostReadFile(vm: *VM, path: []const u8, diag: Diagnostic) ![]const u8 {
+        const io = try vm.requireIo(diag, "compiler_read_file");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        const contents = std.Io.Dir.cwd().readFileAlloc(io, full, vm.allocator, .limited(64 * 1024 * 1024)) catch |err| {
+            return diag.failAt(0, "VM compiler_read_file failed for '{s}': {s}", .{ full, @errorName(err) });
+        };
+        errdefer vm.allocator.free(contents);
+        try vm.rendered_code_strings.append(vm.allocator, contents);
+        return contents;
+    }
+
+    fn hostWriteFile(vm: *VM, path: []const u8, contents: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "compiler_write_file");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        try vm.ensureHostParentDir(io, full);
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = full, .data = contents }) catch |err| {
+            return diag.failAt(0, "VM compiler_write_file failed for '{s}': {s}", .{ full, @errorName(err) });
+        };
+        return true;
+    }
+
+    fn hostMakeDirectory(vm: *VM, path: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "make_directory_if_it_does_not_exist");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        std.Io.Dir.cwd().createDirPath(io, full) catch |err| {
+            return diag.failAt(0, "VM make_directory_if_it_does_not_exist failed for '{s}': {s}", .{ full, @errorName(err) });
+        };
+        return true;
+    }
+
+    fn hostDeleteDirectory(vm: *VM, path: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "delete_directory");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        if (!(try vm.hostPathExists(path, diag))) return true;
+        std.Io.Dir.cwd().deleteTree(io, full) catch |err| return diag.failAt(0, "VM delete_directory failed for '{s}': {s}", .{ full, @errorName(err) });
+        return true;
+    }
+
+    fn hostPathExists(vm: *VM, path: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "file_exists");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        std.Io.Dir.cwd().access(io, full, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return diag.failAt(0, "VM file_exists failed for '{s}': {s}", .{ full, @errorName(err) }),
+        };
+        return true;
+    }
+
+    fn hostCopyFile(vm: *VM, src: []const u8, dest: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "copy_file");
+        const full_src = try vm.resolvedHostPath(src);
+        defer vm.allocator.free(full_src);
+        const full_dest = try vm.resolvedHostPath(dest);
+        defer vm.allocator.free(full_dest);
+        const contents = std.Io.Dir.cwd().readFileAlloc(io, full_src, vm.allocator, .limited(256 * 1024 * 1024)) catch |err| {
+            return diag.failAt(0, "VM copy_file failed reading '{s}': {s}", .{ full_src, @errorName(err) });
+        };
+        defer vm.allocator.free(contents);
+        try vm.ensureHostParentDir(io, full_dest);
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = full_dest, .data = contents }) catch |err| {
+            return diag.failAt(0, "VM copy_file failed writing '{s}': {s}", .{ full_dest, @errorName(err) });
+        };
+        return true;
+    }
+
+    fn hostRunCommand(vm: *VM, command: []const u8, diag: Diagnostic) !i64 {
+        const io = try vm.requireIo(diag, "run_command");
+        const result = std.process.run(vm.allocator, io, .{
+            .argv = &.{ "/bin/sh", "-c", command },
+            .stderr_limit = .limited(64 * 1024),
+            .stdout_limit = .limited(64 * 1024),
+        }) catch |err| {
+            return diag.failAt(0, "VM run_command failed for '{s}': {s}", .{ command, @errorName(err) });
+        };
+        defer vm.allocator.free(result.stdout);
+        defer vm.allocator.free(result.stderr);
+        return switch (result.term) {
+            .exited => |code| code,
+            else => 1,
+        };
+    }
+
+    fn hostBuildCppDynamicLib(vm: *VM, name: []const u8, source: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "build_cpp_dynamic_lib");
+        const source_path = try vm.resolvedHostPath(source);
+        defer vm.allocator.free(source_path);
+        const output_name = switch (@import("builtin").os.tag) {
+            .macos => try std.fmt.allocPrint(vm.allocator, "{s}", .{name}),
+            .linux => try std.fmt.allocPrint(vm.allocator, "lib{s}.so", .{name}),
+            .windows => try std.fmt.allocPrint(vm.allocator, "{s}.dll", .{name}),
+            else => try std.fmt.allocPrint(vm.allocator, "{s}.dynlib", .{name}),
+        };
+        defer vm.allocator.free(output_name);
+        const output_path = try vm.resolvedHostPath(output_name);
+        defer vm.allocator.free(output_path);
+        const argv = switch (@import("builtin").os.tag) {
+            .macos => &[_][]const u8{ "clang++", "-dynamiclib", "-std=c++17", "-o", output_path, source_path },
+            .linux => &[_][]const u8{ "clang++", "-shared", "-fPIC", "-std=c++17", "-o", output_path, source_path },
+            else => return diag.failAt(0, "VM build_cpp_dynamic_lib does not support host OS {s} yet", .{@tagName(@import("builtin").os.tag)}),
+        };
+        const result = std.process.run(vm.allocator, io, .{
+            .argv = argv,
+            .stderr_limit = .limited(256 * 1024),
+            .stdout_limit = .limited(256 * 1024),
+        }) catch |err| {
+            return diag.failAt(0, "VM build_cpp_dynamic_lib failed invoking clang++: {s}", .{@errorName(err)});
+        };
+        defer vm.allocator.free(result.stdout);
+        defer vm.allocator.free(result.stderr);
+        return switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+    }
+
+    fn hostGenerateBindings(vm: *VM, output: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "generate_bindings");
+        const full = try vm.resolvedHostPath(output);
+        defer vm.allocator.free(full);
+        std.Io.Dir.cwd().access(io, full, .{}) catch |err| switch (err) {
+            error.FileNotFound => return diag.failAt(0, "VM generate_bindings requires a real bindings generator; no existing generated output found at '{s}'", .{full}),
+            else => return diag.failAt(0, "VM generate_bindings failed checking '{s}': {s}", .{ full, @errorName(err) }),
+        };
+        return true;
     }
 
     fn loadByte(vm: *VM, ptr: Pointer, diag: Diagnostic) !i64 {

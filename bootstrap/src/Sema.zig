@@ -570,7 +570,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             }
             if (resolved.local_values.get(callee)) |decl| {
                 if (decl == @import("Ast.zig").null_node) {
-                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                     break :blk Type.init(InternPool.well_known.any_type);
                 }
                 if (ast.tag(decl) == .proc_decl) {
@@ -583,16 +583,16 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             const sym = resolved.lookup(name) orelse {
                 if (resolved.local_values.get(callee)) |decl| {
                     if (decl == @import("Ast.zig").null_node) {
-                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.any_type);
                     }
                     if (ast.tag(decl) == .var_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).lhs) == .proc_type) {
-                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.s64_type);
                     }
                 }
                 if (std.mem.indexOfScalar(u8, name, '_') != null) {
-                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                     break :blk Type.init(InternPool.well_known.any_type);
                 }
                 return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "unresolved identifier '{s}'", .{name});
@@ -601,6 +601,8 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 for (args) |arg_idx| {
                     const arg_node: NodeIndex = @intCast(arg_idx);
                     if (ast.tag(arg_node) == .assign_stmt)
+                        _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag)
+                    else if (ast.tag(arg_node) == .binary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .equal and ast.tag(ast.data(arg_node).lhs) == .identifier)
                         _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag)
                     else if (ast.tag(arg_node) == .unary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .dot_dot)
                         _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
@@ -613,6 +615,8 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 for (args) |arg| {
                     const arg_node: NodeIndex = @intCast(arg);
                     if (ast.tag(arg_node) == .assign_stmt)
+                        _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag)
+                    else if (ast.tag(arg_node) == .binary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .equal and ast.tag(ast.data(arg_node).lhs) == .identifier)
                         _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag)
                     else if (ast.tag(arg_node) == .unary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .dot_dot)
                         _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
@@ -782,8 +786,9 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for write_entire_file", .{}),
             } else if (std.mem.eql(u8, name, "make_directory_if_it_does_not_exist")) switch (sym) {
                 .builtin_make_directory_if_it_does_not_exist => {
-                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "make_directory_if_it_does_not_exist expects one path string", .{});
+                    if (args.len < 1 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "make_directory_if_it_does_not_exist expects a path string and optional recursive flag", .{});
                     _ = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
+                    if (args.len == 2) _ = try analyzeNode(ast, resolved, typed, @intCast(args[1]), diag);
                     break :blk Type.boolType();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for make_directory_if_it_does_not_exist", .{}),
@@ -1248,7 +1253,7 @@ fn analyzeProcCall(ast: *const Ast, resolved: *const Resolved, typed: *Typed, pr
     var positional_index: usize = 0;
     for (args) |arg| {
         const arg_node: NodeIndex = @intCast(arg);
-        if (ast.tag(arg_node) == .assign_stmt) {
+        if (ast.tag(arg_node) == .assign_stmt or (ast.tag(arg_node) == .binary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .equal and ast.tag(ast.data(arg_node).lhs) == .identifier)) {
             const arg_name = ast.tokenSlice(ast.mainToken(ast.data(arg_node).lhs));
             var matched = false;
             for (params, 0..) |param_idx, i| {
@@ -1321,6 +1326,13 @@ fn validateSwapAddressArg(ast: *const Ast, resolved: *const Resolved, node: Node
     if (ast.tag(decl) != .var_decl) return diag.failAt(ast.tokens[ast.mainToken(operand)].start, "swap address argument must refer to a mutable local variable", .{});
 }
 
+fn callArgValueNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
+    if (ast.tag(arg) == .assign_stmt) return ast.data(arg).rhs;
+    if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) return ast.data(arg).rhs;
+    if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .dot_dot) return ast.data(arg).lhs;
+    return arg;
+}
+
 fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnostic) !?Type {
     if (std.mem.eql(u8, name, "compiler_create_workspace") or
         std.mem.eql(u8, name, "get_current_workspace") or
@@ -1358,12 +1370,23 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "string_to_int") or
         std.mem.eql(u8, name, "parse_int") or
         std.mem.eql(u8, name, "to_integer") or
-        std.mem.eql(u8, name, "c_style_strlen"))
+        std.mem.eql(u8, name, "c_style_strlen") or
+        std.mem.eql(u8, name, "get_number_of_processors") or
+        std.mem.eql(u8, name, "max"))
     {
         return Type.init(InternPool.well_known.s64_type);
     }
     if (std.mem.eql(u8, name, "contains") or std.mem.eql(u8, name, "begins_with")) return Type.boolType();
+    if (std.mem.eql(u8, name, "copy_file") or
+        std.mem.eql(u8, name, "build_cpp") or
+        std.mem.eql(u8, name, "build_cpp_dynamic_lib") or
+        std.mem.eql(u8, name, "cpp_link_library") or
+        std.mem.eql(u8, name, "generate_bindings"))
+    {
+        return Type.boolType();
+    }
     if (std.mem.eql(u8, name, "string_to_float")) return Type.init(InternPool.well_known.float64_type);
+    if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) return Type.init(InternPool.well_known.float64_type);
     if (std.mem.eql(u8, name, "split")) return Type.init(InternPool.well_known.any_type);
     if (std.mem.eql(u8, name, "set_build_options") or
         std.mem.eql(u8, name, "set_build_options_dc") or
@@ -1392,6 +1415,7 @@ fn isBuiltinTypeName(name: []const u8) bool {
 fn isCompilerMetaTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Workspace") or
         std.mem.eql(u8, name, "Build_Options") or
+        std.mem.eql(u8, name, "Generate_Bindings_Options") or
         std.mem.eql(u8, name, "Code") or
         std.mem.eql(u8, name, "Code_Node") or
         std.mem.eql(u8, name, "Code_Literal") or

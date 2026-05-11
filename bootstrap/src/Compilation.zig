@@ -29,6 +29,10 @@ pub const Compilation = struct {
         return .{ .allocator = allocator, .io = io, .options = options };
     }
 
+    fn sourceBaseDir(comp: *Compilation) []const u8 {
+        return std.fs.path.dirname(comp.options.input_path) orelse ".";
+    }
+
     pub fn compile(comp: *Compilation) !void {
         defer {
             for (comp.owned_run_result_strings.items) |value| comp.allocator.free(value);
@@ -351,7 +355,7 @@ pub const Compilation = struct {
         if (ast.tag(expr) == .block) {
             var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
             defer block_program.deinit();
-            var block_vm = vm_mod.VM.init(comp.allocator, &block_program);
+            var block_vm = vm_mod.VM.initWithContext(comp.allocator, &block_program, comp.io, comp.sourceBaseDir());
             defer block_vm.deinit();
             const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
             try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
@@ -450,7 +454,7 @@ pub const Compilation = struct {
                 return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument expression", .{});
             }
         }
-        var vm = vm_mod.VM.init(comp.allocator, &run_program);
+        var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
         defer vm.deinit();
         return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
     }

@@ -479,10 +479,13 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putPlaceholders(&r, allocator, &.{
                         "append",                "sprint",            "to_c_string",         "to_string",
                         "String_Builder",        "free_buffers",      "init_string_builder", "print_to_builder",
-                        "builder_string_length", "builder_to_string", "make_vector2",        "make_vector3",
-                        "tprint",                "compare",           "split",               "read",
+                        "builder_string_length", "builder_to_string", "tprint",              "compare",
+                        "split",                 "read",
                         "release",               "start",             "lock",                "proc",
                     });
+                    for (&[_][]const u8{ "make_vector2", "make_vector3", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
+                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                    }
                     try putStringBuiltins(&r);
                     try r.symbols.put(allocator, "get_command_line_arguments", .builtin_get_command_line_arguments);
                     try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
@@ -516,7 +519,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "sin", .builtin_sin);
                     try r.symbols.put(allocator, "abs", .builtin_abs);
                     try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
-                    try putPlaceholders(&r, allocator, &.{ "PI", "make_vector2", "make_vector3", "sqrt", "cos" });
+                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "sqrt", "cos" }) |name| {
+                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                    }
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);
@@ -564,7 +569,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 {
                     // Placeholder module acceptance until real module loading lands.
                     if (std.mem.eql(u8, module_name, "System")) {
-                        try putPlaceholders(&r, allocator, &.{ "get_number_of_processors", "max" });
+                        for (&[_][]const u8{ "get_number_of_processors", "max" }) |name| {
+                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "Windows")) {
                         try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.symbols.put(allocator, "GetStdHandle", .builtin_get_std_handle);
@@ -594,8 +601,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
                         try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
                         try r.symbols.put(allocator, "delete_directory", .builtin_delete_directory);
+                        try r.putRealSymbol("copy_file", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
-                        try putPlaceholders(&r, allocator, &.{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" });
+                        for (&[_][]const u8{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" }) |name| {
+                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putPlaceholders(&r, allocator, &.{
                             "events_this_frame",     "update_window_events",
@@ -645,7 +655,22 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("Feature", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("x86_Feature_Flag", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
-                        try putPlaceholders(&r, allocator, &.{ "Generate_Bindings_Options", "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH", "generate_bindings", "copy_file", "libpaths", "libnames", "include_paths", "source_files", "system_include_paths", "strip_flags", "header" });
+                        for (&[_][]const u8{
+                            "Generate_Bindings_Options",
+                            "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH",
+                            "generate_bindings",
+                            "copy_file",
+                            "libpaths",
+                            "libnames",
+                            "include_paths",
+                            "source_files",
+                            "system_include_paths",
+                            "extra_clang_arguments",
+                            "strip_flags",
+                            "header",
+                        }) |name| {
+                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
                         try putPlaceholders(&r, allocator, &.{ "init_sound_player", "play_sound", "Sound_Player" });
                     } else if (std.mem.eql(u8, module_name, "Wav_File")) {
@@ -1152,6 +1177,8 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             for (ast.extraSlice(ast.data(node).rhs)) |arg_idx| {
                 const arg: NodeIndex = @intCast(arg_idx);
                 if (ast.tag(arg) == .assign_stmt) {
+                    try resolveNode(ast, r, ast.data(arg).rhs, file_id, diag);
+                } else if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) {
                     try resolveNode(ast, r, ast.data(arg).rhs, file_id, diag);
                 } else try resolveNode(ast, r, arg, file_id, diag);
             }
