@@ -24,6 +24,7 @@ pub const Compilation = struct {
     options: Options,
     owned_run_result_strings: std.ArrayList([]const u8) = .empty,
     owned_run_result_bytes: std.ArrayList([]const u8) = .empty,
+    pending_current_workspace_sources: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
         return .{ .allocator = allocator, .io = io, .options = options };
@@ -31,6 +32,51 @@ pub const Compilation = struct {
 
     fn sourceBaseDir(comp: *Compilation) []const u8 {
         return std.fs.path.dirname(comp.options.input_path) orelse ".";
+    }
+
+    fn clearPendingCurrentWorkspaceSources(comp: *Compilation) void {
+        for (comp.pending_current_workspace_sources.items) |value| comp.allocator.free(value);
+        comp.pending_current_workspace_sources.clearRetainingCapacity();
+    }
+
+    fn hasAppliedCurrentWorkspaceSource(applied: []const []const u8, source: []const u8) bool {
+        for (applied) |existing| {
+            if (std.mem.eql(u8, existing, source)) return true;
+        }
+        return false;
+    }
+
+    fn applyPendingCurrentWorkspaceSources(comp: *Compilation, source: *[]u8, applied: *std.ArrayList([]const u8)) !bool {
+        defer comp.clearPendingCurrentWorkspaceSources();
+
+        var new_sources = std.ArrayList([]const u8).empty;
+        defer new_sources.deinit(comp.allocator);
+
+        for (comp.pending_current_workspace_sources.items) |pending| {
+            if (hasAppliedCurrentWorkspaceSource(applied.items, pending)) continue;
+            try new_sources.append(comp.allocator, pending);
+            const owned = try comp.allocator.dupe(u8, pending);
+            applied.append(comp.allocator, owned) catch |err| {
+                comp.allocator.free(owned);
+                return err;
+            };
+        }
+        if (new_sources.items.len == 0) return false;
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(comp.allocator);
+        try out.appendSlice(comp.allocator, source.*);
+        if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(comp.allocator, '\n');
+        for (new_sources.items) |generated_source| {
+            try out.appendSlice(comp.allocator, "\n// Added by compile-time add_build_string to the current workspace.\n");
+            try out.appendSlice(comp.allocator, generated_source);
+            if (generated_source.len == 0 or generated_source[generated_source.len - 1] != '\n') try out.append(comp.allocator, '\n');
+        }
+
+        const expanded = try out.toOwnedSlice(comp.allocator);
+        comp.allocator.free(source.*);
+        source.* = expanded;
+        return true;
     }
 
     pub fn compile(comp: *Compilation) !void {
@@ -41,60 +87,75 @@ pub const Compilation = struct {
             for (comp.owned_run_result_bytes.items) |value| comp.allocator.free(value);
             comp.owned_run_result_bytes.deinit(comp.allocator);
             comp.owned_run_result_bytes = .empty;
+            for (comp.pending_current_workspace_sources.items) |value| comp.allocator.free(value);
+            comp.pending_current_workspace_sources.deinit(comp.allocator);
+            comp.pending_current_workspace_sources = .empty;
         }
 
-        const source = try comp.loadSourceWithLoads(comp.options.input_path);
+        var source = try comp.loadSourceWithLoads(comp.options.input_path);
         defer comp.allocator.free(source);
-        if (source.len == 0 and !comp.options.check_only) return Diagnostic.init(comp.allocator, comp.options.input_path, source).failAt(0, "source file is empty", .{});
-
-        const diag = Diagnostic.init(comp.allocator, comp.options.input_path, source);
-        var tokens = try lexer.tokenize(comp.allocator, source, diag);
-        defer tokens.deinit(comp.allocator);
-
-        const token_slice = tokens.slice();
-        var ast = try parser.parse(comp.allocator, source, token_slice.items(.tag), token_slice.items(.start), token_slice.items(.end), diag);
+        var applied_current_workspace_sources = std.ArrayList([]const u8).empty;
         defer {
-            comp.allocator.free(ast.tokens);
-            ast.deinit();
+            for (applied_current_workspace_sources.items) |value| comp.allocator.free(value);
+            applied_current_workspace_sources.deinit(comp.allocator);
         }
 
-        const require_main = !comp.options.check_only and !hasTopLevelExecutableRun(&ast);
-        var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main);
-        defer resolved.deinit();
-        try resolved.failIfImplicitPlaceholders(diag);
+        var pass: usize = 0;
+        while (true) {
+            pass += 1;
+            const diag = Diagnostic.init(comp.allocator, comp.options.input_path, source);
+            if (pass > 16) return diag.failAt(0, "compile-time add_build_string did not reach a fixed point after {d} passes", .{pass - 1});
+            if (source.len == 0 and !comp.options.check_only) return diag.failAt(0, "source file is empty", .{});
 
-        var ip = try InternPool.init(comp.allocator);
-        defer ip.deinit();
+            var tokens = try lexer.tokenize(comp.allocator, source, diag);
+            defer tokens.deinit(comp.allocator);
 
-        var typed = try sema.analyze(comp.allocator, &ast, &resolved, &ip, diag);
-        defer typed.deinit();
+            const token_slice = tokens.slice();
+            var ast = try parser.parse(comp.allocator, source, token_slice.items(.tag), token_slice.items(.start), token_slice.items(.end), diag);
+            defer {
+                comp.allocator.free(ast.tokens);
+                ast.deinit();
+            }
 
-        try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
-        try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
-        try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
-        try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
+            const require_main = !comp.options.check_only and !hasTopLevelExecutableRun(&ast);
+            var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main);
+            defer resolved.deinit();
+            try resolved.failIfImplicitPlaceholders(diag);
 
-        if (comp.options.check_only) return;
-        if (resolved.main_proc == null) return;
+            var ip = try InternPool.init(comp.allocator);
+            defer ip.deinit();
 
-        var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
-        defer bytecode.deinit();
+            var typed = try sema.analyze(comp.allocator, &ast, &resolved, &ip, diag);
+            defer typed.deinit();
 
-        const object_path = try std.fmt.allocPrint(comp.allocator, "{s}.o", .{comp.options.output_path});
-        defer comp.allocator.free(object_path);
-        if (std.fs.path.dirname(object_path)) |object_dir| {
-            // Attempt to create the output directory. Silently ignore errors when the
-            // directory already exists (e.g. macOS /tmp is a symlink and createDirPath
-            // returns NotDir). If the path is genuinely inaccessible, emitObject below
-            // will produce a diagnostic.
-            std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, object_dir) catch {};
-        }
-        try llvm.emitObject(comp.allocator, &bytecode, object_path, diag);
+            comp.clearPendingCurrentWorkspaceSources();
+            try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
+            try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
+            try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
+            try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
+            if (try comp.applyPendingCurrentWorkspaceSources(&source, &applied_current_workspace_sources)) continue;
 
-        if (!comp.options.check_only) {
+            if (comp.options.check_only) return;
+            if (resolved.main_proc == null) return;
+
+            var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
+            defer bytecode.deinit();
+
+            const object_path = try std.fmt.allocPrint(comp.allocator, "{s}.o", .{comp.options.output_path});
+            defer comp.allocator.free(object_path);
+            if (std.fs.path.dirname(object_path)) |object_dir| {
+                // Attempt to create the output directory. Silently ignore errors when the
+                // directory already exists (e.g. macOS /tmp is a symlink and createDirPath
+                // returns NotDir). If the path is genuinely inaccessible, emitObject below
+                // will produce a diagnostic.
+                std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, object_dir) catch {};
+            }
+            try llvm.emitObject(comp.allocator, &bytecode, object_path, diag);
+
             const runtime_path = try comp.resolveRuntimePath();
             defer if (runtime_path.owned) comp.allocator.free(runtime_path.path);
             try link_mod.link(comp.allocator, comp.io, object_path, runtime_path.path, comp.options.output_path, diag);
+            return;
         }
     }
 
@@ -353,6 +414,7 @@ pub const Compilation = struct {
             var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
             defer block_program.deinit();
             var block_vm = vm_mod.VM.initWithContext(comp.allocator, &block_program, comp.io, comp.sourceBaseDir());
+            block_vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
             defer block_vm.deinit();
             const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
             try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
@@ -451,6 +513,7 @@ pub const Compilation = struct {
             }
         }
         var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
+        vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
         defer vm.deinit();
         return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
     }

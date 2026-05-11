@@ -3607,6 +3607,18 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_generate_bindings, .dest = reg, .arg1 = options, .arg2 = output, .source_node = expr });
             return reg;
         }
+        if (std.mem.eql(u8, name, "add_build_string")) {
+            if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "add_build_string expects source text and an optional workspace", .{});
+            const source = try genCallArg(ctx, @intCast(args[0]), diag);
+            const workspace = if (args.len >= 2)
+                try genCallArg(ctx, @intCast(args[1]), diag)
+            else
+                try ctx.emitInt(expr, -1);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_add_build_string, .dest = reg, .arg1 = source, .arg2 = workspace, .source_node = expr });
+            return reg;
+        }
         if (std.mem.eql(u8, name, "add_global_data")) {
             for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
             return try ctx.emitInt(expr, 0);
@@ -3655,8 +3667,7 @@ const GenContext = struct {
             std.mem.eql(u8, name, "compiler_end_intercept") or
             std.mem.eql(u8, name, "compiler_set_workspace_status") or
             std.mem.eql(u8, name, "compiler_report") or
-            std.mem.eql(u8, name, "add_build_file") or
-            std.mem.eql(u8, name, "add_build_string"))
+            std.mem.eql(u8, name, "add_build_file"))
         {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
             return try ctx.emitInt(expr, 0);

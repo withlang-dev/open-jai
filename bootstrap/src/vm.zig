@@ -65,6 +65,7 @@ pub const VM = struct {
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
     io: ?std.Io = null,
     base_dir: []const u8 = ".",
+    current_workspace_build_strings: ?*std.ArrayList([]const u8) = null,
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
@@ -724,6 +725,15 @@ pub const VM = struct {
                     const output = try vm.registerText(regs[inst.arg2], diag, "generate_bindings output path");
                     regs[inst.dest] = .{ .bool = try vm.hostGenerateBindings(output, diag) };
                 },
+                .host_add_build_string => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM add_build_string register out of range", .{});
+                    const source = try vm.registerText(regs[inst.arg1], diag, "add_build_string source");
+                    const workspace = switch (regs[inst.arg2]) {
+                        .int => |value| value,
+                        else => return diag.failAt(0, "add_build_string workspace argument must be an integer workspace handle", .{}),
+                    };
+                    regs[inst.dest] = .{ .bool = try vm.hostAddBuildString(source, workspace, diag) };
+                },
                 .get_command_line_arguments, .file_open => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
@@ -1026,6 +1036,19 @@ pub const VM = struct {
             error.FileNotFound => return diag.failAt(0, "VM generate_bindings requires a real bindings generator; no existing generated output found at '{s}'", .{full}),
             else => return diag.failAt(0, "VM generate_bindings failed checking '{s}': {s}", .{ full, @errorName(err) }),
         };
+        return true;
+    }
+
+    fn hostAddBuildString(vm: *VM, source: []const u8, workspace: i64, diag: Diagnostic) !bool {
+        if (workspace != -1 and workspace != 1) {
+            // Target-workspace scheduling is handled outside the current
+            // workspace source reparse loop.
+            return true;
+        }
+        const sink = vm.current_workspace_build_strings orelse return diag.failAt(0, "add_build_string requires an active compiler workspace", .{});
+        const owned = try vm.allocator.dupe(u8, source);
+        errdefer vm.allocator.free(owned);
+        try sink.append(vm.allocator, owned);
         return true;
     }
 

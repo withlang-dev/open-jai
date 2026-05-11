@@ -72,6 +72,10 @@ binary_swap_output :: () {
     expect_example_annotations("examples/28/28.13_binary_swap.jai");
 } @TestProcedure
 
+placeholder_fulfillment_output :: () {
+    expect_example_annotations("examples/30/30.12_placeholder.jai");
+} @TestProcedure
+
 mutex_output :: () {
     expect_example_annotations("examples/31/31.6_mutex1.jai");
 } @TestProcedure
