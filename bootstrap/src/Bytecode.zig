@@ -87,6 +87,8 @@ pub const Opcode = enum(u8) {
     int_to_bool_cast,
     float_cast,
     sin_float,
+    sqrt_float,
+    cos_float,
     current_time_consensus_low,
     current_time_monotonic_low,
     get_time_seconds,

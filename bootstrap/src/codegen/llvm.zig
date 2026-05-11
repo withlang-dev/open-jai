@@ -1123,9 +1123,18 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     else => return diag.failAt(0, "LLVM backend float_cast requires int or float source", .{}),
                 };
             },
-            .sin_float => {
-                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend sin register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = try valueAsFloat(env, registers[inst.arg1], diag), .kind = .float };
+            .sin_float, .sqrt_float, .cos_float => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend unary float math register out of range", .{});
+                const intrinsic_name: [:0]const u8 = switch (inst.opcode) {
+                    .sin_float => "llvm.sin.f64",
+                    .sqrt_float => "llvm.sqrt.f64",
+                    .cos_float => "llvm.cos.f64",
+                    else => unreachable,
+                };
+                registers[inst.dest] = .{
+                    .llvm_value = try buildUnaryFloatIntrinsic(env, intrinsic_name, try valueAsFloat(env, registers[inst.arg1], diag)),
+                    .kind = .float,
+                };
             },
             .current_time_consensus_low => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend current_time_consensus_low destination out of range", .{});
@@ -1879,6 +1888,14 @@ fn valueAsFloat(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMVa
         .int, .int_addr, .bool, .bool_addr => c.LLVMBuildSIToFP(env.builder, try valueAsInt(env, value, diag), env.llvm_f64, "tofp"),
         else => diag.failAt(0, "expected numeric register", .{}),
     };
+}
+
+fn buildUnaryFloatIntrinsic(env: *LlvmEnv, name: [:0]const u8, arg: c.LLVMValueRef) !c.LLVMValueRef {
+    const params = [_]c.LLVMTypeRef{env.llvm_f64};
+    const fn_ty = c.LLVMFunctionType(env.llvm_f64, @constCast(&params), params.len, 0);
+    const fn_ref = c.LLVMGetNamedFunction(env.module, name.ptr) orelse c.LLVMAddFunction(env.module, name.ptr, fn_ty);
+    var args = [_]c.LLVMValueRef{arg};
+    return c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "float_math");
 }
 
 fn valueAsBool(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValueRef {

@@ -93,9 +93,11 @@ pub fn build(b: *std.Build) void {
 
     const runtime_manifest = b.addWriteFiles();
     const manifest_file = runtime_manifest.add("openjai_runtime.manifest",
-        \\openjai_rt_start_exe.o
-        \\openjai_rt_core.o
-        \\openjai_rt_platform_darwin_aarch64.o
+        \\target darwin aarch64
+        \\object openjai_rt_start_exe.o
+        \\object openjai_rt_core.o
+        \\object openjai_rt_platform_darwin_aarch64.o
+        \\system_library System
         \\
     );
     const install_runtime_manifest = b.addInstallFile(manifest_file, "lib/openjai_runtime.manifest");

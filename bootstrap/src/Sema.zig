@@ -1377,6 +1377,7 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         return Type.init(InternPool.well_known.s64_type);
     }
     if (std.mem.eql(u8, name, "contains") or std.mem.eql(u8, name, "begins_with")) return Type.boolType();
+    if (std.mem.eql(u8, name, "thread_is_done")) return Type.boolType();
     if (std.mem.eql(u8, name, "copy_file") or
         std.mem.eql(u8, name, "build_cpp") or
         std.mem.eql(u8, name, "build_cpp_dynamic_lib") or
@@ -1401,7 +1402,19 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "init_string_builder") or
         std.mem.eql(u8, name, "free_buffers") or
         std.mem.eql(u8, name, "append") or
-        std.mem.eql(u8, name, "print_to_builder"))
+        std.mem.eql(u8, name, "print_to_builder") or
+        std.mem.eql(u8, name, "init") or
+        std.mem.eql(u8, name, "start") or
+        std.mem.eql(u8, name, "add_work") or
+        std.mem.eql(u8, name, "shutdown") or
+        std.mem.eql(u8, name, "lock") or
+        std.mem.eql(u8, name, "unlock") or
+        std.mem.eql(u8, name, "thread_init") or
+        std.mem.eql(u8, name, "thread_start") or
+        std.mem.eql(u8, name, "thread_deinit") or
+        std.mem.eql(u8, name, "thread_destroy") or
+        std.mem.eql(u8, name, "table_add") or
+        std.mem.eql(u8, name, "table_remove"))
     {
         return Type.voidType();
     }

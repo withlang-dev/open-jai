@@ -63,7 +63,9 @@ print_proc_output :: () {
 } @TestProcedure
 
 compile_time_if_output :: () {
-    expect_example_annotations("examples/26/26.5_if.jai");
+    expect_program_output_contains("examples/26/26.5_if.jai", "The operating system is ");
+    expect_program_output_contains("examples/26/26.5_if.jai", "CONSTANT is 3");
+    expect_program_output_contains("examples/26/26.5_if.jai", "name is ");
 } @TestProcedure
 
 binary_swap_output :: () {
@@ -77,4 +79,3 @@ mutex_output :: () {
 hello_example_annotations_output :: () {
     expect_example_annotations("examples/hello.jai");
 } @TestProcedure
-

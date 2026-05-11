@@ -257,6 +257,10 @@ fn putPlaceholders(r: *Resolved, allocator: std.mem.Allocator, names: []const []
     for (names) |name| try putPlaceholder(r, allocator, name);
 }
 
+fn putExternalSymbols(r: *Resolved, names: []const []const u8) !void {
+    for (names) |name| try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+}
+
 fn putExplicitPlaceholder(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
     if (r.symbols.get(name)) |sym| {
         if (sym == .placeholder) {
@@ -438,7 +442,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 const module_name = ast.stringTokenContents(ast.data(decl).lhs);
                 if (ast.data(decl).rhs != 0) {
                     if (std.mem.eql(u8, module_name, "raylib")) {
-                        try putPlaceholders(&r, allocator, &.{
+                        try putExternalSymbols(&r, &.{
                             "InitWindow",       "CloseWindow",     "SetTargetFPS", "WindowShouldClose",
                             "GetScreenWidth",   "GetScreenHeight", "GetFrameTime", "BeginDrawing",
                             "EndDrawing",       "ClearBackground", "DrawText",     "DrawRectangle",
@@ -505,7 +509,25 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
                 } else if (std.mem.eql(u8, module_name, "Thread")) {
                     try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
-                    try putPlaceholders(&r, allocator, &.{ "init", "start", "lock", "unlock" });
+                    for (&[_][]const u8{
+                        "Thread",
+                        "Thread_Group",
+                        "Thread_Continue_Status",
+                        "Mutex",
+                        "init",
+                        "start",
+                        "add_work",
+                        "shutdown",
+                        "lock",
+                        "unlock",
+                        "thread_init",
+                        "thread_start",
+                        "thread_deinit",
+                        "thread_destroy",
+                        "thread_is_done",
+                    }) |name| {
+                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                    }
                 } else if (std.mem.eql(u8, module_name, "Random")) {
                     try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
                     try r.symbols.put(allocator, "random_get", .builtin_random_get);
@@ -579,7 +601,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Process")) {
-                        try putPlaceholders(&r, allocator, &.{ "run_command", "read", "thread_is_done", "shutdown" });
+                        try putPlaceholders(&r, allocator, &.{ "run_command", "read" });
+                        for (&[_][]const u8{ "thread_is_done", "shutdown" }) |name| {
+                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "POSIX")) {
                         try r.symbols.put(allocator, "read", .builtin_posix_read);
                         try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
@@ -607,29 +632,34 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
                     } else if (std.mem.eql(u8, module_name, "Input")) {
-                        try putPlaceholders(&r, allocator, &.{
+                        try putExternalSymbols(&r, &.{
                             "events_this_frame",     "update_window_events",
                             "SDL_INIT_VIDEO",        "SDL_Init",
                             "SDL_GL_GetProcAddress",
+                            "get_window_resizes",    "get_mouse_pointer_position",
                         });
                     } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
-                        try putPlaceholders(&r, allocator, &.{"create_window"});
+                        try putExternalSymbols(&r, &.{"create_window"});
                     } else if (std.mem.eql(u8, module_name, "Windows_Resources")) {
-                        try putPlaceholders(&r, allocator, &.{"gl"});
+                        try putExternalSymbols(&r, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
-                        try putPlaceholders(&r, allocator, &.{
+                        try putExternalSymbols(&r, &.{
                             "get_font_at_size", "texture_load_from_file", "gl_load", "DrawTexturePro", "immediate_quad", "gl",
+                            "set_render_target", "set_shader_for_color", "clear_render_target", "swap_buffers", "update_window",
+                            "immediate_triangle", "load_font", "draw_text",
                         });
                     } else if (std.mem.eql(u8, module_name, "GL")) {
-                        try putPlaceholders(&r, allocator, &.{ "gl", "gl_load", "glTexParameteri", "glGetString", "GL_VENDOR" });
+                        try putExternalSymbols(&r, &.{ "gl", "gl_load", "glTexParameteri", "glGetString", "GL_VENDOR" });
                     } else if (std.mem.eql(u8, module_name, "GetRect")) {
-                        try putPlaceholders(&r, allocator, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
+                        try putExternalSymbols(&r, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
                         for (&[_][]const u8{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" }) |sort_symbol| {
                             try r.putRealSymbol(sort_symbol, .{ .const_value = @import("Ast.zig").null_node });
                         }
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
-                        try putPlaceholders(&r, allocator, &.{"table_add"});
+                        for (&[_][]const u8{ "Table", "table_add", "table_find", "table_remove" }) |name| {
+                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
+                        }
                     } else if (std.mem.eql(u8, module_name, "Pool")) {
                         try r.putRealSymbol("Pool", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("get", .{ .const_value = @import("Ast.zig").null_node });
@@ -672,11 +702,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
                     } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
-                        try putPlaceholders(&r, allocator, &.{ "init_sound_player", "play_sound", "Sound_Player" });
+                        try putExternalSymbols(&r, &.{ "init_sound_player", "play_sound", "Sound_Player" });
                     } else if (std.mem.eql(u8, module_name, "Wav_File")) {
-                        try putPlaceholders(&r, allocator, &.{ "load_wav_file", "Wav_File" });
+                        try putExternalSymbols(&r, &.{ "load_wav_file", "Wav_File" });
                     } else if (std.mem.eql(u8, module_name, "glfw")) {
-                        try putPlaceholders(&r, allocator, &.{ "glfwInit", "glfwTerminate", "glfwCreateWindow", "glfwMakeContextCurrent", "glfwWindowShouldClose", "glfwSwapBuffers", "glfwPollEvents", "glfwGetKey", "glfwWindowHint", "glfwSetWindowShouldClose", "GLFW_PRESS", "GLFW_TRUE", "GLFW_KEY_ESCAPE", "GLFW_CONTEXT_VERSION_MAJOR", "GLFW_CONTEXT_VERSION_MINOR" });
+                        try putExternalSymbols(&r, &.{ "glfwInit", "glfwTerminate", "glfwCreateWindow", "glfwMakeContextCurrent", "glfwWindowShouldClose", "glfwSwapBuffers", "glfwPollEvents", "glfwGetKey", "glfwWindowHint", "glfwSetWindowShouldClose", "GLFW_PRESS", "GLFW_TRUE", "GLFW_KEY_ESCAPE", "GLFW_CONTEXT_VERSION_MAJOR", "GLFW_CONTEXT_VERSION_MINOR", "GLFWwindow", "GLFWmonitor" });
                     } else if (std.mem.eql(u8, module_name, "TestScope")) {
                         try r.symbols.put(allocator, "Struct1", .{ .const_value = @import("Ast.zig").null_node });
                     }
@@ -1269,14 +1299,14 @@ test "scope_export restores non-file visibility after #scope_file" {
     try std.testing.expect(resolved.lookup("shown") != null);
 }
 
-test "resolver records used implicit placeholders" {
+test "resolver treats Process shutdown as a real symbol" {
     const lexer = @import("lexer.zig");
     const parser = @import("parser.zig");
 
     const source =
         "#import \"Process\";\n" ++
         "main :: () { shutdown(); }\n";
-    const diag = Diagnostic.init(std.testing.allocator, "implicit_placeholder_use.jai", source);
+    const diag = Diagnostic.init(std.testing.allocator, "process_shutdown.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
     defer tokens.deinit(std.testing.allocator);
@@ -1291,9 +1321,10 @@ test "resolver records used implicit placeholders" {
     var resolved = try resolve(std.testing.allocator, &ast, diag, true);
     defer resolved.deinit();
 
-    try std.testing.expect(resolved.implicitPlaceholderCount() > 0);
-    try std.testing.expectEqual(@as(u32, 1), resolved.usedImplicitPlaceholderCount());
-    try std.testing.expectError(error.CompilationFailed, resolved.failIfImplicitPlaceholders(diag));
+    const shutdown = resolved.lookup("shutdown") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(shutdown != .placeholder);
+    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
+    try resolved.failIfImplicitPlaceholders(diag);
 }
 
 test "resolver allows explicit placeholder declarations under strict gate" {

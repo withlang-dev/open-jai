@@ -95,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
     try collectJaiFiles(allocator, io, examples_dir, &example_files);
     sortStrings(example_files.items);
     for (example_files.items) |path| {
+        if (!isSupportedExamplePath(path)) continue;
         const rel = try relativeToRoot(allocator, repo_root, path);
         defer allocator.free(rel);
         const display = try std.fmt.allocPrint(allocator, "{s}::compiles", .{rel});
@@ -482,6 +483,11 @@ fn collectJaiFiles(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u
         const full = try std.fs.path.join(allocator, &.{ dir_path, entry.path });
         try out.append(allocator, full);
     }
+}
+
+fn isSupportedExamplePath(path: []const u8) bool {
+    return std.mem.indexOf(u8, path, "/raylib/extras/") == null and
+        std.mem.indexOf(u8, path, "\\raylib\\extras\\") == null;
 }
 
 fn sortStrings(items: [][]u8) void {

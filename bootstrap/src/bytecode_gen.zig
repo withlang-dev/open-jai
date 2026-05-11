@@ -2806,7 +2806,15 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "thread_init") or
                     std.mem.eql(u8, name, "thread_start") or
                     std.mem.eql(u8, name, "thread_deinit") or
-                    std.mem.eql(u8, name, "thread_destroy"))
+                    std.mem.eql(u8, name, "thread_destroy") or
+                    std.mem.eql(u8, name, "init") or
+                    std.mem.eql(u8, name, "start") or
+                    std.mem.eql(u8, name, "add_work") or
+                    std.mem.eql(u8, name, "shutdown") or
+                    std.mem.eql(u8, name, "lock") or
+                    std.mem.eql(u8, name, "unlock") or
+                    std.mem.eql(u8, name, "table_add") or
+                    std.mem.eql(u8, name, "table_remove"))
                 {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
@@ -3231,6 +3239,15 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .sin_float, .dest = reg, .arg1 = arg_reg, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one numeric argument", .{name});
+                    const arg_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "sqrt")) .sqrt_float else .cos_float, .dest = reg, .arg1 = arg_reg, .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "formatInt")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "formatInt expects an integer value", .{});
@@ -3528,8 +3545,11 @@ const GenContext = struct {
         }
         if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
             if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one numeric argument", .{name});
-            const value = try ctx.evalFloatConstExpr(handleArgNode(ast, @intCast(args[0])), diag);
-            return try ctx.emitFloat(expr, if (std.mem.eql(u8, name, "sqrt")) std.math.sqrt(value) else std.math.cos(value));
+            const arg_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "sqrt")) .sqrt_float else .cos_float, .dest = reg, .arg1 = arg_reg, .source_node = expr });
+            return reg;
         }
         if (std.mem.eql(u8, name, "make_vector2") or std.mem.eql(u8, name, "make_vector3")) {
             for (args) |arg| _ = try ctx.genExpr(handleArgNode(ast, @intCast(arg)), diag);
@@ -4649,12 +4669,14 @@ fn genCallArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.Regi
 }
 
 fn stmtInitOrAssignRhs(ast: *const Ast, stmt: NodeIndex) ?NodeIndex {
-    return switch (ast.tag(stmt)) {
+    const rhs = switch (ast.tag(stmt)) {
         .var_decl => ast.data(stmt).rhs,
         .const_decl => ast.data(stmt).lhs,
         .assign_stmt => ast.data(stmt).rhs,
         else => null,
     };
+    if (rhs == @import("Ast.zig").null_node) return null;
+    return rhs;
 }
 
 fn handleArgNode(ast: *const Ast, arg: NodeIndex) NodeIndex {

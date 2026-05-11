@@ -31,7 +31,7 @@ BINDIR ?= $(PREFIX)/bin
 DESTDIR ?=
 INSTALL_BINDIR := $(DESTDIR)$(BINDIR)
 
-SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' | sort)
+SUPPORTED_EXAMPLES := $(shell find examples -type f -name '*.jai' ! -path '*/raylib/extras/*.jai' | sort)
 
 EXAMPLES ?= $(SUPPORTED_EXAMPLES)
 

@@ -362,6 +362,20 @@ pub const VM = struct {
                         else => unreachable,
                     } };
                 },
+                .sin_float, .sqrt_float, .cos_float => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM unary float math register out of range", .{});
+                    const arg = switch (regs[inst.arg1]) {
+                        .float => |v| v,
+                        .int => |v| @as(f64, @floatFromInt(v)),
+                        else => return diag.failAt(0, "VM {s} requires numeric operand", .{@tagName(inst.opcode)}),
+                    };
+                    regs[inst.dest] = .{ .float = switch (inst.opcode) {
+                        .sin_float => std.math.sin(arg),
+                        .sqrt_float => std.math.sqrt(arg),
+                        .cos_float => std.math.cos(arg),
+                        else => unreachable,
+                    } };
+                },
                 .load => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load register out of range", .{});
                     regs[inst.dest] = regs[inst.arg1];
@@ -649,7 +663,18 @@ pub const VM = struct {
                     return diag.failAt(0, "VM does not support static array formatted output in #run yet", .{});
                 },
                 .sleep_milliseconds => {
-                    return diag.failAt(0, "VM does not support sleep_milliseconds in #run yet", .{});
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM sleep_milliseconds register out of range", .{});
+                    const millis = switch (regs[inst.arg1]) {
+                        .int => |v| if (v < 0) 0 else @as(u64, @intCast(v)),
+                        .float => |v| if (v < 0) 0 else @as(u64, @intFromFloat(v)),
+                        else => return diag.failAt(0, "VM sleep_milliseconds requires numeric argument", .{}),
+                    };
+                    const io = try vm.requireIo(diag, "sleep_milliseconds");
+                    const bounded_millis: i64 = @intCast(@min(millis, @as(u64, @intCast(std.math.maxInt(i64)))));
+                    try std.Io.Clock.Duration.sleep(.{
+                        .raw = std.Io.Duration.fromMilliseconds(bounded_millis),
+                        .clock = .awake,
+                    }, io);
                 },
                 .compiler_read_file => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_read_file register out of range", .{});
