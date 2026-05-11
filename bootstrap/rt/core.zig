@@ -7,6 +7,7 @@ extern fn oj_rt_close(fd: i32) i32;
 extern fn oj_rt_seek(fd: i32, offset: i64, whence: i32) i64;
 extern fn oj_rt_stat(path_z: [*:0]const u8, out: ?*OpenJaiRtStat) i32;
 extern fn oj_rt_mkdir(path_z: [*:0]const u8, mode: i32) i32;
+extern fn oj_rt_delete_directory(path_z: [*:0]const u8) i32;
 extern fn oj_rt_mmap(len: usize) ?*anyopaque;
 extern fn oj_rt_munmap(ptr: ?*anyopaque, len: usize) void;
 extern fn oj_rt_sleep_milliseconds(ms: u64) void;
@@ -14,6 +15,7 @@ extern fn oj_rt_exit(code: i32) noreturn;
 extern fn oj_rt_clock_realtime_ns() i64;
 extern fn oj_rt_clock_monotonic_ns() i64;
 extern fn oj_rt_to_calendar(low_ns: u64, timezone: i64, out: ?*OpenJaiCalendar) i32;
+extern fn oj_rt_cpu_has_feature(feature: i64) i32;
 
 const OpenJaiRtStat = extern struct {
     size: i64,
@@ -294,6 +296,10 @@ export fn __openjai_sleep_milliseconds(ms: i64) void {
     oj_rt_sleep_milliseconds(@intCast(ms));
 }
 
+export fn __openjai_cpu_has_feature(feature: i64) bool {
+    return oj_rt_cpu_has_feature(feature) != 0;
+}
+
 export fn __openjai_read_entire_file(path_data: [*]const u8, path_len: usize) ?*OpenJaiRuntimeString {
     const path_raw = rtAlloc(path_len + 1) orelse return null;
     defer rtFree(path_raw);
@@ -334,6 +340,12 @@ export fn __openjai_make_directory(path_data: [*]const u8, path_len: usize) bool
     const path_raw = pathToZ(path_data, path_len) orelse return false;
     defer rtFree(path_raw);
     return oj_rt_mkdir(@ptrCast(path_raw), 0o755) == 0;
+}
+
+export fn __openjai_delete_directory(path_data: [*]const u8, path_len: usize) bool {
+    const path_raw = pathToZ(path_data, path_len) orelse return false;
+    defer rtFree(path_raw);
+    return oj_rt_delete_directory(@ptrCast(path_raw)) == 0;
 }
 
 export fn __openjai_file_exists(path_data: [*]const u8, path_len: usize) bool {

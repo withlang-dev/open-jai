@@ -2342,6 +2342,9 @@ const GenContext = struct {
                     return reg;
                 }
                 const field_name = ast.tokenSlice(ast.data(expr).rhs);
+                if (ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "x86_Feature_Flag")) {
+                    return try ctx.emitInt(expr, x86FeatureFlagId(field_name));
+                }
                 if (ast.data(expr).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "Type_Info_Tag")) {
                     const value: u32 = typeInfoTagValue(field_name) orelse return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Type_Info_Tag value '{s}'", .{field_name});
                     const reg = proc.num_registers;
@@ -2721,6 +2724,21 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_arg, .dest = reg, .arg1 = index_reg, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "get_cpu_info")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_cpu_info expects no arguments", .{});
+                    return try ctx.emitInt(expr, 0);
+                }
+                if (std.mem.eql(u8, name, "check_feature") or std.mem.eql(u8, name, "has_feature")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects feature leaves and a feature flag", .{name});
+                    _ = try ctx.genExpr(@intCast(args[0]), diag);
+                    const feature_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .cpu_has_feature, .dest = reg, .arg1 = feature_reg, .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "compiler_read_file") or std.mem.eql(u8, name, "read_entire_file")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one path string", .{name});
@@ -2755,6 +2773,15 @@ const GenContext = struct {
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .make_directory, .dest = reg, .arg1 = path_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "delete_directory")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "delete_directory expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .delete_directory, .dest = reg, .arg1 = path_reg, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "file_exists")) {
@@ -4435,7 +4462,10 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "push_allocator") or
                     std.mem.eql(u8, name, "compiler_write_file") or
                     std.mem.eql(u8, name, "write_entire_file") or
+                    std.mem.eql(u8, name, "check_feature") or
+                    std.mem.eql(u8, name, "has_feature") or
                     std.mem.eql(u8, name, "make_directory_if_it_does_not_exist") or
+                    std.mem.eql(u8, name, "delete_directory") or
                     std.mem.eql(u8, name, "file_exists") or
                     std.mem.eql(u8, name, "file_set_position") or
                     std.mem.eql(u8, name, "file_write") or
@@ -5812,6 +5842,20 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
         }
     }
     return null;
+}
+
+fn x86FeatureFlagId(field_name: []const u8) u32 {
+    if (std.mem.eql(u8, field_name, "MMX")) return 1;
+    if (std.mem.eql(u8, field_name, "SSE")) return 2;
+    if (std.mem.eql(u8, field_name, "SSE2")) return 3;
+    if (std.mem.eql(u8, field_name, "SSE3")) return 4;
+    if (std.mem.eql(u8, field_name, "SSSE3")) return 5;
+    if (std.mem.eql(u8, field_name, "SSE4_1")) return 6;
+    if (std.mem.eql(u8, field_name, "SSE4_2")) return 7;
+    if (std.mem.eql(u8, field_name, "AVX")) return 8;
+    if (std.mem.eql(u8, field_name, "AVX2")) return 9;
+    if (std.mem.eql(u8, field_name, "AVX512F")) return 10;
+    return 0;
 }
 
 fn knownTokenTagValue(field_name: []const u8) ?u32 {

@@ -34,7 +34,10 @@ pub const Symbol = union(enum) {
     builtin_compiler_read_file,
     builtin_compiler_write_file,
     builtin_get_command_line_arguments,
+    builtin_get_cpu_info,
+    builtin_check_feature,
     builtin_make_directory_if_it_does_not_exist,
+    builtin_delete_directory,
     builtin_file_exists,
     builtin_read_entire_file,
     builtin_write_entire_file,
@@ -576,6 +579,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STDERR_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "File")) {
                         try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
+                        try r.symbols.put(allocator, "delete_directory", .builtin_delete_directory);
                         try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
                         try r.symbols.put(allocator, "write_entire_file", .builtin_write_entire_file);
                         try r.symbols.put(allocator, "read_entire_file", .builtin_read_entire_file);
@@ -585,10 +589,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.symbols.put(allocator, "file_set_position", .builtin_file_set_position);
                         try r.symbols.put(allocator, "file_write", .builtin_file_write);
                         try r.symbols.put(allocator, "file_read", .builtin_file_read);
-                        try putPlaceholders(&r, allocator, &.{ "delete_directory", "get_path_of_running_executable" });
+                        try putPlaceholders(&r, allocator, &.{"get_path_of_running_executable"});
                     } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
                         try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
-                        try putPlaceholders(&r, allocator, &.{"delete_directory"});
+                        try r.symbols.put(allocator, "delete_directory", .builtin_delete_directory);
                     } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
                         try putPlaceholders(&r, allocator, &.{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" });
                     } else if (std.mem.eql(u8, module_name, "Input")) {
@@ -616,7 +620,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "Pool") or std.mem.eql(u8, module_name, "Flat_Pool")) {
                         try putPlaceholders(&r, allocator, &.{ "get", "release", "reset", "pool_allocator_proc", "flat_pool_allocator_proc" });
                     } else if (std.mem.eql(u8, module_name, "Machine_X64")) {
-                        try putPlaceholders(&r, allocator, &.{ "get_cpu_info", "has_feature", "check_feature", "Feature", "x86_Feature_Flag" });
+                        try r.symbols.put(allocator, "get_cpu_info", .builtin_get_cpu_info);
+                        try r.symbols.put(allocator, "check_feature", .builtin_check_feature);
+                        try r.symbols.put(allocator, "has_feature", .builtin_check_feature);
+                        try r.putRealSymbol("Feature", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("x86_Feature_Flag", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         try putPlaceholders(&r, allocator, &.{ "Generate_Bindings_Options", "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH", "generate_bindings", "copy_file", "libpaths", "libnames", "include_paths", "source_files", "system_include_paths", "strip_flags", "header" });
                     } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
@@ -1145,7 +1153,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
                     .placeholder => try markImplicitPlaceholderUse(r, r.allocator, name),
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_make_directory_if_it_does_not_exist, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_get_cpu_info, .builtin_check_feature, .builtin_make_directory_if_it_does_not_exist, .builtin_delete_directory, .builtin_file_exists, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);

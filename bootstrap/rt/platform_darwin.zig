@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("fcntl.h");
+    @cInclude("dirent.h");
     @cInclude("unistd.h");
     @cInclude("sys/mman.h");
     @cInclude("sys/stat.h");
@@ -127,6 +128,10 @@ export fn oj_rt_mkdir(path_z: [*:0]const u8, mode: i32) i32 {
     return -err;
 }
 
+export fn oj_rt_delete_directory(path_z: [*:0]const u8) i32 {
+    return deleteDirectoryRecursive(path_z);
+}
+
 export fn oj_rt_mmap(len: usize) ?*anyopaque {
     if (len == 0) return null;
     const ptr = c.mmap(null, len, c.PROT_READ | c.PROT_WRITE, c.MAP_PRIVATE | c.MAP_ANON, -1, 0);
@@ -194,6 +199,59 @@ export fn oj_rt_to_calendar(low_ns: u64, timezone: i64, out: ?*OpenJaiCalendar) 
     return 0;
 }
 
+export fn oj_rt_cpu_has_feature(feature: i64) i32 {
+    _ = feature;
+    return 0;
+}
+
 fn errnoCode() i32 {
     return @intCast(std.posix.system._errno().*);
+}
+
+fn deleteDirectoryRecursive(path_z: [*:0]const u8) i32 {
+    var native: c.struct_stat = undefined;
+    if (c.lstat(path_z, &native) != 0) {
+        const err = errnoCode();
+        if (err == 2) return 0;
+        return -err;
+    }
+    if ((native.st_mode & c.S_IFMT) != c.S_IFDIR) return -20;
+
+    const dir = c.opendir(path_z) orelse return -errnoCode();
+    defer _ = c.closedir(dir);
+
+    while (true) {
+        const entry = c.readdir(dir) orelse break;
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&entry.*.d_name)));
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+
+        const child = joinPathZ(std.mem.span(path_z), name) orelse return -12;
+        defer std.heap.page_allocator.free(child);
+
+        var child_stat: c.struct_stat = undefined;
+        if (c.lstat(child.ptr, &child_stat) != 0) return -errnoCode();
+        if ((child_stat.st_mode & c.S_IFMT) == c.S_IFDIR) {
+            const rc = deleteDirectoryRecursive(child.ptr);
+            if (rc != 0) return rc;
+        } else if (c.unlink(child.ptr) != 0) {
+            return -errnoCode();
+        }
+    }
+
+    if (c.rmdir(path_z) == 0) return 0;
+    return -errnoCode();
+}
+
+fn joinPathZ(parent: []const u8, child: []const u8) ?[:0]u8 {
+    const needs_sep = parent.len != 0 and parent[parent.len - 1] != '/';
+    const sep_len: usize = if (needs_sep) 1 else 0;
+    const out = std.heap.page_allocator.allocSentinel(u8, parent.len + sep_len + child.len, 0) catch return null;
+    @memcpy(out[0..parent.len], parent);
+    var offset = parent.len;
+    if (needs_sep) {
+        out[offset] = '/';
+        offset += 1;
+    }
+    @memcpy(out[offset .. offset + child.len], child);
+    return out;
 }

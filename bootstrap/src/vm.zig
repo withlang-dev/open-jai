@@ -562,6 +562,10 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .string = try vm.renderCodeNode(node, diag) };
                 },
+                .cpu_has_feature => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM cpu_has_feature destination register out of range", .{});
+                    regs[inst.dest] = .{ .bool = false };
+                },
                 .load_ptr_string, .string_slice => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)});
@@ -576,7 +580,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .make_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
+                .make_directory, .delete_directory, .file_exists, .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
                 .string_builder_init => {
