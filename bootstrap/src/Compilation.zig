@@ -156,10 +156,7 @@ pub const Compilation = struct {
             if (!isExecutableRun(ast, decl)) continue;
             const value = try comp.executeRunCall(ast, typed, resolved, decl, ast.data(decl).lhs, diag);
             if (ast.tokens[ast.mainToken(decl)].tag == .directive_assert) continue;
-            switch (value) {
-                .void => {},
-                else => return diag.failAt(ast.tokens[ast.mainToken(decl)].start, "top-level statement #run must not return a value", .{}),
-            }
+            _ = value;
         }
     }
 
@@ -375,8 +372,7 @@ pub const Compilation = struct {
             return .{ .int = 0 };
         }
         if (std.mem.eql(u8, direct_name, "run_command")) {
-            for (call_args) |arg_idx| _ = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
-            return .{ .int = 0 };
+            return try comp.executeRunCommand(ast, typed, resolved, call_args, diag);
         }
         const proc_node = if (resolved.local_values.get(callee)) |local_decl| blk: {
             if (ast.tag(local_decl) == .proc_decl) break :blk local_decl;
@@ -457,6 +453,44 @@ pub const Compilation = struct {
         var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
         defer vm.deinit();
         return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
+    }
+
+    fn executeRunCommand(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, args: []const u32, diag: Diagnostic) !vm_mod.Value {
+        if (args.len == 0) return diag.failAt(0, "run_command expects at least one string argument", .{});
+
+        var command_args = std.ArrayList([]const u8).empty;
+        defer command_args.deinit(comp.allocator);
+        for (args) |arg_idx| {
+            const value = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
+            switch (value) {
+                .string => |text| try command_args.append(comp.allocator, text),
+                else => return diag.failAt(ast.tokens[ast.mainToken(@as(@import("Ast.zig").NodeIndex, @intCast(arg_idx)))].start, "run_command arguments must be strings", .{}),
+            }
+        }
+
+        var argv = std.ArrayList([]const u8).empty;
+        defer argv.deinit(comp.allocator);
+        if (command_args.items.len == 1) {
+            try argv.appendSlice(comp.allocator, &.{ "/bin/sh", "-c", command_args.items[0] });
+        } else {
+            try argv.appendSlice(comp.allocator, command_args.items);
+        }
+
+        const result = std.process.run(comp.allocator, comp.io, .{
+            .argv = argv.items,
+            .stderr_limit = .limited(64 * 1024),
+            .stdout_limit = .limited(64 * 1024),
+        }) catch |err| {
+            return diag.failAt(0, "run_command failed to start: {s}", .{@errorName(err)});
+        };
+        defer comp.allocator.free(result.stdout);
+        defer comp.allocator.free(result.stderr);
+        if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
+        if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
+        return .{ .int = switch (result.term) {
+            .exited => |code| code,
+            else => 1,
+        } };
     }
 
     fn recordNoResetGlobals(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, program: *const Bytecode.Program, vm: *vm_mod.VM, diag: Diagnostic) !void {

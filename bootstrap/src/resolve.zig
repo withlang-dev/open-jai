@@ -601,7 +601,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Process")) {
-                        try putPlaceholders(&r, allocator, &.{ "run_command", "read" });
+                        try r.putRealSymbol("run_command", .{ .const_value = @import("Ast.zig").null_node });
+                        try putPlaceholders(&r, allocator, &.{"read"});
                         for (&[_][]const u8{ "thread_is_done", "shutdown" }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
