@@ -864,6 +864,100 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 _ = c.LLVMBuildStore(env.builder, result, slot);
                 registers[inst.dest] = .{ .llvm_value = slot, .kind = .{ .pointer_addr = inst.dest } };
             },
+            .alloc_heap_reg => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend alloc_heap_reg register out of range", .{});
+                var args = [_]c.LLVMValueRef{try valueAsInt(env, registers[inst.arg1], diag)};
+                const result = c.LLVMBuildCall2(env.builder, env.alloc_fn_ty, env.alloc_fn, &args, args.len, "heap_ptr");
+                try setPointerResult(env, registers, inst.dest, result);
+            },
+            .alloc_heap_owned => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend alloc_heap_owned register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.llvm_i64, env.ptr_ty };
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_alloc_owned") orelse c.LLVMAddFunction(env.module, "__openjai_alloc_owned", fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try valueAsInt(env, registers[inst.arg1], diag),
+                    try pointerValue(env, registers[inst.arg2], diag, "owned allocator"),
+                };
+                try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "owned_heap_ptr"));
+            },
+            .allocator_proc_call => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend allocator_proc_call register out of range", .{});
+                if (inst.arg3 + 5 > env.program.call_args.items.len) return diag.failAt(0, "LLVM backend allocator proc argument table out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty, env.ptr_ty };
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_allocator_proc_call") orelse c.LLVMAddFunction(env.module, "__openjai_allocator_proc_call", fn_ty);
+                const mode_reg = env.program.call_args.items[inst.arg3];
+                const size_reg = env.program.call_args.items[inst.arg3 + 1];
+                const old_size_reg = env.program.call_args.items[inst.arg3 + 2];
+                const old_memory_reg = env.program.call_args.items[inst.arg3 + 3];
+                const data_reg = env.program.call_args.items[inst.arg3 + 4];
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "allocator proc base"),
+                    try valueAsInt(env, registers[mode_reg], diag),
+                    try valueAsInt(env, registers[size_reg], diag),
+                    try valueAsInt(env, registers[old_size_reg], diag),
+                    try pointerValue(env, registers[old_memory_reg], diag, "allocator old memory"),
+                    try pointerValue(env, registers[data_reg], diag, "allocator data"),
+                };
+                try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "allocator_proc_result"));
+            },
+            .allocator_owns => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend allocator_owns register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.ptr_ty };
+                const fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_allocator_owns") orelse c.LLVMAddFunction(env.module, "__openjai_allocator_owns", fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "allocator owns base"),
+                    try pointerValue(env, registers[inst.arg2], diag, "allocator owns memory"),
+                };
+                try setBoolResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "allocator_owns"));
+            },
+            .allocator_cap_flags => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend allocator_cap_flags register out of range", .{});
+                const params = [_]c.LLVMTypeRef{env.ptr_ty};
+                const fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_allocator_cap_flags") orelse c.LLVMAddFunction(env.module, "__openjai_allocator_cap_flags", fn_ty);
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "allocator capabilities")};
+                try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "allocator_caps"));
+            },
+            .allocator_cap_name => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend allocator_cap_name register out of range", .{});
+                const params = [_]c.LLVMTypeRef{env.ptr_ty};
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_allocator_cap_name") orelse c.LLVMAddFunction(env.module, "__openjai_allocator_cap_name", fn_ty);
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "allocator capability name")};
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "allocator_name"), .kind = .runtime_string };
+            },
+            .pool_get => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend pool_get register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_pool_get") orelse c.LLVMAddFunction(env.module, "__openjai_pool_get", fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "pool pointer"),
+                    try valueAsInt(env, registers[inst.arg2], diag),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg3, 0),
+                };
+                try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "pool_get"));
+            },
+            .pool_release, .pool_reset => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend pool release/reset register out of range", .{});
+                const params = [_]c.LLVMTypeRef{env.ptr_ty};
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_name = if (inst.opcode == .pool_release) "__openjai_pool_release" else "__openjai_pool_reset";
+                const fn_ref = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, fn_ty);
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "pool pointer")};
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .pool_bytes_left => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend pool_bytes_left register out of range", .{});
+                const params = [_]c.LLVMTypeRef{env.ptr_ty};
+                const fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_pool_bytes_left") orelse c.LLVMAddFunction(env.module, "__openjai_pool_bytes_left", fn_ty);
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "pool pointer")};
+                try setIntResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "pool_bytes_left"));
+            },
             .new_array => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend new_array destination register out of range", .{});
                 var args = [_]c.LLVMValueRef{

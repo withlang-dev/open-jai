@@ -410,6 +410,37 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
                     regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
                 },
+                .alloc_heap_reg, .alloc_heap_owned => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM allocator allocation register out of range", .{});
+                    const size = try registerInt(regs[inst.arg1], diag, "allocation size");
+                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@intCast(@max(size, 1))) };
+                },
+                .allocator_proc_call => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_proc_call destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = 0 };
+                },
+                .allocator_owns => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_owns destination register out of range", .{});
+                    regs[inst.dest] = .{ .bool = false };
+                },
+                .allocator_cap_flags => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_cap_flags destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = 8 };
+                },
+                .allocator_cap_name => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_cap_name destination register out of range", .{});
+                    regs[inst.dest] = .{ .string = "OpenJai allocator" };
+                },
+                .pool_get => {
+                    if (inst.dest >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM pool_get register out of range", .{});
+                    const size = try registerInt(regs[inst.arg2], diag, "pool allocation size");
+                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@intCast(@max(size, 1))) };
+                },
+                .pool_release, .pool_reset => {},
+                .pool_bytes_left => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM pool_bytes_left destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = 0 };
+                },
                 .load_ptr, .load_ptr_byte, .load_ptr_float => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
                     const ptr = try registerPointer(regs[inst.arg1], diag, "load_ptr");
@@ -1145,6 +1176,15 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .code_node, .code_nodes => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
+    };
+}
+
+fn registerInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !i64 {
+    return switch (value) {
+        .int => |v| v,
+        .bool => |v| if (v) 1 else 0,
+        .ptr => 1,
+        else => diag.failAt(0, "VM {s} requires an integer value", .{context}),
     };
 }
 

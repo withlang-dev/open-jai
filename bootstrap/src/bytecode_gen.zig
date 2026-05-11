@@ -12,6 +12,12 @@ const vm_mod = @import("vm.zig");
 
 const Resolved = @import("resolve.zig").Resolved;
 
+const allocator_proc_default: u32 = 1;
+const allocator_proc_pool: u32 = 2;
+const allocator_proc_flat_pool: u32 = 3;
+const allocator_proc_rpmalloc: u32 = 4;
+const allocator_cap_is_this_yours: u32 = 1 << 3;
+
 pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typed, resolved: *const Resolved, diag: Diagnostic) !Bytecode.Program {
     var program = Bytecode.Program.init(allocator);
     errdefer program.deinit();
@@ -589,7 +595,8 @@ const GenContext = struct {
             return result;
         };
         const params = ast.extraSlice(sig.params_extra);
-        if (args.len > params.len) return null;
+        const has_variadic = params.len != 0 and ast.data(@as(NodeIndex, @intCast(params[params.len - 1]))).rhs == 1;
+        if (args.len > params.len and !has_variadic) return null;
         const allocator = ctx.program.allocator;
         var param_args = try allocator.alloc(NodeIndex, params.len);
         defer allocator.free(param_args);
@@ -611,6 +618,10 @@ const GenContext = struct {
                 if (!matched) return null;
             } else {
                 while (positional_index < params.len and param_args[positional_index] != @import("Ast.zig").null_node) positional_index += 1;
+                if (has_variadic and positional_index >= params.len - 1) {
+                    positional_index += 1;
+                    continue;
+                }
                 if (positional_index >= params.len) return null;
                 param_args[positional_index] = arg;
                 positional_index += 1;
@@ -623,6 +634,36 @@ const GenContext = struct {
         defer ctx.local_code_bindings.shrinkRetainingCapacity(code_binding_base);
         for (params, 0..) |param_idx, i| {
             const param: NodeIndex = @intCast(param_idx);
+            if (has_variadic and i == params.len - 1) {
+                const elem_text = if (ast.data(param).lhs != @import("Ast.zig").null_node) ctx.nodeSource(ast.data(param).lhs) else "Any";
+                const elem_size = try typeTextSize(ctx, elem_text, diag);
+                const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_text, diag);
+                const array_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .new_array, .dest = array_reg, .arg1 = 0, .arg2 = @intCast(@max(elem_size, 1)), .arg3 = 8, .source_node = call_expr });
+                const slot_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = slot_reg, .arg1 = 8, .source_node = call_expr });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = slot_reg, .arg1 = array_reg, .source_node = call_expr });
+                for (args[i..]) |var_arg_idx| {
+                    const item_reg = try genCallArg(ctx, @intCast(var_arg_idx), diag);
+                    const added_reg = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_add, .dest = added_reg, .arg1 = slot_reg, .arg2 = item_reg, .arg3 = @intCast(@max(elem_size, 1)), .arg4 = if (elem_is_struct) 1 else 0, .source_node = call_expr });
+                }
+                const final_array = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = final_array, .arg1 = slot_reg, .source_node = call_expr });
+                const old = ctx.decl_registers.get(param);
+                try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
+                try ctx.decl_registers.put(allocator, param, final_array);
+                const array_type_text = if (std.mem.eql(u8, firstTypeWord(elem_text), "Allocator"))
+                    "[..]Allocator"
+                else
+                    try std.fmt.allocPrint(ctx.program.allocator, "[..]{s}", .{elem_text});
+                try ctx.type_overrides.put(ctx.program.allocator, param, array_type_text);
+                continue;
+            }
             const source = if (param_args[i] != @import("Ast.zig").null_node)
                 param_args[i]
             else if (ast.data(param).rhs != @import("Ast.zig").null_node)
@@ -1254,6 +1295,32 @@ const GenContext = struct {
         return true;
     }
 
+    fn tryEmitAllocatorCapabilitiesMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        const children = ast.extraSlice(ast.data(stmt).lhs);
+        if (children.len != 2) return false;
+        const first: NodeIndex = @intCast(children[0]);
+        const rhs = stmtInitOrAssignRhs(ast, first) orelse return false;
+        if (ast.tag(rhs) != .call_expr) return false;
+        const callee = ast.data(rhs).lhs;
+        if (ast.tag(callee) != .identifier or !std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "get_capabilities")) return false;
+        const second: NodeIndex = @intCast(children[1]);
+        if ((stmtInitOrAssignRhs(ast, second) orelse return false) != rhs) return false;
+        const args = ast.extraSlice(ast.data(rhs).rhs);
+        if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(rhs)].start, "get_capabilities expects one Allocator", .{});
+
+        const allocator_reg = try ctx.genExpr(@intCast(args[0]), diag);
+        const flags_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const name_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .allocator_cap_flags, .dest = flags_reg, .arg1 = allocator_reg, .source_node = rhs });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .allocator_cap_name, .dest = name_reg, .arg1 = allocator_reg, .source_node = rhs });
+        try ctx.bindStmtTarget(first, flags_reg, diag);
+        try ctx.bindStmtTarget(second, name_reg, diag);
+        return true;
+    }
+
     fn bindStmtTarget(ctx: *GenContext, stmt: NodeIndex, reg: Bytecode.Register, diag: Diagnostic) !void {
         const ast = ctx.ast;
         switch (ast.tag(stmt)) {
@@ -1281,6 +1348,7 @@ const GenContext = struct {
             },
             .stmt_list => {
                 if (try ctx.tryEmitCompilerGetNodesMultiReturn(stmt, diag)) return;
+                if (try ctx.tryEmitAllocatorCapabilitiesMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitStringMultiReturn(stmt, diag)) return;
                 var is_all_assign = true;
                 var all_assign_targets_are_locals = true;
@@ -1345,8 +1413,13 @@ const GenContext = struct {
                 if (ast.tag(lhs) == .index_expr) {
                     const addr = try genAddressOfLvalue(ctx, lhs, diag);
                     const base_text = typeTextForExpr(ctx, ast.data(lhs).lhs, diag);
-                    const elem_text = if (base_text) |text| dynamicArrayElementText(text) orelse staticArrayElementText(text) else null;
+                    const elem_text = if (base_text) |text|
+                        dynamicArrayElementText(text) orelse staticArrayElementText(text) orelse if (std.mem.startsWith(u8, std.mem.trim(u8, text, " \t\r\n"), "*")) stripPointerText(text) else null
+                    else
+                        null;
                     const store_opcode: Bytecode.Opcode = if (base_text != null and std.mem.eql(u8, firstTypeWord(base_text.?), "string"))
+                        .store_ptr_byte
+                    else if (elem_text != null and try typeTextSize(ctx, elem_text.?, diag) == 1)
                         .store_ptr_byte
                     else if (elem_text != null and (std.mem.eql(u8, firstTypeWord(elem_text.?), "float") or std.mem.eql(u8, firstTypeWord(elem_text.?), "float32") or std.mem.eql(u8, firstTypeWord(elem_text.?), "float64")))
                         .store_ptr_float
@@ -2074,8 +2147,8 @@ const GenContext = struct {
                         if (ast.data(expr).rhs == @import("Ast.zig").null_node) break :blk .int_trunc_cast;
                         const raw_target_ty = ast.data(expr).rhs;
                         const target_ty: u32 = raw_target_ty & 0x7fffffff;
-                        if (ast.tag(target_ty) == .type_expr and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(target_ty)), "bool")) break :blk .int_to_bool_cast;
-                        if (ast.tag(target_ty) == .type_expr and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(target_ty)), "float")) break :blk .float_cast;
+                        if ((ast.tag(target_ty) == .type_expr or ast.tag(target_ty) == .identifier) and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(target_ty)), "bool")) break :blk .int_to_bool_cast;
+                        if ((ast.tag(target_ty) == .type_expr or ast.tag(target_ty) == .identifier) and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(target_ty)), "float")) break :blk .float_cast;
                         break :blk .int_trunc_cast;
                     },
                     else => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "unsupported unary operator in bytecode generator", .{}),
@@ -2094,6 +2167,8 @@ const GenContext = struct {
                 return reg;
             },
             .identifier => {
+                const identifier_name = ast.tokenSlice(ast.mainToken(expr));
+                if (allocatorProcIdByName(identifier_name)) |proc_id| return try ctx.emitInt(expr, proc_id);
                 if (ctx.resolved.local_values.get(expr)) |decl| {
                     if (decl == @import("Ast.zig").null_node) {
                         const unresolved_name = ast.tokenSlice(ast.mainToken(expr));
@@ -2153,6 +2228,7 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "OS")) {
                     return try ctx.emitString(expr, hostOsName());
                 }
+                if (allocatorProcIdByName(name)) |proc_id| return try ctx.emitInt(expr, proc_id);
                 if (std.mem.eql(u8, name, "context")) return try ctx.genTypedPlaceholderValue(expr, diag);
                 if (std.mem.eql(u8, name, "STDIN_FILENO")) return try ctx.emitInt(expr, 0);
                 if (std.mem.eql(u8, name, "STDOUT_FILENO")) return try ctx.emitInt(expr, 1);
@@ -2307,6 +2383,17 @@ const GenContext = struct {
                 if (payload.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "typed aggregate literal is malformed", .{});
                 const type_node: NodeIndex = @intCast(payload[0]);
                 const type_text = std.mem.trim(u8, ctx.nodeSource(type_node), " \t\r\n");
+                if (std.mem.eql(u8, firstTypeWord(type_text), "Allocator")) {
+                    const elems = ast.extraSlice(payload[1]);
+                    const proc_id = if (elems.len > 0) try ctx.genExpr(@intCast(elems[0]), diag) else try ctx.emitInt(expr, allocator_proc_default);
+                    const data = if (elems.len > 1) try ctx.genExpr(@intCast(elems[1]), diag) else blk: {
+                        const data_reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_null_ptr, .dest = data_reg, .source_node = expr });
+                        break :blk data_reg;
+                    };
+                    return try ctx.emitAllocatorValue(expr, proc_id, data);
+                }
                 if (!(try typeTextIsEmbeddedStruct(ctx, type_text, diag))) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "typed aggregate literal currently requires a concrete struct type", .{});
                 const reg = try ctx.genDefaultValueFromText(type_text, expr, diag);
                 try ctx.emitAggregateToStruct(expr, reg, type_text, expr, diag);
@@ -2344,6 +2431,11 @@ const GenContext = struct {
                 const field_name = ast.tokenSlice(ast.data(expr).rhs);
                 if (ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "x86_Feature_Flag")) {
                     return try ctx.emitInt(expr, x86FeatureFlagId(field_name));
+                }
+                if (ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "context")) {
+                    if (std.mem.eql(u8, field_name, "default_allocator") or std.mem.eql(u8, field_name, "allocator")) {
+                        return try ctx.emitDefaultAllocatorValue(expr);
+                    }
                 }
                 if (ast.data(expr).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "Type_Info_Tag")) {
                     const value: u32 = typeInfoTagValue(field_name) orelse return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Type_Info_Tag value '{s}'", .{field_name});
@@ -2392,6 +2484,15 @@ const GenContext = struct {
                     if (std.mem.eql(u8, field_name, "data")) return base_reg;
                 }
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
+                    if (std.mem.eql(u8, firstTypeWord(base_text), "Pool")) {
+                        if (std.mem.eql(u8, field_name, "memblock_size")) return try ctx.emitInt(expr, 65536);
+                        if (std.mem.eql(u8, field_name, "bytes_left")) {
+                            const reg = proc.num_registers;
+                            proc.num_registers += 1;
+                            try proc.instructions.append(program.allocator, .{ .opcode = .pool_bytes_left, .dest = reg, .arg1 = base_reg, .source_node = expr });
+                            return reg;
+                        }
+                    }
                     if (std.mem.eql(u8, firstTypeWord(base_text), "string")) {
                         if (std.mem.eql(u8, field_name, "count")) {
                             const reg = proc.num_registers;
@@ -2585,8 +2686,50 @@ const GenContext = struct {
                     return try ctx.genTypedPlaceholderValue(expr, diag);
                 }
                 if (ast.tag(callee) == .field_access) {
-                    _ = try ctx.genExpr(ast.data(callee).lhs, diag);
                     const args = ast.extraSlice(ast.data(expr).rhs);
+                    const field_name = ast.tokenSlice(ast.data(callee).rhs);
+                    if (std.mem.eql(u8, field_name, "proc")) {
+                        const allocator_reg = try ctx.genExpr(ast.data(callee).lhs, diag);
+                        if (args.len >= 1) {
+                            const mode_arg: NodeIndex = @intCast(args[0]);
+                            if (ast.tag(mode_arg) == .field_access and ast.data(mode_arg).lhs == @import("Ast.zig").null_node) {
+                                const mode_name = ast.tokenSlice(ast.data(mode_arg).rhs);
+                                if (std.mem.eql(u8, mode_name, "STARTUP")) {
+                                    for (args[1..]) |arg_idx| _ = try genCallArg(ctx, @intCast(arg_idx), diag);
+                                    const reg = proc.num_registers;
+                                    proc.num_registers += 1;
+                                    try proc.instructions.append(program.allocator, .{ .opcode = .load_null_ptr, .dest = reg, .source_node = expr });
+                                    return reg;
+                                }
+                                if (std.mem.eql(u8, mode_name, "IS_THIS_YOURS")) {
+                                    if (args.len < 4) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Allocator IS_THIS_YOURS call expects old memory as the fourth argument", .{});
+                                    _ = try genCallArg(ctx, @intCast(args[1]), diag);
+                                    _ = try genCallArg(ctx, @intCast(args[2]), diag);
+                                    const memory_reg = try genCallArg(ctx, @intCast(args[3]), diag);
+                                    if (args.len > 4) _ = try genCallArg(ctx, @intCast(args[4]), diag);
+                                    const reg = proc.num_registers;
+                                    proc.num_registers += 1;
+                                    try proc.instructions.append(program.allocator, .{ .opcode = .allocator_owns, .dest = reg, .arg1 = allocator_reg, .arg2 = memory_reg, .source_node = expr });
+                                    return reg;
+                                }
+                            }
+                        }
+                        var arg_regs = std.ArrayList(Bytecode.Register).empty;
+                        defer arg_regs.deinit(program.allocator);
+                        for (args) |arg_idx| {
+                            const arg: NodeIndex = @intCast(arg_idx);
+                            if (arg_regs.items.len == 5) break;
+                            const source = if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
+                            try arg_regs.append(program.allocator, try ctx.genExpr(source, diag));
+                        }
+                        while (arg_regs.items.len < 5) try arg_regs.append(program.allocator, try ctx.emitInt(expr, 0));
+                        const arg_start = try program.addCallArgs(arg_regs.items);
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .allocator_proc_call, .dest = reg, .arg1 = allocator_reg, .arg2 = @intCast(arg_regs.items.len), .arg3 = arg_start, .source_node = expr });
+                        return reg;
+                    }
+                    _ = try ctx.genExpr(ast.data(callee).lhs, diag);
                     for (args) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
                         if (ast.tag(arg) == .assign_stmt) {
@@ -2658,10 +2801,24 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "New")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "New expects one type argument", .{});
-                    for (args[1..]) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+                    var allocator_reg: ?Bytecode.Register = null;
+                    for (args[1..]) |arg_idx| {
+                        const arg: NodeIndex = @intCast(arg_idx);
+                        if (ast.tag(arg) == .assign_stmt and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(arg).lhs)), "allocator")) {
+                            allocator_reg = try ctx.genExpr(ast.data(arg).rhs, diag);
+                        } else {
+                            _ = try genCallArg(ctx, arg, diag);
+                        }
+                    }
+                    const elem_size = try typeTextSize(ctx, ctx.nodeSource(@intCast(args[0])), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = 8, .source_node = expr });
+                    if (allocator_reg) |alloc_reg| {
+                        const size_reg = try ctx.emitInt(expr, @intCast(@max(elem_size, 1)));
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = alloc_reg, .source_node = expr });
+                    } else {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = @intCast(@max(elem_size, 1)), .source_node = expr });
+                    }
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "NewArray")) {
@@ -2700,11 +2857,69 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "alloc")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "alloc expects one byte-count argument", .{});
-                    for (args[1..]) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+                    var allocator_reg: ?Bytecode.Register = null;
+                    for (args[1..]) |arg_idx| {
+                        const arg: NodeIndex = @intCast(arg_idx);
+                        if (ast.tag(arg) == .assign_stmt and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(arg).lhs)), "allocator")) {
+                            allocator_reg = try ctx.genExpr(ast.data(arg).rhs, diag);
+                        } else {
+                            _ = try genCallArg(ctx, arg, diag);
+                        }
+                    }
                     const size_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = size_reg, .source_node = expr });
+                    if (allocator_reg) |alloc_reg| {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = alloc_reg, .source_node = expr });
+                    } else {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_reg, .dest = reg, .arg1 = size_reg, .source_node = expr });
+                    }
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "get")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get expects a pool pointer and size", .{});
+                    const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                    const size_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const kind: u32 = if (typeTextForExpr(ctx, @intCast(args[0]), diag)) |arg_type|
+                        if (std.mem.eql(u8, firstTypeWord(stripPointerText(arg_type)), "Flat_Pool")) 1 else 0
+                    else
+                        0;
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .pool_get, .dest = reg, .arg1 = pool_ptr, .arg2 = size_reg, .arg3 = kind, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "release") or std.mem.eql(u8, name, "fini")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects a pool pointer", .{name});
+                    const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .pool_release, .arg1 = pool_ptr, .source_node = expr });
+                    return pool_ptr;
+                }
+                if (std.mem.eql(u8, name, "reset")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "reset expects a pool pointer", .{});
+                    const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .source_node = expr });
+                    for (args[1..]) |arg_idx| {
+                        const arg: NodeIndex = @intCast(arg_idx);
+                        if (ast.tag(arg) == .assign_stmt) _ = try ctx.genExpr(ast.data(arg).rhs, diag) else _ = try ctx.genExpr(arg, diag);
+                    }
+                    return pool_ptr;
+                }
+                if (std.mem.eql(u8, name, "set_allocators")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    for (args) |arg_idx| _ = try ctx.genExpr(@intCast(arg_idx), diag);
+                    return try ctx.emitInt(expr, 0);
+                }
+                if (std.mem.eql(u8, name, "get_capabilities")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_capabilities expects one Allocator", .{});
+                    const allocator_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .allocator_cap_flags, .dest = reg, .arg1 = allocator_reg, .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "compiler_arg_count")) {
@@ -3556,6 +3771,26 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitAllocatorValue(ctx: *GenContext, source_node: NodeIndex, proc_id: Bytecode.Register, data: Bytecode.Register) !Bytecode.Register {
+        const reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = 16, .source_node = source_node });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = reg, .arg1 = proc_id, .source_node = source_node });
+        const data_addr = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = data_addr, .arg1 = reg, .arg2 = 8, .source_node = source_node });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = data_addr, .arg1 = data, .source_node = source_node });
+        return reg;
+    }
+
+    fn emitDefaultAllocatorValue(ctx: *GenContext, source_node: NodeIndex) !Bytecode.Register {
+        const proc_id = try ctx.emitInt(source_node, allocator_proc_default);
+        const data = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_null_ptr, .dest = data, .source_node = source_node });
+        return try ctx.emitAllocatorValue(source_node, proc_id, data);
+    }
+
     fn emitString(ctx: *GenContext, source_node: NodeIndex, value: []const u8) !Bytecode.Register {
         const string_idx = try ctx.program.addString(value);
         const reg = ctx.proc.num_registers;
@@ -3866,6 +4101,7 @@ const GenContext = struct {
         if (ast.tag(type_expr) != .type_expr and ast.tag(type_expr) != .identifier) return ctx.genTypedPlaceholderValue(source_node, diag);
         const type_name = ast.tokenSlice(ast.mainToken(type_expr));
         if (ctx.polymorph_types.get(type_name)) |actual_type| return ctx.genDefaultValueFromText(actual_type, source_node, diag);
+        if (std.mem.eql(u8, type_name, "Allocator")) return try ctx.emitDefaultAllocatorValue(source_node);
         const reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
         if (std.mem.eql(u8, type_name, "string")) {
@@ -3894,6 +4130,7 @@ const GenContext = struct {
 
     fn genDefaultValueFromText(ctx: *GenContext, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const type_text = std.mem.trim(u8, raw_type, " \t\r\n");
+        if (std.mem.eql(u8, firstTypeWord(type_text), "Allocator")) return try ctx.emitDefaultAllocatorValue(source_node);
         const reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
         if (try typeTextIsEmbeddedStruct(ctx, type_text, diag)) {
@@ -4329,6 +4566,23 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             if (staticArrayElementText(base_ty) != null) {
                 return try ctx.emitStaticArrayElementAddress(base, ast.data(expr).rhs, base_ty, expr, diag);
             }
+            if (std.mem.startsWith(u8, std.mem.trim(u8, base_ty, " \t\r\n"), "*")) {
+                const elem_ty = stripPointerText(base_ty);
+                const base_reg = try ctx.genExpr(base, diag);
+                const index_reg = try ctx.genExpr(ast.data(expr).rhs, diag);
+                const elem_size = try typeTextSize(ctx, elem_ty, diag);
+                const byte_index = if (elem_size == 1) index_reg else blk: {
+                    const size_reg = try ctx.emitInt(expr, @intCast(elem_size));
+                    const scaled = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .mul_int, .dest = scaled, .arg1 = index_reg, .arg2 = size_reg, .source_node = expr });
+                    break :blk scaled;
+                };
+                const addr = proc.num_registers;
+                proc.num_registers += 1;
+                try proc.instructions.append(program.allocator, .{ .opcode = .ptr_offset_reg, .dest = addr, .arg1 = base_reg, .arg2 = byte_index, .source_node = expr });
+                return addr;
+            }
             const elem_ty = dynamicArrayElementText(base_ty) orelse return ctx.genTypedPlaceholderValue(expr, diag);
             const base_reg = try ctx.genExpr(base, diag);
             const index_reg = try ctx.genExpr(ast.data(expr).rhs, diag);
@@ -4397,6 +4651,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
         .index_expr => {
             const base_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
             if (std.mem.eql(u8, firstTypeWord(base_ty), "string")) return "u8";
+            if (std.mem.startsWith(u8, std.mem.trim(u8, base_ty, " \t\r\n"), "*")) return stripPointerText(base_ty);
             return dynamicArrayElementText(base_ty) orelse staticArrayElementText(base_ty);
         },
         .unary_expr => {
@@ -4700,6 +4955,10 @@ fn typeTextIsScalarComparable(raw: []const u8) bool {
 fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) !?FieldInfo {
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return null;
+    if (std.mem.eql(u8, type_name, "Allocator")) {
+        if (std.mem.eql(u8, field_name, "proc")) return .{ .offset = 0, .type_text = "s64" };
+        if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*void" };
+    }
     if (std.mem.eql(u8, type_name, "string")) {
         if (std.mem.eql(u8, field_name, "count")) return .{ .offset = 0, .type_text = "int" };
         if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*u8" };
@@ -4717,6 +4976,7 @@ fn typeTextIsStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !b
     _ = diag;
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return false;
+    if (std.mem.eql(u8, type_name, "Allocator") or std.mem.eql(u8, type_name, "Pool") or std.mem.eql(u8, type_name, "Flat_Pool")) return true;
     return (try structTypeNodeByName(ctx, type_name)) != null;
 }
 
@@ -5816,6 +6076,11 @@ fn lastWord(text: []const u8) []const u8 {
 fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) anyerror!?u32 {
     _ = diag;
     if (knownTokenTagValue(field_name)) |value| return value;
+    if (std.mem.eql(u8, field_name, "STARTUP")) return 0;
+    if (std.mem.eql(u8, field_name, "ALLOCATE")) return 1;
+    if (std.mem.eql(u8, field_name, "RESIZE")) return 2;
+    if (std.mem.eql(u8, field_name, "FREE")) return 3;
+    if (std.mem.eql(u8, field_name, "IS_THIS_YOURS")) return allocator_cap_is_this_yours;
     for (ctx.ast.node_tags.items, 0..) |tag, node_index| {
         if (tag != .enum_type) continue;
         var tok = ctx.ast.mainToken(@intCast(node_index));
@@ -5841,6 +6106,13 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
             }
         }
     }
+    return null;
+}
+
+fn allocatorProcIdByName(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "pool_allocator_proc")) return allocator_proc_pool;
+    if (std.mem.eql(u8, name, "flat_pool_allocator_proc")) return allocator_proc_flat_pool;
+    if (std.mem.eql(u8, name, "rpmalloc_allocator_proc")) return allocator_proc_rpmalloc;
     return null;
 }
 
@@ -5885,6 +6157,8 @@ fn typeTextSize(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerr
     }
     const name = firstTypeWord(ty);
     if (ctx.polymorph_types.get(name)) |actual_type| return try typeTextSize(ctx, actual_type, diag);
+    if (std.mem.eql(u8, name, "Allocator")) return 16;
+    if (std.mem.eql(u8, name, "Pool") or std.mem.eql(u8, name, "Flat_Pool")) return 8;
     if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u32")) return 4;
     if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "bool")) return 1;
     if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 2;

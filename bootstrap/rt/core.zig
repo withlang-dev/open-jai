@@ -39,10 +39,22 @@ const RuntimeAllocationHeader = extern struct {
     mapped_addr: usize,
     mapped_len: usize,
     requested_len: usize,
+    owner_proc: i64,
+    owner_data: usize,
+    default_alias: usize,
 };
 
 const runtime_allocation_magic = 0x4f50454e4a414941;
 const runtime_allocation_alignment = 16;
+const allocator_proc_default: i64 = 1;
+const allocator_proc_pool: i64 = 2;
+const allocator_proc_flat_pool: i64 = 3;
+const allocator_proc_rpmalloc: i64 = 4;
+const allocator_cap_is_this_yours: i64 = 1 << 3;
+const allocator_mode_startup: i64 = 0;
+const allocator_mode_allocate: i64 = 1;
+const allocator_mode_resize: i64 = 2;
+const allocator_mode_free: i64 = 3;
 
 var runtime_argc: i32 = 0;
 var runtime_argv: ?[*]?[*:0]const u8 = null;
@@ -167,9 +179,94 @@ export fn __openjai_print_type(type_id: u64) void {
 }
 
 export fn __openjai_alloc(size: usize) ?*anyopaque {
-    const ptr = rtAlloc(size);
+    const ptr = rtAllocOwned(size, allocator_proc_default, 0, false);
     if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
     return ptr;
+}
+
+export fn __openjai_alloc_owned(size: usize, allocator_raw: ?*OpenJaiAllocator) ?*anyopaque {
+    const allocator = allocator_raw orelse return __openjai_alloc(size);
+    const owner_data = if (allocator.data) |data| @intFromPtr(data) else 0;
+    const ptr = rtAllocOwned(size, allocator.proc, owner_data, allocator.proc == allocator_proc_pool);
+    if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+    return ptr;
+}
+
+export fn __openjai_allocator_proc_call(allocator_raw: ?*OpenJaiAllocator, mode: i64, size: i64, old_size: i64, old_memory: ?*anyopaque, allocator_data: ?*anyopaque) ?*anyopaque {
+    const allocator = allocator_raw orelse return null;
+    const owner_data = if (allocator_data) |data| @intFromPtr(data) else if (allocator.data) |data| @intFromPtr(data) else 0;
+    switch (mode) {
+        allocator_mode_startup => return null,
+        allocator_mode_allocate => return __openjai_alloc_owned(@intCast(@max(size, 0)), allocator),
+        allocator_mode_resize => return rtReallocOwned(old_memory, @intCast(@max(old_size, 0)), @intCast(@max(size, 0)), allocator.proc, owner_data, allocator.proc == allocator_proc_pool),
+        allocator_mode_free => {
+            rtFree(old_memory);
+            return null;
+        },
+        allocator_cap_is_this_yours => {
+            if (old_memory) |ptr| {
+                if (findAllocationHeader(ptr)) |header| {
+                    const owns_exact = header.owner_proc == allocator.proc and (owner_data == 0 or header.owner_data == owner_data);
+                    const owns_as_backing = allocator.proc == allocator_proc_default and header.default_alias != 0;
+                    return @ptrFromInt(if (owns_exact or owns_as_backing) @as(usize, 1) else @as(usize, 0));
+                }
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+export fn __openjai_allocator_owns(allocator_raw: ?*OpenJaiAllocator, memory: ?*anyopaque) bool {
+    const allocator = allocator_raw orelse return false;
+    const ptr = memory orelse return false;
+    const header = findAllocationHeader(ptr) orelse return false;
+    const owner_data = if (allocator.data) |data| @intFromPtr(data) else 0;
+    if (header.owner_proc == allocator.proc and (owner_data == 0 or header.owner_data == owner_data)) return true;
+    return allocator.proc == allocator_proc_default and header.default_alias != 0;
+}
+
+export fn __openjai_allocator_cap_flags(allocator_raw: ?*OpenJaiAllocator) i64 {
+    _ = allocator_raw;
+    return allocator_cap_is_this_yours;
+}
+
+export fn __openjai_allocator_cap_name(allocator_raw: ?*OpenJaiAllocator) ?*OpenJaiRuntimeString {
+    const proc_id = if (allocator_raw) |allocator| allocator.proc else allocator_proc_default;
+    return makeRuntimeString(switch (proc_id) {
+        allocator_proc_pool => "Pool allocator",
+        allocator_proc_flat_pool => "Flat_Pool allocator",
+        allocator_proc_rpmalloc => "rpmalloc allocator",
+        else => "Default allocator",
+    });
+}
+
+export fn __openjai_pool_get(pool: ?*anyopaque, size_raw: i64, kind: i64) ?*anyopaque {
+    const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
+    const state = ensurePoolState(key) orelse return null;
+    const size: usize = @intCast(@max(size_raw, 0));
+    const owner = if (kind == 1) allocator_proc_flat_pool else allocator_proc_pool;
+    const ptr = rtAllocOwned(size, owner, key, kind != 1);
+    if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+    const consumed: i64 = @intCast(alignForward(size + 8, 8));
+    if (state.bytes_left <= 0) state.bytes_left = 65536;
+    state.bytes_left = @max(state.bytes_left - consumed, 0);
+    return ptr;
+}
+
+export fn __openjai_pool_release(pool: ?*anyopaque) void {
+    const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
+    if (findPoolState(key)) |state| state.bytes_left = 0;
+}
+
+export fn __openjai_pool_reset(pool: ?*anyopaque) void {
+    const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
+    if (findPoolState(key)) |state| state.bytes_left = 65536;
+}
+
+export fn __openjai_pool_bytes_left(pool: ?*anyopaque) i64 {
+    const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
+    return if (findPoolState(key)) |state| state.bytes_left else 0;
 }
 
 export fn __openjai_realloc(ptr: ?*anyopaque, old_size: usize, new_size: usize) ?*anyopaque {
@@ -247,6 +344,19 @@ const OpenJaiStringBuilder = extern struct {
 const OpenJaiFile = extern struct {
     fd: i32,
 };
+
+const OpenJaiAllocator = extern struct {
+    proc: i64,
+    data: ?*anyopaque,
+};
+
+const OpenJaiPoolState = extern struct {
+    key: usize,
+    bytes_left: i64,
+    next: ?*OpenJaiPoolState,
+};
+
+var pool_states: ?*OpenJaiPoolState = null;
 
 fn makeRuntimeString(bytes: []const u8) ?*OpenJaiRuntimeString {
     const header_raw = rtAlloc(@sizeOf(OpenJaiRuntimeString)) orelse return null;
@@ -887,7 +997,15 @@ fn rtAlloc(size: usize) ?*anyopaque {
     return rtAllocAligned(size, runtime_allocation_alignment);
 }
 
+fn rtAllocOwned(size: usize, owner_proc: i64, owner_data: usize, default_alias: bool) ?*anyopaque {
+    return rtAllocAlignedOwned(size, runtime_allocation_alignment, owner_proc, owner_data, default_alias);
+}
+
 fn rtAllocAligned(size: usize, alignment: usize) ?*anyopaque {
+    return rtAllocAlignedOwned(size, alignment, allocator_proc_default, 0, false);
+}
+
+fn rtAllocAlignedOwned(size: usize, alignment: usize, owner_proc: i64, owner_data: usize, default_alias: bool) ?*anyopaque {
     const requested_len = @max(size, 1);
     const requested_alignment = normalizeAlignment(alignment);
     const header_len = allocationHeaderLen();
@@ -902,22 +1020,47 @@ fn rtAllocAligned(size: usize, alignment: usize) ?*anyopaque {
         .mapped_addr = raw_addr,
         .mapped_len = mapped_len,
         .requested_len = requested_len,
+        .owner_proc = owner_proc,
+        .owner_data = owner_data,
+        .default_alias = if (default_alias) 1 else 0,
     };
     return @ptrFromInt(data_addr);
 }
 
 fn rtRealloc(ptr: ?*anyopaque, old_size: usize, new_size: usize) ?*anyopaque {
-    const old = ptr orelse return rtAlloc(new_size);
+    return rtReallocOwned(ptr, old_size, new_size, allocator_proc_default, 0, false);
+}
+
+fn rtReallocOwned(ptr: ?*anyopaque, old_size: usize, new_size: usize, owner_proc: i64, owner_data: usize, default_alias: bool) ?*anyopaque {
+    const old = ptr orelse return rtAllocOwned(new_size, owner_proc, owner_data, default_alias);
     if (new_size == 0) {
         rtFree(old);
         return null;
     }
     const header = allocationHeader(old);
     const preserved_len = @min(@min(header.requested_len, old_size), new_size);
-    const new_ptr = rtAlloc(new_size) orelse return null;
+    const new_ptr = rtAllocOwned(new_size, owner_proc, owner_data, default_alias) orelse return null;
     @memcpy(@as([*]u8, @ptrCast(new_ptr))[0..preserved_len], @as([*]const u8, @ptrCast(old))[0..preserved_len]);
     rtFree(old);
     return new_ptr;
+}
+
+fn findPoolState(key: usize) ?*OpenJaiPoolState {
+    var cursor = pool_states;
+    while (cursor) |state| {
+        if (state.key == key) return state;
+        cursor = state.next;
+    }
+    return null;
+}
+
+fn ensurePoolState(key: usize) ?*OpenJaiPoolState {
+    if (findPoolState(key)) |state| return state;
+    const raw = rtAlloc(@sizeOf(OpenJaiPoolState)) orelse return null;
+    const state: *OpenJaiPoolState = @ptrCast(@alignCast(raw));
+    state.* = .{ .key = key, .bytes_left = 0, .next = pool_states };
+    pool_states = state;
+    return state;
 }
 
 fn rtFree(ptr: ?*anyopaque) void {

@@ -617,8 +617,24 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try putPlaceholders(&r, allocator, &.{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" });
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
                         try putPlaceholders(&r, allocator, &.{"table_add"});
-                    } else if (std.mem.eql(u8, module_name, "Pool") or std.mem.eql(u8, module_name, "Flat_Pool")) {
-                        try putPlaceholders(&r, allocator, &.{ "get", "release", "reset", "pool_allocator_proc", "flat_pool_allocator_proc" });
+                    } else if (std.mem.eql(u8, module_name, "Pool")) {
+                        try r.putRealSymbol("Pool", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("get", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("release", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("reset", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("set_allocators", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("pool_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
+                    } else if (std.mem.eql(u8, module_name, "Flat_Pool")) {
+                        try r.putRealSymbol("Flat_Pool", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("get", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("reset", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("fini", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("flat_pool_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
+                    } else if (std.mem.eql(u8, module_name, "rpmalloc")) {
+                        try r.putRealSymbol("rpmalloc_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
+                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Machine_X64")) {
                         try r.symbols.put(allocator, "get_cpu_info", .builtin_get_cpu_info);
                         try r.symbols.put(allocator, "check_feature", .builtin_check_feature);
