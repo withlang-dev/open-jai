@@ -339,6 +339,7 @@ fn putCompilerModuleSymbols(r: *Resolved) !void {
         "Code",
         "Code_Node",
         "Code_Literal",
+        "Code_Argument",
         "Code_Procedure_Call",
         "Code_Declaration",
         "Source_Code_Location",
@@ -369,16 +370,26 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "push_allocator", .builtin_push_allocator);
     try putPlaceholders(&r, allocator, &.{
         "DrawTexturePro",
-        "get_build_options",                        "set_build_options",
-        "set_build_options_dc",                     "add_build_file",
-        "add_build_string",                         "run_command",
-        "get_current_workspace",                    "compiler_create_workspace",
-        "compiler_begin_intercept",                 "compiler_wait_for_message",
-        "compiler_end_intercept",                   "compiler_set_workspace_status",
-        "compiler_report",                          "make_location",
-        "add_global_data",                          "Optimization_Type",
-        "Message_Complete",                         "compiler_get_version_info",
-        "compiler_custom_link_command_is_complete", "For_Flags",
+        "get_build_options",
+        "set_build_options",
+        "set_build_options_dc",
+        "add_build_file",
+        "add_build_string",
+        "run_command",
+        "get_current_workspace",
+        "compiler_create_workspace",
+        "compiler_begin_intercept",
+        "compiler_wait_for_message",
+        "compiler_end_intercept",
+        "compiler_set_workspace_status",
+        "compiler_report",
+        "make_location",
+        "add_global_data",
+        "Optimization_Type",
+        "Message_Complete",
+        "compiler_get_version_info",
+        "compiler_custom_link_command_is_complete",
+        "For_Flags",
     });
     try r.putRealSymbol("temp", .{ .const_value = @import("Ast.zig").null_node });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
@@ -484,8 +495,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "append",                "sprint",            "to_c_string",         "to_string",
                         "String_Builder",        "free_buffers",      "init_string_builder", "print_to_builder",
                         "builder_string_length", "builder_to_string", "tprint",              "compare",
-                        "split",                 "read",
-                        "release",               "start",             "lock",                "proc",
+                        "split",                 "read",              "release",             "start",
+                        "lock",                  "proc",
                     });
                     for (&[_][]const u8{ "make_vector2", "make_vector3", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
@@ -634,10 +645,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         }
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putExternalSymbols(&r, &.{
-                            "events_this_frame",     "update_window_events",
-                            "SDL_INIT_VIDEO",        "SDL_Init",
-                            "SDL_GL_GetProcAddress",
-                            "get_window_resizes",    "get_mouse_pointer_position",
+                            "events_this_frame",          "update_window_events",
+                            "SDL_INIT_VIDEO",             "SDL_Init",
+                            "SDL_GL_GetProcAddress",      "get_window_resizes",
+                            "get_mouse_pointer_position",
                         });
                     } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
                         try putExternalSymbols(&r, &.{"create_window"});
@@ -645,9 +656,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try putExternalSymbols(&r, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putExternalSymbols(&r, &.{
-                            "get_font_at_size", "texture_load_from_file", "gl_load", "DrawTexturePro", "immediate_quad", "gl",
-                            "set_render_target", "set_shader_for_color", "clear_render_target", "swap_buffers", "update_window",
-                            "immediate_triangle", "load_font", "draw_text",
+                            "get_font_at_size",  "texture_load_from_file", "gl_load",             "DrawTexturePro", "immediate_quad", "gl",
+                            "set_render_target", "set_shader_for_color",   "clear_render_target", "swap_buffers",   "update_window",  "immediate_triangle",
+                            "load_font",         "draw_text",
                         });
                     } else if (std.mem.eql(u8, module_name, "GL")) {
                         try putExternalSymbols(&r, &.{ "gl", "gl_load", "glTexParameteri", "glGetString", "GL_VENDOR" });

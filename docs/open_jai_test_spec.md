@@ -208,6 +208,8 @@ The framework exposes helper procedures such as:
 ```jai
 expect_compile_success :: (path: string);
 expect_compile_failure :: (path: string, expected_message: string);
+expect_compile_output :: (path: string, expected: string);
+expect_compile_output_contains :: (path: string, needle: string);
 expect_program_output :: (path: string, expected: string);
 expect_program_output_contains :: (path: string, needle: string);
 ```
@@ -315,4 +317,3 @@ Milestone 5: Reports.
 
 - Emit console summaries and `test/reports/latest.txt`.
 - Include source locations and per-file/per-procedure summaries.
-

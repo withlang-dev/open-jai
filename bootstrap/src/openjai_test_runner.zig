@@ -261,6 +261,28 @@ fn runProcTest(ctx: *Context, proc_test: ProcTest) !TestOutcome {
             const result = try expectCompileFailure(ctx, full_path, expected);
             if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
             if (result.message.len != 0) ctx.allocator.free(result.message);
+        } else if (std.mem.eql(u8, name, "expect_compile_output")) {
+            asserts += 1;
+            const path = try stringArg(ctx.allocator, ast, args, 0, expr);
+            defer ctx.allocator.free(path);
+            const expected = try stringArg(ctx.allocator, ast, args, 1, expr);
+            defer ctx.allocator.free(expected);
+            const full_path = try pathFromRepo(ctx.allocator, ctx.repo_root, path);
+            defer ctx.allocator.free(full_path);
+            const result = try expectCompileOutput(ctx, full_path, expected, .exact);
+            if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
+            if (result.message.len != 0) ctx.allocator.free(result.message);
+        } else if (std.mem.eql(u8, name, "expect_compile_output_contains")) {
+            asserts += 1;
+            const path = try stringArg(ctx.allocator, ast, args, 0, expr);
+            defer ctx.allocator.free(path);
+            const needle = try stringArg(ctx.allocator, ast, args, 1, expr);
+            defer ctx.allocator.free(needle);
+            const full_path = try pathFromRepo(ctx.allocator, ctx.repo_root, path);
+            defer ctx.allocator.free(full_path);
+            const result = try expectCompileOutput(ctx, full_path, needle, .contains);
+            if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
+            if (result.message.len != 0) ctx.allocator.free(result.message);
         } else if (std.mem.eql(u8, name, "expect_compile_creates_file")) {
             asserts += 1;
             const path = try stringArg(ctx.allocator, ast, args, 0, expr);
@@ -446,6 +468,30 @@ fn expectCompileFailure(ctx: *Context, path: []const u8, expected: []const u8) !
     }
     if (std.mem.indexOf(u8, result.stdout, expected) != null or std.mem.indexOf(u8, result.stderr, expected) != null) return .{ .passed = true, .asserts = 1 };
     const msg = try std.fmt.allocPrint(ctx.allocator, "compile failed for {s}, but diagnostic did not contain \"{s}\":\n{s}{s}", .{ path, expected, result.stdout, result.stderr });
+    return .{ .passed = false, .asserts = 1, .message = msg };
+}
+
+fn expectCompileOutput(ctx: *Context, path: []const u8, expected: []const u8, mode: OutputMode) !TestOutcome {
+    const out = try outputPathFor(ctx, path);
+    defer ctx.allocator.free(out);
+    const result = try std.process.run(ctx.allocator, ctx.io, .{
+        .argv = &.{ ctx.compiler_path, path, "-o", out, "--runtime", ctx.runtime_path },
+        .cwd = .{ .path = ctx.repo_root },
+    });
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
+    if (!termOk(result.term)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "compile failed for {s} ({}):\n{s}{s}", .{ path, result.term, result.stdout, result.stderr });
+        return .{ .passed = false, .asserts = 1, .message = msg };
+    }
+    const actual = try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ result.stdout, result.stderr });
+    defer ctx.allocator.free(actual);
+    const pass = switch (mode) {
+        .exact => std.mem.eql(u8, actual, expected),
+        .contains => std.mem.indexOf(u8, actual, expected) != null,
+    };
+    if (pass) return .{ .passed = true, .asserts = 1 };
+    const msg = try std.fmt.allocPrint(ctx.allocator, "compile output mismatch for {s}\nexpected: \"{s}\"\nactual:   \"{s}\"", .{ path, expected, actual });
     return .{ .passed = false, .asserts = 1, .message = msg };
 }
 

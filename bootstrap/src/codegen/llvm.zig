@@ -513,17 +513,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
         switch (inst.opcode) {
             .load_string => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend string load destination register out of range", .{});
-                if (inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend string index out of range", .{});
-                const bytes = env.program.strings.items[inst.arg1];
-                const name_tmp = try std.fmt.allocPrint(env.allocator, "str.{d}", .{inst.arg1});
-                defer env.allocator.free(name_tmp);
-                const name = try env.allocator.dupeZ(u8, name_tmp);
-                defer env.allocator.free(name);
-                const global = c.LLVMAddGlobal(env.module, c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(bytes.len)), name.ptr);
-                c.LLVMSetGlobalConstant(global, 1);
-                c.LLVMSetLinkage(global, c.LLVMPrivateLinkage);
-                c.LLVMSetInitializer(global, c.LLVMConstStringInContext(env.context, bytes.ptr, @intCast(bytes.len), 1));
-                registers[inst.dest] = .{ .llvm_value = global, .kind = .{ .string = inst.arg1 } };
+                registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
+            },
+            .load_source_location => {
+                if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend source-location load out of range", .{});
+                registers[inst.dest] = .{ .kind = .{ .source_location = .{ .file = inst.arg1, .line = inst.arg2 } } };
             },
             .load_bytes => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend byte-array load destination register out of range", .{});
@@ -1056,8 +1050,23 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     },
                 }
             },
-            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags, .code_literal_field_value_type, .code_literal_field_s64, .code_literal_set_s64, .code_node_to_code => {
+            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags, .code_proc_call_arguments, .code_argument_field_expression, .code_literal_field_value_type, .code_literal_field_s64, .code_literal_set_s64, .code_node_to_code => {
                 return diag.failAt(inst.source_node, "compiler Code_Node opcode {s} is compile-time only", .{@tagName(inst.opcode)});
+            },
+            .source_location_get_field => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend Source_Code_Location field access out of range", .{});
+                const loc = switch (registers[inst.arg1].kind) {
+                    .source_location => |value| value,
+                    else => return diag.failAt(0, "LLVM backend Source_Code_Location field access requires a Source_Code_Location value", .{}),
+                };
+                const field_name = env.program.strings.items[inst.arg2];
+                if (std.mem.eql(u8, field_name, "fully_pathed_filename")) {
+                    registers[inst.dest] = try staticStringRegister(env, loc.file, diag);
+                } else if (std.mem.eql(u8, field_name, "line_number")) {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, loc.line, 0), .kind = .int };
+                } else {
+                    return diag.failAt(0, "unsupported Source_Code_Location field '{s}'", .{field_name});
+                }
             },
             .make_vector3 => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend make_vector3 destination register out of range", .{});
@@ -1712,8 +1721,31 @@ const RegisterValue = struct {
         bool,
         void_value,
         type_id,
+        source_location: struct { file: Bytecode.StringIndex, line: u32 },
     };
 };
+
+fn staticStringRegister(env: *LlvmEnv, string_idx: Bytecode.StringIndex, diag: Diagnostic) !RegisterValue {
+    if (string_idx >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend string index out of range", .{});
+    const bytes = env.program.strings.items[string_idx];
+    const name_tmp = try std.fmt.allocPrint(env.allocator, "str.{d}", .{string_idx});
+    defer env.allocator.free(name_tmp);
+    const name = try env.allocator.dupeZ(u8, name_tmp);
+    defer env.allocator.free(name);
+    const global = c.LLVMGetNamedGlobal(env.module, name.ptr) orelse blk: {
+        const ty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(@max(bytes.len, 1)));
+        const created = c.LLVMAddGlobal(env.module, ty, name.ptr);
+        c.LLVMSetGlobalConstant(created, 1);
+        c.LLVMSetLinkage(created, c.LLVMPrivateLinkage);
+        if (bytes.len == 0) {
+            c.LLVMSetInitializer(created, c.LLVMConstNull(ty));
+        } else {
+            c.LLVMSetInitializer(created, c.LLVMConstStringInContext(env.context, bytes.ptr, @intCast(bytes.len), 1));
+        }
+        break :blk created;
+    };
+    return .{ .llvm_value = global, .kind = .{ .string = string_idx } };
+}
 
 fn registerValueForTypedLlvmValue(value: c.LLVMValueRef, type_id: u32) RegisterValue {
     return switch (type_id) {
@@ -2109,6 +2141,14 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
         .type_id => {
             var args = [_]c.LLVMValueRef{arg.llvm_value};
             _ = c.LLVMBuildCall2(env.builder, env.print_type_fn_ty, env.print_type_fn, &args, args.len, "");
+        },
+        .source_location => |loc| {
+            try emitPrintValue(env, try staticStringRegister(env, loc.file, diag), diag);
+            const colon = c.LLVMBuildGlobalStringPtr(env.builder, ":", "source_location_colon");
+            var colon_args = [_]c.LLVMValueRef{ colon, c.LLVMConstInt(env.llvm_i64, 1, 0) };
+            _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &colon_args, colon_args.len, "");
+            var line_args = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, loc.line, 0)};
+            _ = c.LLVMBuildCall2(env.builder, env.print_int_fn_ty, env.print_int_fn, &line_args, line_args.len, "");
         },
         .bool => {
             var args = [_]c.LLVMValueRef{arg.llvm_value};

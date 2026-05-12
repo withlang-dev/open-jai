@@ -409,7 +409,7 @@ pub const Compilation = struct {
         };
     }
 
-    fn executeRunCall(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, run_node: @import("Ast.zig").NodeIndex, expr: @import("Ast.zig").NodeIndex, diag: Diagnostic) !vm_mod.Value {
+    fn executeRunCall(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, run_node: @import("Ast.zig").NodeIndex, expr: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
         if (expr == @import("Ast.zig").null_node) {
             return diag.failAt(ast.tokens[ast.mainToken(run_node)].start, "compile-time execution received a null expression operand", .{});
         }
@@ -431,15 +431,54 @@ pub const Compilation = struct {
         const call_args = ast.extraSlice(ast.data(expr).rhs);
         const direct_name = ast.tokenSlice(ast.mainToken(callee));
         if (std.mem.eql(u8, direct_name, "print") or std.mem.eql(u8, direct_name, "log")) {
-            for (call_args) |arg_idx| _ = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
+            try comp.executeRunPrint(ast, typed, resolved, callee, call_args, diag);
             return .void;
         }
         if (std.mem.eql(u8, direct_name, "add_global_data")) {
-            for (call_args) |arg_idx| _ = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
-            return .{ .int = 0 };
+            if (call_args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "add_global_data expects at least one data argument", .{});
+            const data = try comp.executeRunHostArg(ast, typed, resolved, @intCast(call_args[0]), diag);
+            for (call_args[1..]) |arg_idx| _ = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
+            return switch (data) {
+                .string => |text| .{ .bytes = text },
+                .bytes => |bytes| .{ .bytes = bytes },
+                else => diag.failAt(ast.tokens[ast.mainToken(@as(@import("Ast.zig").NodeIndex, @intCast(call_args[0])))].start, "add_global_data data argument must be bytes or string", .{}),
+            };
         }
         if (std.mem.eql(u8, direct_name, "run_command")) {
             return try comp.executeRunCommand(ast, typed, resolved, call_args, diag);
+        }
+        if (std.mem.eql(u8, direct_name, "join")) {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(comp.allocator);
+            for (call_args) |arg_idx| {
+                const value = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
+                switch (value) {
+                    .string => |text| try out.appendSlice(comp.allocator, text),
+                    .bytes => |bytes| try out.appendSlice(comp.allocator, bytes),
+                    else => return diag.failAt(ast.tokens[ast.mainToken(@as(@import("Ast.zig").NodeIndex, @intCast(arg_idx)))].start, "join arguments in #run must be strings", .{}),
+                }
+            }
+            return .{ .string = try comp.ownRunString(out.items) };
+        }
+        if (std.mem.eql(u8, direct_name, "read_entire_file")) {
+            if (call_args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "read_entire_file expects one path", .{});
+            const path_value = try comp.executeRunHostArg(ast, typed, resolved, @intCast(call_args[0]), diag);
+            const path = switch (path_value) {
+                .string => |text| text,
+                .bytes => |bytes| bytes,
+                else => return diag.failAt(ast.tokens[ast.mainToken(@as(@import("Ast.zig").NodeIndex, @intCast(call_args[0])))].start, "read_entire_file path must be a string", .{}),
+            };
+            const full = if (std.fs.path.isAbsolute(path))
+                try comp.allocator.dupe(u8, path)
+            else
+                try std.fs.path.join(comp.allocator, &.{ comp.sourceBaseDir(), path });
+            defer comp.allocator.free(full);
+            const contents = std.Io.Dir.cwd().readFileAlloc(comp.io, full, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
+                return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "read_entire_file failed for '{s}': {s}", .{ full, @errorName(err) });
+            };
+            errdefer comp.allocator.free(contents);
+            try comp.owned_run_result_bytes.append(comp.allocator, contents);
+            return .{ .bytes = contents };
         }
         const proc_node = if (resolved.local_values.get(callee)) |local_decl| blk: {
             if (ast.tag(local_decl) == .proc_decl) break :blk local_decl;
@@ -454,6 +493,7 @@ pub const Compilation = struct {
             };
         };
         if (proc_node == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "#run target is not a procedure", .{});
+        const target_is_expand = procHasExpandModifierLocal(ast, proc_node);
         var run_program = try bytecode_gen.generateProcForCall(comp.allocator, ast, resolved, typed, proc_node, expr, diag);
         defer run_program.deinit();
         var arg_values = std.ArrayList(vm_mod.Value).empty;
@@ -499,6 +539,10 @@ pub const Compilation = struct {
                     }
                     const initializer_node = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else @import("Ast.zig").null_node;
                     if (initializer_node == @import("Ast.zig").null_node) {
+                        if (target_is_expand) {
+                            try arg_values.append(comp.allocator, .{ .int = 0 });
+                            continue;
+                        }
                         return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "compile-time procedure argument has no initializer", .{});
                     }
                     if (typed.comptime_ints.get(initializer_node)) |value| {
@@ -510,11 +554,35 @@ pub const Compilation = struct {
                     } else if (typed.comptime_bytes.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .bytes = value });
                     } else {
-                        return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument value", .{});
+                        const value = comp.executeRunConstExpr(ast, typed, resolved, initializer_node, diag) catch |err| {
+                            if (target_is_expand) {
+                                try arg_values.append(comp.allocator, .{ .int = 0 });
+                                continue;
+                            }
+                            return err;
+                        };
+                        try arg_values.append(comp.allocator, value);
                     }
                 }
             } else {
                 return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument expression", .{});
+            }
+        }
+        if (procParams(ast, proc_node)) |params| {
+            if (arg_values.items.len < params.len) {
+                var i = arg_values.items.len;
+                while (i < params.len) : (i += 1) {
+                    const param: @import("Ast.zig").NodeIndex = @intCast(params[i]);
+                    const default_value = ast.data(param).rhs;
+                    if (default_value == @import("Ast.zig").null_node) {
+                        return diag.failAt(ast.tokens[ast.mainToken(param)].start, "#run argument count does not match procedure parameters", .{});
+                    }
+                    if (isCallerCodeExpr(ast, default_value)) {
+                        try arg_values.append(comp.allocator, .{ .string = callSource(ast, expr) });
+                    } else {
+                        try arg_values.append(comp.allocator, try comp.executeRunHostArg(ast, typed, resolved, default_value, diag));
+                    }
+                }
             }
         }
         var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
@@ -563,6 +631,97 @@ pub const Compilation = struct {
         } };
     }
 
+    fn executeRunPrint(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, callee: @import("Ast.zig").NodeIndex, args: []const u32, diag: Diagnostic) !void {
+        if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "print expects at least one argument", .{});
+        const first: @import("Ast.zig").NodeIndex = @intCast(args[0]);
+        if (ast.tag(first) == .string_literal and args.len > 1) {
+            const raw_fmt = ast.stringTokenContents(ast.mainToken(first));
+            const fmt = try decodeRunString(comp.allocator, raw_fmt, diag, ast.tokens[ast.mainToken(first)].start);
+            defer comp.allocator.free(fmt);
+            var arg_index: usize = 0;
+            var start: usize = 0;
+            var i: usize = 0;
+            while (i < fmt.len) : (i += 1) {
+                if (fmt[i] != '%') continue;
+                if (i + 1 < fmt.len and fmt[i + 1] == '%') {
+                    std.debug.print("{s}%", .{fmt[start..i]});
+                    i += 1;
+                    start = i + 1;
+                    continue;
+                }
+                std.debug.print("{s}", .{fmt[start..i]});
+                var selected = arg_index;
+                var next_start = i + 1;
+                if (i + 1 < fmt.len and fmt[i + 1] >= '1' and fmt[i + 1] <= '9') {
+                    selected = fmt[i + 1] - '1';
+                    next_start = i + 2;
+                } else {
+                    arg_index += 1;
+                }
+                if (selected >= args.len - 1) return diag.failAt(ast.tokens[ast.mainToken(first)].start, "print format references argument index out of range", .{});
+                const value = try comp.executeRunHostArg(ast, typed, resolved, @intCast(args[selected + 1]), diag);
+                printRunValue(value);
+                start = next_start;
+            }
+            if (start < fmt.len) std.debug.print("{s}", .{fmt[start..]});
+            return;
+        }
+        for (args) |arg_idx| {
+            const value = try comp.executeRunHostArg(ast, typed, resolved, @intCast(arg_idx), diag);
+            printRunValue(value);
+        }
+    }
+
+    fn printRunValue(value: vm_mod.Value) void {
+        switch (value) {
+            .void => {},
+            .int => |v| std.debug.print("{d}", .{v}),
+            .float => |v| std.debug.print("{d}", .{v}),
+            .bool => |v| std.debug.print("{s}", .{if (v) "true" else "false"}),
+            .string => |v| std.debug.print("{s}", .{v}),
+            .bytes => |v| std.debug.print("{s}", .{v}),
+        }
+    }
+
+    fn decodeRunString(allocator: std.mem.Allocator, raw: []const u8, diag: Diagnostic, source_offset: u32) ![]const u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(allocator);
+        var i: usize = 0;
+        while (i < raw.len) : (i += 1) {
+            if (raw[i] != '\\') {
+                try out.append(allocator, raw[i]);
+                continue;
+            }
+            i += 1;
+            if (i >= raw.len) return diag.failAt(source_offset, "unterminated escape in #run print format string", .{});
+            try out.append(allocator, switch (raw[i]) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                '%' => '%',
+                'x' => blk: {
+                    if (i + 2 >= raw.len) return diag.failAt(source_offset, "short hex escape in #run string", .{});
+                    const value = (try hexNibble(raw[i + 1], diag, source_offset) << 4) | try hexNibble(raw[i + 2], diag, source_offset);
+                    i += 2;
+                    break :blk value;
+                },
+                else => raw[i],
+            });
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+
+    fn hexNibble(ch: u8, diag: Diagnostic, source_offset: u32) !u8 {
+        return switch (ch) {
+            '0'...'9' => ch - '0',
+            'a'...'f' => ch - 'a' + 10,
+            'A'...'F' => ch - 'A' + 10,
+            else => diag.failAt(source_offset, "invalid hex escape digit in #run string", .{}),
+        };
+    }
+
     fn recordNoResetGlobals(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, program: *const Bytecode.Program, vm: *vm_mod.VM, diag: Diagnostic) !void {
         for (program.globals.items, 0..) |global, i| {
             const decl: @import("Ast.zig").NodeIndex = @intCast(global.source_node);
@@ -591,10 +750,10 @@ pub const Compilation = struct {
         };
     }
 
-    fn executeRunHostArg(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, arg: @import("Ast.zig").NodeIndex, diag: Diagnostic) !vm_mod.Value {
+    fn executeRunHostArg(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, arg: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
         if (ast.tag(arg) == .field_access and ast.data(arg).lhs == @import("Ast.zig").null_node) return .{ .int = 0 };
         if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .keyword_xx) return comp.executeRunHostArg(ast, typed, resolved, ast.data(arg).lhs, diag);
-        if (ast.tag(arg) == .call_expr) return .{ .int = 0 };
+        if (ast.tag(arg) == .call_expr) return try comp.executeRunCall(ast, typed, resolved, arg, arg, diag);
         if (typed.comptime_ints.get(arg)) |value| return .{ .int = value };
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
         if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
@@ -603,9 +762,80 @@ pub const Compilation = struct {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
             .bool_literal => .{ .bool = ast.data(arg).lhs != 0 },
-            .string_literal => .{ .string = ast.stringTokenContents(ast.mainToken(arg)) },
-            else => .{ .int = 0 },
+            .string_literal => blk: {
+                const decoded = try decodeRunString(comp.allocator, ast.stringTokenContents(ast.mainToken(arg)), diag, ast.tokens[ast.mainToken(arg)].start);
+                errdefer comp.allocator.free(decoded);
+                try comp.owned_run_result_strings.append(comp.allocator, decoded);
+                break :blk .{ .string = decoded };
+            },
+            .identifier => .{ .string = ast.tokenSlice(ast.mainToken(arg)) },
+            else => return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time host argument expression {s}", .{@tagName(ast.tag(arg))}),
         };
+    }
+
+    fn ownRunString(comp: *Compilation, value: []const u8) ![]const u8 {
+        const owned = try comp.allocator.dupe(u8, value);
+        errdefer comp.allocator.free(owned);
+        try comp.owned_run_result_strings.append(comp.allocator, owned);
+        return owned;
+    }
+
+    fn procParams(ast: *const @import("Ast.zig").Ast, proc_node: @import("Ast.zig").NodeIndex) ?[]const u32 {
+        if (proc_node == @import("Ast.zig").null_node or proc_node >= ast.node_tags.items.len or ast.tag(proc_node) != .proc_decl) return null;
+        const sig_extra = ast.data(proc_node).rhs;
+        if (sig_extra >= ast.extra_data.items.len) return null;
+        const sig = ast.extraSlice(sig_extra);
+        if (sig.len < 1) return null;
+        if (sig[0] >= ast.extra_data.items.len) return null;
+        return ast.extraSlice(sig[0]);
+    }
+
+    fn isCallerCodeExpr(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
+        return node != @import("Ast.zig").null_node and
+            node < ast.node_tags.items.len and
+            ast.tag(node) == .meta_expr and
+            ast.tokens[ast.mainToken(node)].tag == .directive_caller_code;
+    }
+
+    fn procHasExpandModifierLocal(ast: *const @import("Ast.zig").Ast, proc: @import("Ast.zig").NodeIndex) bool {
+        if (proc == @import("Ast.zig").null_node or proc >= ast.node_tags.items.len or ast.tag(proc) != .proc_decl) return false;
+        const token_start = ast.tokens[ast.mainToken(proc)].start;
+        const body = ast.data(proc).lhs;
+        const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
+        const start = token_start - @min(token_start, 200);
+        if (body_start <= start or body_start > ast.source.len) return false;
+        return std.mem.indexOf(u8, ast.source[start..body_start], "#expand") != null;
+    }
+
+    fn callSource(ast: *const @import("Ast.zig").Ast, call: @import("Ast.zig").NodeIndex) []const u8 {
+        if (call == @import("Ast.zig").null_node or call >= ast.node_tags.items.len) return "";
+        var start = ast.tokens[ast.mainToken(call)].start;
+        var end = ast.tokens[ast.mainToken(call)].end;
+        if (ast.tag(call) == .call_expr) {
+            const callee = ast.data(call).lhs;
+            if (callee < ast.node_tags.items.len) start = @min(start, ast.tokens[ast.mainToken(callee)].start);
+            if (matchingCallClose(ast, ast.mainToken(call))) |close_end| end = @max(end, close_end);
+        }
+        return std.mem.trim(u8, ast.source[start..@min(end, ast.source.len)], " \t\r\n;");
+    }
+
+    fn matchingCallClose(ast: *const @import("Ast.zig").Ast, open_tok: @import("Token.zig").Token.Index) ?u32 {
+        if (open_tok >= ast.tokens.len or ast.tokens[open_tok].tag != .l_paren) return null;
+        var depth: usize = 0;
+        var i = open_tok;
+        while (i < ast.tokens.len) : (i += 1) {
+            switch (ast.tokens[i].tag) {
+                .l_paren => depth += 1,
+                .r_paren => {
+                    if (depth == 0) return null;
+                    depth -= 1;
+                    if (depth == 0) return ast.tokens[i].end;
+                },
+                .eof => return null,
+                else => {},
+            }
+        }
+        return null;
     }
 
     fn isExecutableRun(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {

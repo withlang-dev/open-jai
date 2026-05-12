@@ -25,11 +25,25 @@ const CodeNode = struct {
     start: usize = 0,
     end: usize = 0,
     s64: ?i64 = null,
+    arg_start: u32 = 0,
+    arg_count: u32 = 0,
+};
+
+const CodeArgument = struct {
+    tree: u32 = std.math.maxInt(u32),
+    expression_index: u32 = std.math.maxInt(u32),
 };
 
 const CodeTree = struct {
     source: []const u8,
+    root: CodeNode,
     nodes: []CodeNode,
+    arguments: []CodeArgument,
+};
+
+const SourceLocation = struct {
+    fully_pathed_filename: []const u8,
+    line_number: i64,
 };
 
 const RegisterValue = union(enum) {
@@ -38,6 +52,9 @@ const RegisterValue = union(enum) {
     bytes: []const u8,
     code_node: CodeNode,
     code_nodes: []const CodeNode,
+    code_arg: CodeArgument,
+    code_args: []const CodeArgument,
+    source_location: SourceLocation,
     build_options: usize,
     build_llvm_options: usize,
     type_id: u32,
@@ -111,7 +128,10 @@ pub const VM = struct {
         for (vm.dynamic_arrays.items) |*array| array.elems.deinit(vm.allocator);
         vm.dynamic_arrays.deinit(vm.allocator);
         vm.dynamic_array_refs.deinit(vm.allocator);
-        for (vm.code_trees.items) |tree| vm.allocator.free(tree.nodes);
+        for (vm.code_trees.items) |tree| {
+            vm.allocator.free(tree.nodes);
+            vm.allocator.free(tree.arguments);
+        }
         vm.code_trees.deinit(vm.allocator);
         for (vm.rendered_code_strings.items) |text| vm.allocator.free(text);
         vm.rendered_code_strings.deinit(vm.allocator);
@@ -151,6 +171,13 @@ pub const VM = struct {
                 .load_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_string register/string index out of range", .{});
                     regs[inst.dest] = .{ .string = vm.program.strings.items[inst.arg1] };
+                },
+                .load_source_location => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_source_location register/string index out of range", .{});
+                    regs[inst.dest] = .{ .source_location = .{
+                        .fully_pathed_filename = vm.program.strings.items[inst.arg1],
+                        .line_number = @intCast(inst.arg2),
+                    } };
                 },
                 .load_bytes => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.byte_arrays.items.len) return diag.failAt(0, "VM load_bytes register/byte-array index out of range", .{});
@@ -212,6 +239,39 @@ pub const VM = struct {
                     };
                     if (index < 0 or index >= bytes.len) return diag.failAt(0, "VM string index out of bounds", .{});
                     regs[inst.dest] = .{ .int = bytes[@intCast(index)] };
+                },
+                .string_compare, .string_contains, .string_begins_with, .string_find => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string operation register out of range", .{});
+                    const lhs = try vm.registerText(regs[inst.arg1], diag, "string operation lhs");
+                    const rhs = try vm.registerText(regs[inst.arg2], diag, "string operation rhs");
+                    switch (inst.opcode) {
+                        .string_compare => regs[inst.dest] = .{ .int = switch (std.mem.order(u8, lhs, rhs)) {
+                            .lt => -1,
+                            .eq => 0,
+                            .gt => 1,
+                        } },
+                        .string_contains => regs[inst.dest] = .{ .bool = std.mem.indexOf(u8, lhs, rhs) != null },
+                        .string_begins_with => regs[inst.dest] = .{ .bool = std.mem.startsWith(u8, lhs, rhs) },
+                        .string_find => {
+                            const found = if (inst.arg3 != 0)
+                                std.mem.lastIndexOf(u8, lhs, rhs)
+                            else
+                                std.mem.indexOf(u8, lhs, rhs);
+                            regs[inst.dest] = .{ .int = if (found) |index| @intCast(index) else -1 };
+                        },
+                        else => unreachable,
+                    }
+                },
+                .string_slice => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM string_slice register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "string_slice source");
+                    const start = try registerInt(regs[inst.arg2], diag, "string_slice start");
+                    const count = try registerInt(regs[inst.arg3], diag, "string_slice count");
+                    if (start < 0 or count < 0) return diag.failAt(0, "VM string_slice requires non-negative start and count", .{});
+                    const start_usize: usize = @intCast(start);
+                    const count_usize: usize = @intCast(count);
+                    if (start_usize > text.len or count_usize > text.len - start_usize) return diag.failAt(0, "VM string_slice out of bounds", .{});
+                    regs[inst.dest] = .{ .string = text[start_usize .. start_usize + count_usize] };
                 },
                 .cmp_lt_int => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM cmp_lt_int register out of range", .{});
@@ -626,6 +686,10 @@ pub const VM = struct {
                             if (index >= nodes.len) return diag.failAt(0, "VM Code_Node array index out of bounds", .{});
                             regs[inst.dest] = .{ .code_node = nodes[@intCast(index)] };
                         },
+                        .code_args => |code_arguments| {
+                            if (index >= code_arguments.len) return diag.failAt(0, "VM Code_Argument array index out of bounds", .{});
+                            regs[inst.dest] = .{ .code_arg = code_arguments[@intCast(index)] };
+                        },
                         else => return diag.failAt(0, "VM array_index requires array or pointer value", .{}),
                     }
                 },
@@ -633,7 +697,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes root register out of range", .{});
                     const text = try registerCodeText(regs[inst.arg1], diag, "compiler_get_nodes");
                     const tree = try vm.ensureCodeTree(text);
-                    regs[inst.dest] = .{ .code_node = .{ .tree = tree, .kind = "ROOT", .flags = "0", .text = text } };
+                    regs[inst.dest] = .{ .code_node = vm.code_trees.items[tree].root };
                 },
                 .compiler_get_nodes_exprs => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes expressions register out of range", .{});
@@ -656,6 +720,26 @@ pub const VM = struct {
                         else => return diag.failAt(0, "VM Code_Node.node_flags requires a Code_Node value", .{}),
                     };
                     regs[inst.dest] = .{ .string = node.flags };
+                },
+                .code_proc_call_arguments => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Procedure_Call.arguments_unsorted register out of range", .{});
+                    const node = try vm.currentCodeNode(regs[inst.arg1], diag, "Code_Procedure_Call.arguments_unsorted");
+                    if (!std.mem.eql(u8, node.kind, "PROCEDURE_CALL")) return diag.failAt(0, "VM Code_Procedure_Call.arguments_unsorted requires a procedure-call node", .{});
+                    if (node.tree >= vm.code_trees.items.len) return diag.failAt(0, "VM Code_Procedure_Call.arguments_unsorted got a detached Code_Node", .{});
+                    const tree = vm.code_trees.items[node.tree];
+                    const start: usize = @intCast(node.arg_start);
+                    const count: usize = @intCast(node.arg_count);
+                    if (start > tree.arguments.len or count > tree.arguments.len - start) return diag.failAt(0, "VM Code_Procedure_Call.arguments_unsorted slice is out of range", .{});
+                    regs[inst.dest] = .{ .code_args = tree.arguments[start .. start + count] };
+                },
+                .code_argument_field_expression => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Argument.expression register out of range", .{});
+                    const arg = switch (regs[inst.arg1]) {
+                        .code_arg => |value| value,
+                        else => return diag.failAt(0, "VM Code_Argument.expression requires a Code_Argument value", .{}),
+                    };
+                    if (arg.tree >= vm.code_trees.items.len or arg.expression_index >= vm.code_trees.items[arg.tree].nodes.len) return diag.failAt(0, "VM Code_Argument.expression got a detached expression node", .{});
+                    regs[inst.dest] = .{ .code_node = vm.code_trees.items[arg.tree].nodes[arg.expression_index] };
                 },
                 .code_literal_field_value_type => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Literal.value_type register out of range", .{});
@@ -691,7 +775,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM cpu_has_feature destination register out of range", .{});
                     regs[inst.dest] = .{ .bool = false };
                 },
-                .load_ptr_string, .string_slice => {
+                .load_ptr_string => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM pointer/array destination register out of range", .{});
                     return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
@@ -799,6 +883,21 @@ pub const VM = struct {
                         .build_llvm_options => try vm.buildOptionsLlvmGetField(index, vm.program.strings.items[inst.arg2], diag),
                         else => unreachable,
                     };
+                },
+                .source_location_get_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Source_Code_Location field access out of range", .{});
+                    const loc = switch (regs[inst.arg1]) {
+                        .source_location => |value| value,
+                        else => return diag.failAt(0, "VM Source_Code_Location field access requires a Source_Code_Location value", .{}),
+                    };
+                    const field_name = vm.program.strings.items[inst.arg2];
+                    if (std.mem.eql(u8, field_name, "fully_pathed_filename")) {
+                        regs[inst.dest] = .{ .string = loc.fully_pathed_filename };
+                    } else if (std.mem.eql(u8, field_name, "line_number")) {
+                        regs[inst.dest] = .{ .int = loc.line_number };
+                    } else {
+                        return diag.failAt(0, "unsupported Source_Code_Location field '{s}'", .{field_name});
+                    }
                 },
                 .build_options_set_field => {
                     if (inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM Build_Options field assignment out of range", .{});
@@ -939,7 +1038,8 @@ pub const VM = struct {
                 std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little);
                 return ptr;
             },
-            .code_node, .code_nodes => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .code_node, .code_nodes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .source_location => return diag.failAt(0, "VM cannot materialize Source_Code_Location as raw bytes; access its fields instead", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot materialize Build_Options as raw bytes; access its fields instead", .{}),
             .empty => return diag.failAt(0, "VM cannot take address of an uninitialized register", .{}),
         }
@@ -1305,7 +1405,8 @@ pub const VM = struct {
                 if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
             },
             .string => |text| if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text),
-            .code_node, .code_nodes => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .code_node, .code_nodes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .source_location => return diag.failAt(0, "VM cannot store Source_Code_Location into raw memory; use field assignment", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot store Build_Options into raw memory; use field assignment", .{}),
             .empty => return diag.failAt(0, "VM cannot store an uninitialized register", .{}),
         }
@@ -1334,6 +1435,7 @@ pub const VM = struct {
             else
                 (try vm.readRemainingBytes(ptr, diag)).len,
             .code_nodes => |nodes| nodes.len,
+            .code_args => |args| args.len,
             else => diag.failAt(0, "VM array_count requires array-compatible value", .{}),
         };
     }
@@ -1417,12 +1519,12 @@ pub const VM = struct {
             };
         }
         return switch (value) {
-            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .build_options, .build_llvm_options => value,
+            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .source_location, .build_options, .build_llvm_options => value,
             .empty => if (elem_size == 1)
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
                 .{ .int = @bitCast(try vm.loadU64(try vm.dynamicArrayItemPointer(array_index, index, diag), diag)) },
-            .code_node, .code_nodes => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
+            .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
         };
     }
 
@@ -1525,6 +1627,16 @@ pub const VM = struct {
                 }
                 std.debug.print("]", .{});
             },
+            .code_arg => |arg| std.debug.print("Code_Argument(tree={d}, expression={d})", .{ arg.tree, arg.expression_index }),
+            .code_args => |args| {
+                std.debug.print("[", .{});
+                for (args, 0..) |arg, i| {
+                    if (i != 0) std.debug.print(", ", .{});
+                    std.debug.print("Code_Argument(tree={d}, expression={d})", .{ arg.tree, arg.expression_index });
+                }
+                std.debug.print("]", .{});
+            },
+            .source_location => |loc| std.debug.print("{s}:{d}", .{ loc.fully_pathed_filename, loc.line_number }),
             .build_options, .build_llvm_options => |index| try vm.printBuildOptions(index, diag),
             .empty => return diag.failAt(0, "VM {s} cannot print an uninitialized value", .{context}),
         }
@@ -1565,16 +1677,36 @@ pub const VM = struct {
         for (vm.code_trees.items, 0..) |tree, i| {
             if (std.mem.eql(u8, tree.source, code)) return @intCast(i);
         }
-        const nodes = try vm.buildCodeNodes(@intCast(vm.code_trees.items.len), code);
+        const built = try vm.buildCodeNodes(@intCast(vm.code_trees.items.len), code);
+        const nodes = built.nodes;
         errdefer vm.allocator.free(nodes);
+        errdefer vm.allocator.free(built.arguments);
         const index: u32 = @intCast(vm.code_trees.items.len);
-        try vm.code_trees.append(vm.allocator, .{ .source = code, .nodes = nodes });
+        try vm.code_trees.append(vm.allocator, .{ .source = code, .root = built.root, .nodes = nodes, .arguments = built.arguments });
         return index;
     }
 
-    fn buildCodeNodes(vm: *VM, tree_index: u32, code: []const u8) ![]CodeNode {
+    const BuiltCodeTree = struct {
+        root: CodeNode,
+        nodes: []CodeNode,
+        arguments: []CodeArgument,
+    };
+
+    fn buildCodeNodes(vm: *VM, tree_index: u32, code: []const u8) !BuiltCodeTree {
         var nodes = std.ArrayList(CodeNode).empty;
         errdefer nodes.deinit(vm.allocator);
+        var arguments = std.ArrayList(CodeArgument).empty;
+        errdefer arguments.deinit(vm.allocator);
+        var root = CodeNode{ .tree = tree_index, .kind = "ROOT", .flags = "0", .text = code, .start = 0, .end = code.len };
+
+        if (try vm.tryBuildProcedureCallCodeTree(tree_index, code, &nodes, &arguments)) |call_root| {
+            root = call_root;
+            return .{
+                .root = root,
+                .nodes = try nodes.toOwnedSlice(vm.allocator),
+                .arguments = try arguments.toOwnedSlice(vm.allocator),
+            };
+        }
 
         var i: usize = 0;
         var saw_decl = false;
@@ -1632,8 +1764,62 @@ pub const VM = struct {
         }
         if (saw_decl) try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = code, .start = 0, .end = code.len });
 
-        const owned = try nodes.toOwnedSlice(vm.allocator);
-        return owned;
+        return .{
+            .root = root,
+            .nodes = try nodes.toOwnedSlice(vm.allocator),
+            .arguments = try arguments.toOwnedSlice(vm.allocator),
+        };
+    }
+
+    fn tryBuildProcedureCallCodeTree(vm: *VM, tree_index: u32, code: []const u8, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !?CodeNode {
+        const trimmed = std.mem.trim(u8, code, " \t\r\n;");
+        if (trimmed.len == 0) return null;
+        const base_offset = std.mem.indexOf(u8, code, trimmed) orelse 0;
+        const open_rel = std.mem.indexOfScalar(u8, trimmed, '(') orelse return null;
+        if (open_rel == 0) return null;
+        const close_rel = matchingCloseParen(trimmed, open_rel) orelse return null;
+        if (std.mem.trim(u8, trimmed[close_rel + 1 ..], " \t\r\n").len != 0) return null;
+        const callee = std.mem.trim(u8, trimmed[0..open_rel], " \t\r\n");
+        if (!isSimpleIdentifier(callee)) return null;
+
+        const arg_start_index: u32 = @intCast(arguments.items.len);
+        const args_text = trimmed[open_rel + 1 .. close_rel];
+        var cursor: usize = 0;
+        var depth: usize = 0;
+        var segment_start: usize = 0;
+        while (cursor <= args_text.len) : (cursor += 1) {
+            const at_end = cursor == args_text.len;
+            if (!at_end) {
+                switch (args_text[cursor]) {
+                    '(', '{', '[' => depth += 1,
+                    ')', '}', ']' => {
+                        if (depth > 0) depth -= 1;
+                    },
+                    ',' => {},
+                    else => {},
+                }
+                if (args_text[cursor] != ',' or depth != 0) continue;
+            }
+            const segment = std.mem.trim(u8, args_text[segment_start..cursor], " \t\r\n");
+            if (segment.len != 0) {
+                const relative = std.mem.indexOf(u8, args_text[segment_start..cursor], segment) orelse 0;
+                const start = base_offset + open_rel + 1 + segment_start + relative;
+                const expr_index: u32 = @intCast(nodes.items.len);
+                try nodes.append(vm.allocator, codeNodeForText(tree_index, expr_index, segment, start));
+                try arguments.append(vm.allocator, .{ .tree = tree_index, .expression_index = expr_index });
+            }
+            segment_start = cursor + 1;
+        }
+        return CodeNode{
+            .tree = tree_index,
+            .kind = "PROCEDURE_CALL",
+            .flags = "0",
+            .text = trimmed,
+            .start = base_offset,
+            .end = base_offset + trimmed.len,
+            .arg_start = arg_start_index,
+            .arg_count = @intCast(arguments.items.len - arg_start_index),
+        };
     }
 
     fn currentCodeNode(vm: *VM, value: RegisterValue, diag: Diagnostic, context: []const u8) !CodeNode {
@@ -1708,7 +1894,13 @@ pub const VM = struct {
             .string => |text| try builder.appendSlice(vm.allocator, text),
             .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
             .code_node => |node| try vm.builderAppendCodeText(builder, node.text),
-            .code_nodes => return diag.failAt(0, "VM cannot append a Code_Node array to a String_Builder without indexing it", .{}),
+            .code_nodes, .code_args => return diag.failAt(0, "VM cannot append a compiler meta array to a String_Builder without indexing it", .{}),
+            .code_arg => return diag.failAt(0, "VM cannot append a Code_Argument directly; append its expression", .{}),
+            .source_location => |loc| {
+                const text = try std.fmt.allocPrint(vm.allocator, "{s}:{d}", .{ loc.fully_pathed_filename, loc.line_number });
+                defer vm.allocator.free(text);
+                try builder.appendSlice(vm.allocator, text);
+            },
             .build_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
             .build_llvm_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
             .ptr => |ptr| try builder.appendSlice(vm.allocator, try vm.readRemainingBytes(ptr, diag)),
@@ -1781,6 +1973,52 @@ fn appendFormatted(allocator: std.mem.Allocator, builder: *std.ArrayList(u8), co
     try builder.appendSlice(allocator, text);
 }
 
+fn codeNodeForText(tree_index: u32, node_index: u32, text: []const u8, start: usize) CodeNode {
+    if (std.fmt.parseInt(i64, text, 10)) |value| {
+        return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .s64 = value };
+    } else |_| {}
+    if (isSimpleIdentifier(text)) {
+        return .{ .tree = tree_index, .index = node_index, .kind = "IDENT", .flags = "0", .text = text, .start = start, .end = start + text.len };
+    }
+    return .{ .tree = tree_index, .index = node_index, .kind = "EXPRESSION", .flags = "0", .text = text, .start = start, .end = start + text.len };
+}
+
+fn isSimpleIdentifier(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (!std.ascii.isAlphabetic(text[0]) and text[0] != '_') return false;
+    for (text[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn matchingCloseParen(text: []const u8, open_index: usize) ?usize {
+    var depth: usize = 0;
+    var i = open_index;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '"' => {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (text[i] == '"') break;
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
 fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !f64 {
     return switch (value) {
         .int => |v| @floatFromInt(v),
@@ -1789,7 +2027,8 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .ptr => 1,
         .bytes => |v| if (v.len == 0) 0 else 1,
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
-        .code_node, .code_nodes => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
+        .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
+        .source_location => diag.failAt(0, "VM {s} cannot treat Source_Code_Location values as numbers", .{context}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM {s} cannot treat Build_Options values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
     };
@@ -1815,6 +2054,9 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .bytes => |v| v.len != 0,
         .code_node => true,
         .code_nodes => |v| v.len != 0,
+        .code_arg => true,
+        .code_args => |v| v.len != 0,
+        .source_location => true,
         .build_options => true,
         .build_llvm_options => true,
         .type_id => true,
@@ -1863,7 +2105,8 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
         .type_id => diag.failAt(0, "VM cannot pass Type values across procedure calls yet", .{}),
-        .code_node, .code_nodes => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .source_location => diag.failAt(0, "VM cannot pass Source_Code_Location across non-inlined procedure calls yet", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
@@ -1906,6 +2149,18 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .code_nodes => |l| switch (rhs) {
             .code_nodes => |r| l.ptr == r.ptr and l.len == r.len,
+            else => false,
+        },
+        .code_arg => |l| switch (rhs) {
+            .code_arg => |r| l.tree == r.tree and l.expression_index == r.expression_index,
+            else => false,
+        },
+        .code_args => |l| switch (rhs) {
+            .code_args => |r| l.ptr == r.ptr and l.len == r.len,
+            else => false,
+        },
+        .source_location => |l| switch (rhs) {
+            .source_location => |r| std.mem.eql(u8, l.fully_pathed_filename, r.fully_pathed_filename) and l.line_number == r.line_number,
             else => false,
         },
         .build_options => |l| switch (rhs) {
