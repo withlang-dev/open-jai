@@ -28,6 +28,7 @@ const CodeNode = struct {
     name: []const u8 = "",
     path: []const u8 = "",
     line_number: i64 = 1,
+    type_text: []const u8 = "",
     start: usize = 0,
     end: usize = 0,
     s64: ?i64 = null,
@@ -36,6 +37,8 @@ const CodeNode = struct {
     arg_count: u32 = 0,
     note_start: usize = 0,
     note_count: usize = 0,
+    subexpression_start: usize = 0,
+    subexpression_count: usize = 0,
 };
 
 const CodeArgument = struct {
@@ -68,6 +71,8 @@ const CompilerMessage = struct {
     linker_exit_code: i64 = 0,
     all_start: usize = 0,
     all_count: usize = 0,
+    declaration_start: usize = 0,
+    declaration_count: usize = 0,
     dump_text: []const u8 = "",
 };
 
@@ -142,6 +147,7 @@ pub const VM = struct {
     compiler_messages: std.ArrayList(CompilerMessage) = .empty,
     compiler_message_queue: std.ArrayList(usize) = .empty,
     compiler_message_nodes: std.ArrayList(CodeNode) = .empty,
+    compiler_message_declarations: std.ArrayList(CodeNode) = .empty,
     compiler_message_notes: std.ArrayList(CodeNote) = .empty,
     workspace_sources: std.ArrayList(WorkspaceSource) = .empty,
     intercepted_workspace: i64 = 0,
@@ -182,6 +188,7 @@ pub const VM = struct {
         vm.compiler_messages.deinit(vm.allocator);
         vm.compiler_message_queue.deinit(vm.allocator);
         vm.compiler_message_nodes.deinit(vm.allocator);
+        vm.compiler_message_declarations.deinit(vm.allocator);
         vm.compiler_message_notes.deinit(vm.allocator);
         for (vm.workspace_sources.items) |source| {
             vm.allocator.free(source.path);
@@ -800,6 +807,37 @@ pub const VM = struct {
                     };
                     if (node.note_start > vm.compiler_message_notes.items.len or node.note_count > vm.compiler_message_notes.items.len - node.note_start) return diag.failAt(0, "VM Code_Node.notes slice out of range", .{});
                     regs[inst.dest] = .{ .code_notes = vm.compiler_message_notes.items[node.note_start .. node.note_start + node.note_count] };
+                },
+                .code_node_field_type => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Declaration.type register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Declaration.type requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .type_text = node.type_text };
+                },
+                .code_node_field_subexpressions => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.subexpressions register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Node.subexpressions requires a Code_Node value", .{}),
+                    };
+                    if (node.path.len == 0 and node.tree < vm.code_trees.items.len) {
+                        const tree = vm.code_trees.items[node.tree];
+                        if (node.subexpression_start > tree.nodes.len or node.subexpression_count > tree.nodes.len - node.subexpression_start) return diag.failAt(0, "VM Code_Node.subexpressions slice out of range", .{});
+                        regs[inst.dest] = .{ .code_nodes = tree.nodes[node.subexpression_start .. node.subexpression_start + node.subexpression_count] };
+                        continue;
+                    }
+                    if (node.subexpression_start > vm.compiler_message_nodes.items.len or node.subexpression_count > vm.compiler_message_nodes.items.len - node.subexpression_start) return diag.failAt(0, "VM Code_Node.subexpressions slice out of range", .{});
+                    regs[inst.dest] = .{ .code_nodes = vm.compiler_message_nodes.items[node.subexpression_start .. node.subexpression_start + node.subexpression_count] };
+                },
+                .code_node_field_enclosing_load => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.enclosing_load register out of range", .{});
+                    switch (regs[inst.arg1]) {
+                        .code_node => {},
+                        else => return diag.failAt(0, "VM Code_Node.enclosing_load requires a Code_Node value", .{}),
+                    }
+                    regs[inst.dest] = .{ .bool = false };
                 },
                 .code_note_field_text => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Note.text register out of range", .{});
@@ -1488,28 +1526,34 @@ pub const VM = struct {
     fn rebuildInterceptMessages(vm: *VM, workspace: i64, diag: Diagnostic) !void {
         vm.compiler_message_queue.clearRetainingCapacity();
         vm.compiler_message_nodes.clearRetainingCapacity();
+        vm.compiler_message_declarations.clearRetainingCapacity();
         vm.compiler_message_notes.clearRetainingCapacity();
         vm.compiler_messages.clearRetainingCapacity();
         const typechecked_start = vm.compiler_message_nodes.items.len;
+        const declaration_start = vm.compiler_message_declarations.items.len;
         var found_source = false;
+        var declaration_count: usize = 0;
         for (vm.workspace_sources.items) |source| {
             if (source.workspace != workspace) continue;
             found_source = true;
-            try vm.appendWorkspaceDeclarations(source.path, source.source, diag);
+            declaration_count += try vm.appendWorkspaceDeclarations(source.path, source.source, diag);
         }
         if (!found_source) {
-            try vm.compiler_message_nodes.append(vm.allocator, .{ .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = "main", .name = "main", .start = 0, .end = 4 });
+            const node: CodeNode = .{ .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = "main", .name = "main", .start = 0, .end = 4 };
+            try vm.compiler_message_nodes.append(vm.allocator, node);
+            try vm.compiler_message_declarations.append(vm.allocator, node);
+            declaration_count = 1;
         }
         const typechecked_count = vm.compiler_message_nodes.items.len - typechecked_start;
         try vm.appendCompilerMessage(.{ .kind = "IMPORT", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
-        try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count });
+        try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
         try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = 0 });
     }
 
-    fn appendWorkspaceDeclarations(vm: *VM, path: []const u8, source: []const u8, parent_diag: Diagnostic) !void {
+    fn appendWorkspaceDeclarations(vm: *VM, path: []const u8, source: []const u8, parent_diag: Diagnostic) !usize {
         const diag = Diagnostic.init(vm.allocator, path, source);
         var tokens = try lexer.tokenize(vm.allocator, source, diag);
         defer tokens.deinit(vm.allocator);
@@ -1523,8 +1567,15 @@ pub const VM = struct {
         );
         defer ast.deinit();
         defer vm.allocator.free(ast.tokens);
-        if (ast.root == @import("Ast.zig").null_node) return;
+        if (ast.root == @import("Ast.zig").null_node) return 0;
         const decls = ast.extraSlice(ast.data(ast.root).lhs);
+        const ProcDeclInfo = struct {
+            decl: @import("Ast.zig").NodeIndex,
+            node_index: usize,
+        };
+        var proc_decl_nodes = std.ArrayList(ProcDeclInfo).empty;
+        defer proc_decl_nodes.deinit(vm.allocator);
+        const declaration_start = vm.compiler_message_declarations.items.len;
         for (decls) |decl_idx| {
             const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
             if (decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
@@ -1536,6 +1587,7 @@ pub const VM = struct {
             const name_token = ast.mainToken(decl);
             const name = ast.tokenSlice(name_token);
             const token_start = ast.tokens[name_token].start;
+            const node_index = vm.compiler_message_nodes.items.len;
             try vm.compiler_message_nodes.append(vm.allocator, .{
                 .kind = "DECLARATION",
                 .flags = "ALLOWED_BY_CONTEXT",
@@ -1543,13 +1595,132 @@ pub const VM = struct {
                 .name = name,
                 .path = path,
                 .line_number = lineNumberAt(source, token_start),
+                .type_text = "Procedure",
                 .start = token_start,
                 .end = ast.tokens[name_token].end,
                 .note_start = note_start,
                 .note_count = vm.compiler_message_notes.items.len - note_start,
             });
+            try proc_decl_nodes.append(vm.allocator, .{ .decl = decl, .node_index = node_index });
+        }
+        for (proc_decl_nodes.items) |proc_decl| {
+            const decl = proc_decl.decl;
+            const proc_node_index = proc_decl.node_index;
+            const name_token = ast.mainToken(decl);
+            const name = ast.tokenSlice(name_token);
+            const token_start = ast.tokens[name_token].start;
+            const sub_start = vm.compiler_message_nodes.items.len;
+            try vm.appendWorkspaceLocalDeclarations(name, path, source, token_start);
+            vm.compiler_message_nodes.items[proc_node_index].subexpression_start = sub_start;
+            vm.compiler_message_nodes.items[proc_node_index].subexpression_count = vm.compiler_message_nodes.items.len - sub_start;
+            try vm.compiler_message_declarations.append(vm.allocator, vm.compiler_message_nodes.items[proc_node_index]);
         }
         _ = parent_diag;
+        return vm.compiler_message_declarations.items.len - declaration_start;
+    }
+
+    fn appendWorkspaceLocalDeclarations(vm: *VM, proc_name: []const u8, path: []const u8, source: []const u8, proc_start: usize) !void {
+        var local_types = std.StringHashMapUnmanaged([]const u8).empty;
+        defer local_types.deinit(vm.allocator);
+        const body = procBodyRange(source, proc_start) orelse return;
+        var offset = body.start;
+        while (offset < body.end) {
+            const line_end = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse body.end;
+            const raw_line = source[offset..@min(line_end, body.end)];
+            const comment_pos = std.mem.indexOf(u8, raw_line, "//") orelse raw_line.len;
+            const code = std.mem.trim(u8, raw_line[0..comment_pos], " \t\r\n");
+            if (try vm.parseWorkspaceLocalDeclaration(code, local_types)) |decl| {
+                const name_offset_in_line = std.mem.indexOf(u8, raw_line, decl.name) orelse 0;
+                const absolute_name_offset = offset + name_offset_in_line;
+                try local_types.put(vm.allocator, decl.name, decl.type_text);
+                try vm.compiler_message_nodes.append(vm.allocator, .{
+                    .kind = "DECLARATION",
+                    .flags = "ALLOWED_BY_CONTEXT",
+                    .text = decl.name,
+                    .name = decl.name,
+                    .path = path,
+                    .line_number = lineNumberAt(source, absolute_name_offset),
+                    .type_text = decl.type_text,
+                    .start = absolute_name_offset,
+                    .end = absolute_name_offset + decl.name.len,
+                });
+            }
+            offset = @min(line_end + 1, body.end);
+        }
+        _ = proc_name;
+    }
+
+    const ParsedLocalDecl = struct {
+        name: []const u8,
+        type_text: []const u8,
+    };
+
+    fn parseWorkspaceLocalDeclaration(vm: *VM, line: []const u8, local_types: std.StringHashMapUnmanaged([]const u8)) !?ParsedLocalDecl {
+        if (line.len == 0 or std.mem.indexOf(u8, line, "::") != null) return null;
+        const first = line[0];
+        if (!isIdentStart(first)) return null;
+        var name_end: usize = 1;
+        while (name_end < line.len and isIdentContinue(line[name_end])) name_end += 1;
+        const name = line[0..name_end];
+        var i = name_end;
+        while (i < line.len and (line[i] == ' ' or line[i] == '\t')) i += 1;
+        if (i >= line.len or line[i] != ':') return null;
+        i += 1;
+        if (i < line.len and line[i] == '=') {
+            i += 1;
+            const rhs = std.mem.trim(u8, line[i..], " \t;");
+            if (rhs.len >= 2 and rhs[0] == '*' and isIdentStart(rhs[1])) {
+                var operand_end: usize = 2;
+                while (operand_end < rhs.len and isIdentContinue(rhs[operand_end])) operand_end += 1;
+                const operand_name = rhs[1..operand_end];
+                const operand_type = local_types.get(operand_name) orelse "int";
+                const owned = try std.fmt.allocPrint(vm.allocator, "*{s}", .{std.mem.trim(u8, operand_type, " \t\r\n")});
+                try vm.rendered_code_strings.append(vm.allocator, owned);
+                return .{ .name = name, .type_text = owned };
+            }
+            return .{ .name = name, .type_text = "int" };
+        }
+        const type_start = i;
+        while (i < line.len and line[i] != '=' and line[i] != ';') i += 1;
+        const type_text = std.mem.trim(u8, line[type_start..i], " \t\r\n");
+        if (type_text.len == 0) return null;
+        return .{ .name = name, .type_text = type_text };
+    }
+
+    fn procBodyRange(source: []const u8, proc_start: usize) ?struct { start: usize, end: usize } {
+        const open_rel = std.mem.indexOfScalarPos(u8, source, proc_start, '{') orelse return null;
+        var depth: usize = 0;
+        var i = open_rel;
+        while (i < source.len) : (i += 1) {
+            switch (source[i]) {
+                '{' => depth += 1,
+                '}' => {
+                    if (depth == 0) return null;
+                    depth -= 1;
+                    if (depth == 0) return .{ .start = open_rel + 1, .end = i };
+                },
+                '"' => {
+                    i += 1;
+                    while (i < source.len) : (i += 1) {
+                        if (source[i] == '\\' and i + 1 < source.len) {
+                            i += 1;
+                            continue;
+                        }
+                        if (source[i] == '"') break;
+                    }
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn isIdentStart(c: u8) bool {
+        return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_';
+    }
+
+    fn isIdentContinue(c: u8) bool {
+        return isIdentStart(c) or (c >= '0' and c <= '9');
     }
 
     fn lineNumberAt(source: []const u8, offset: usize) i64 {
@@ -1558,6 +1729,35 @@ pub const VM = struct {
             if (c == '\n') line += 1;
         }
         return line;
+    }
+
+    fn astNodeSource(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) []const u8 {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return "";
+        var start = ast.tokens[ast.mainToken(node)].start;
+        var end = ast.tokens[ast.mainToken(node)].end;
+        collectAstNodeStart(ast, node, &start);
+        collectAstNodeEnd(ast, node, &end);
+        return std.mem.trim(u8, ast.source[start..@min(end, ast.source.len)], " \t\r\n;");
+    }
+
+    fn collectAstNodeStart(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex, start: *u32) void {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return;
+        start.* = @min(start.*, ast.tokens[ast.mainToken(node)].start);
+        const data = ast.data(node);
+        switch (ast.tag(node)) {
+            .pointer_type, .unary_expr, .expr_stmt, .return_stmt => collectAstNodeStart(ast, data.lhs, start),
+            else => {},
+        }
+    }
+
+    fn collectAstNodeEnd(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex, end: *u32) void {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return;
+        end.* = @max(end.*, ast.tokens[ast.mainToken(node)].end);
+        const data = ast.data(node);
+        switch (ast.tag(node)) {
+            .pointer_type, .unary_expr, .expr_stmt, .return_stmt => collectAstNodeEnd(ast, data.lhs, end),
+            else => {},
+        }
     }
 
     fn hostCompilerWaitForMessage(vm: *VM) ?usize {
@@ -1575,9 +1775,13 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "executable_write_failed")) return .{ .bool = message.executable_write_failed };
         if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
         if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = 0 };
-        if (std.mem.eql(u8, field_name, "all") or std.mem.eql(u8, field_name, "declarations")) {
+        if (std.mem.eql(u8, field_name, "all")) {
             if (message.all_start > vm.compiler_message_nodes.items.len or message.all_count > vm.compiler_message_nodes.items.len - message.all_start) return diag.failAt(0, "VM Message_Typechecked node slice out of range", .{});
             return .{ .code_nodes = vm.compiler_message_nodes.items[message.all_start .. message.all_start + message.all_count] };
+        }
+        if (std.mem.eql(u8, field_name, "declarations")) {
+            if (message.declaration_start > vm.compiler_message_declarations.items.len or message.declaration_count > vm.compiler_message_declarations.items.len - message.declaration_start) return diag.failAt(0, "VM Message_Typechecked declarations slice out of range", .{});
+            return .{ .code_nodes = vm.compiler_message_declarations.items[message.declaration_start .. message.declaration_start + message.declaration_count] };
         }
         if (std.mem.eql(u8, field_name, "dump_text")) return .{ .string = message.dump_text };
         return diag.failAt(0, "VM Message has no implemented field '{s}'", .{field_name});
@@ -1620,6 +1824,21 @@ pub const VM = struct {
             .type_id => |type_id| typeName(type_id),
             else => return diag.failAt(0, "VM Type_Info field access requires a Type value", .{}),
         };
+        if (isPointerTypeText(type_name)) {
+            if (std.mem.eql(u8, field_name, "type")) return .{ .int = 4 };
+            if (std.mem.eql(u8, field_name, "pointer_to")) return .{ .type_text = stripOnePointer(type_name) };
+            return diag.failAt(0, "VM Type_Info_Pointer has no implemented field '{s}'", .{field_name});
+        }
+        if (std.mem.eql(u8, type_name, "Procedure")) {
+            if (std.mem.eql(u8, field_name, "type")) return .{ .int = 8 };
+            if (std.mem.eql(u8, field_name, "name")) return .{ .string = "Procedure" };
+            return diag.failAt(0, "VM Type_Info procedure metadata has no implemented field '{s}'", .{field_name});
+        }
+        if (builtinTypeInfoTag(type_name)) |tag| {
+            if (std.mem.eql(u8, field_name, "type")) return .{ .int = tag };
+            if (std.mem.eql(u8, field_name, "name")) return .{ .string = type_name };
+            return diag.failAt(0, "VM Type_Info builtin metadata has no implemented field '{s}'", .{field_name});
+        }
         const info_index = vm.program.typeInfoIndexByName(type_name) orelse return diag.failAt(0, "VM has no Type_Info metadata for '{s}'", .{type_name});
         const info = vm.program.type_infos.items[info_index];
         if (std.mem.eql(u8, field_name, "type")) return .{ .int = info.tag };
@@ -1632,6 +1851,24 @@ pub const VM = struct {
             return .{ .ptr = header };
         }
         return diag.failAt(0, "VM Type_Info has no implemented field '{s}'", .{field_name});
+    }
+
+    fn isPointerTypeText(raw: []const u8) bool {
+        return std.mem.startsWith(u8, std.mem.trim(u8, raw, " \t\r\n"), "*");
+    }
+
+    fn stripOnePointer(raw: []const u8) []const u8 {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] != '*') return trimmed;
+        return std.mem.trim(u8, trimmed[1..], " \t\r\n");
+    }
+
+    fn builtinTypeInfoTag(name: []const u8) ?i64 {
+        if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64")) return 1;
+        if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64")) return 2;
+        if (std.mem.eql(u8, name, "bool")) return 3;
+        if (std.mem.eql(u8, name, "string")) return 9;
+        return null;
     }
 
     fn typeInfoMemberField(vm: *VM, value: RegisterValue, field_name: []const u8, diag: Diagnostic) !RegisterValue {
@@ -2182,7 +2419,8 @@ pub const VM = struct {
         const callee = std.mem.trim(u8, trimmed[0..open_rel], " \t\r\n");
         if (!isSimpleIdentifier(callee)) return null;
 
-        const arg_start_index: u32 = @intCast(arguments.items.len);
+        var call_arg_indices = std.ArrayList(u32).empty;
+        defer call_arg_indices.deinit(vm.allocator);
         const args_text = trimmed[open_rel + 1 .. close_rel];
         var cursor: usize = 0;
         var depth: usize = 0;
@@ -2204,12 +2442,13 @@ pub const VM = struct {
             if (segment.len != 0) {
                 const relative = std.mem.indexOf(u8, args_text[segment_start..cursor], segment) orelse 0;
                 const start = base_offset + open_rel + 1 + segment_start + relative;
-                const expr_index: u32 = @intCast(nodes.items.len);
-                try nodes.append(vm.allocator, try vm.codeNodeForText(tree_index, expr_index, segment, start));
-                try arguments.append(vm.allocator, .{ .tree = tree_index, .expression_index = expr_index });
+                const expr_index = try vm.appendCodeExpressionNode(tree_index, segment, start, nodes, arguments);
+                try call_arg_indices.append(vm.allocator, expr_index);
             }
             segment_start = cursor + 1;
         }
+        const arg_start_index: u32 = @intCast(arguments.items.len);
+        for (call_arg_indices.items) |expr_index| try arguments.append(vm.allocator, .{ .tree = tree_index, .expression_index = expr_index });
         return CodeNode{
             .tree = tree_index,
             .kind = "PROCEDURE_CALL",
@@ -2218,8 +2457,104 @@ pub const VM = struct {
             .start = base_offset,
             .end = base_offset + trimmed.len,
             .arg_start = arg_start_index,
-            .arg_count = @intCast(arguments.items.len - arg_start_index),
+            .arg_count = @intCast(call_arg_indices.items.len),
         };
+    }
+
+    fn appendCodeExpressionNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n;");
+        const relative = std.mem.indexOf(u8, text, trimmed) orelse 0;
+        const absolute_start = start + relative;
+        const node_index: u32 = @intCast(nodes.items.len);
+
+        if (try vm.tryAppendProcedureCallExpression(tree_index, node_index, trimmed, absolute_start, nodes, arguments)) return node_index;
+        if (try vm.tryAppendBinaryExpression(tree_index, node_index, trimmed, absolute_start, nodes, arguments)) return node_index;
+
+        try nodes.append(vm.allocator, try vm.codeNodeForText(tree_index, node_index, trimmed, absolute_start));
+        return node_index;
+    }
+
+    fn tryAppendProcedureCallExpression(vm: *VM, tree_index: u32, node_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!bool {
+        const open_rel = std.mem.indexOfScalar(u8, text, '(') orelse return false;
+        if (open_rel == 0) return false;
+        const close_rel = matchingCloseParen(text, open_rel) orelse return false;
+        if (std.mem.trim(u8, text[close_rel + 1 ..], " \t\r\n").len != 0) return false;
+        const callee = std.mem.trim(u8, text[0..open_rel], " \t\r\n");
+        if (!isSimpleIdentifier(callee)) return false;
+
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{
+            .tree = tree_index,
+            .index = node_index,
+            .kind = "PROCEDURE_CALL",
+            .flags = "0",
+            .text = text,
+            .start = start,
+            .end = start + text.len,
+        });
+
+        var call_arg_indices = std.ArrayList(u32).empty;
+        defer call_arg_indices.deinit(vm.allocator);
+        const args_text = text[open_rel + 1 .. close_rel];
+        var cursor: usize = 0;
+        var depth: usize = 0;
+        var segment_start: usize = 0;
+        while (cursor <= args_text.len) : (cursor += 1) {
+            const at_end = cursor == args_text.len;
+            if (!at_end) {
+                switch (args_text[cursor]) {
+                    '(', '{', '[' => depth += 1,
+                    ')', '}', ']' => {
+                        if (depth > 0) depth -= 1;
+                    },
+                    ',' => {},
+                    else => {},
+                }
+                if (args_text[cursor] != ',' or depth != 0) continue;
+            }
+            const segment = std.mem.trim(u8, args_text[segment_start..cursor], " \t\r\n");
+            if (segment.len != 0) {
+                const relative = std.mem.indexOf(u8, args_text[segment_start..cursor], segment) orelse 0;
+                const expr_start = start + open_rel + 1 + segment_start + relative;
+                const expr_index = try vm.appendCodeExpressionNode(tree_index, segment, expr_start, nodes, arguments);
+                try call_arg_indices.append(vm.allocator, expr_index);
+            }
+            segment_start = cursor + 1;
+        }
+        nodes.items[node_index].arg_start = @intCast(arguments.items.len);
+        for (call_arg_indices.items) |expr_index| try arguments.append(vm.allocator, .{ .tree = tree_index, .expression_index = expr_index });
+        nodes.items[node_index].arg_count = @intCast(call_arg_indices.items.len);
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return true;
+    }
+
+    fn tryAppendBinaryExpression(vm: *VM, tree_index: u32, node_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!bool {
+        const split = findTopLevelBinaryOperator(text) orelse return false;
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{
+            .tree = tree_index,
+            .index = node_index,
+            .kind = "BINARY_OPERATOR",
+            .flags = "0",
+            .text = text,
+            .start = start,
+            .end = start + text.len,
+        });
+        const lhs_text = std.mem.trim(u8, text[0..split.index], " \t\r\n");
+        if (lhs_text.len != 0) {
+            const lhs_relative = std.mem.indexOf(u8, text[0..split.index], lhs_text) orelse 0;
+            _ = try vm.appendCodeExpressionNode(tree_index, lhs_text, start + lhs_relative, nodes, arguments);
+        }
+        const rhs_raw_start = split.index + split.width;
+        const rhs_text = std.mem.trim(u8, text[rhs_raw_start..], " \t\r\n");
+        if (rhs_text.len != 0) {
+            const rhs_relative = std.mem.indexOf(u8, text[rhs_raw_start..], rhs_text) orelse 0;
+            _ = try vm.appendCodeExpressionNode(tree_index, rhs_text, start + rhs_raw_start + rhs_relative, nodes, arguments);
+        }
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return true;
     }
 
     fn currentCodeNode(vm: *VM, value: RegisterValue, diag: Diagnostic, context: []const u8) !CodeNode {
@@ -2536,6 +2871,46 @@ fn matchingCloseParen(text: []const u8, open_index: usize) ?usize {
         }
     }
     return null;
+}
+
+const BinarySplit = struct {
+    index: usize,
+    width: usize,
+};
+
+fn findTopLevelBinaryOperator(text: []const u8) ?BinarySplit {
+    var best: ?BinarySplit = null;
+    var best_precedence: u8 = 0;
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '(','{','[' => depth += 1,
+            ')','}',']' => {
+                if (depth > 0) depth -= 1;
+            },
+            '"' => {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (text[i] == '"') break;
+                }
+            },
+            '+', '-' => if (depth == 0 and i != 0) {
+                best = .{ .index = i, .width = 1 };
+                best_precedence = 1;
+            },
+            '*', '/', '%' => if (depth == 0 and i != 0 and best_precedence == 0) {
+                best = .{ .index = i, .width = 1 };
+                best_precedence = 2;
+            },
+            else => {},
+        }
+    }
+    return best;
 }
 
 fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !f64 {

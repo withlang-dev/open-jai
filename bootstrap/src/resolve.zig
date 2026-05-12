@@ -343,6 +343,7 @@ fn putCompilerModuleSymbols(r: *Resolved) !void {
         "Code_Procedure_Call",
         "Code_Declaration",
         "Source_Code_Location",
+        "Type_Info_Pointer",
     }) |name| {
         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
     }

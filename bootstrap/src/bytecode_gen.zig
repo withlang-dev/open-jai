@@ -2129,7 +2129,7 @@ const GenContext = struct {
                     const init_is_compiler_message = if (init_type_text) |text| isCompilerMessageTypeText(text) else false;
                     const init_is_type_info_handle = if (init_type_text) |text| blk: {
                         const handle_name = firstTypeWord(stripPointerText(text));
-                        break :blk std.mem.eql(u8, handle_name, "Type_Info_Struct") or std.mem.eql(u8, handle_name, "Type_Info_Struct_Member");
+                        break :blk std.mem.eql(u8, handle_name, "Type_Info_Struct") or std.mem.eql(u8, handle_name, "Type_Info_Pointer") or std.mem.eql(u8, handle_name, "Type_Info_Struct_Member");
                     } else false;
                     const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
@@ -3143,8 +3143,10 @@ const GenContext = struct {
                     .pipe_pipe, .pipe_pipe_equal => .bool_or,
                     else => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Phase 2 bytecode currently supports only arithmetic/equality/logical binary expressions", .{}),
                 };
-                const lhs = try ctx.genExpr(ast.data(expr).lhs, diag);
-                const rhs = try ctx.genExpr(ast.data(expr).rhs, diag);
+                const lhs_node = ast.data(expr).lhs;
+                const rhs_node = ast.data(expr).rhs;
+                const lhs = if (try ctx.emitContextualUnqualifiedEnum(lhs_node, rhs_node, expr, diag)) |reg| reg else try ctx.genExpr(lhs_node, diag);
+                const rhs = if (try ctx.emitContextualUnqualifiedEnum(rhs_node, lhs_node, expr, diag)) |reg| reg else try ctx.genExpr(rhs_node, diag);
                 const compound_assignment = op == .star_equal or op == .plus_equal or op == .minus_equal or op == .slash_equal or op == .ampersand_equal or op == .pipe_equal or op == .caret_equal or op == .pipe_pipe_equal;
                 const reg = if (compound_assignment and ast.tag(ast.data(expr).lhs) == .identifier)
                     lhs
@@ -3255,6 +3257,9 @@ const GenContext = struct {
                     if (isCompilerMessageEnumName(field_name) or isCompilerPhaseEnumName(field_name)) {
                         return try ctx.emitString(expr, field_name);
                     }
+                    if (typeInfoTagValue(field_name)) |value| {
+                        return try ctx.emitInt(expr, value);
+                    }
                     if (codeLiteralValueTypeByName(field_name)) |value_type| {
                         return try ctx.emitInt(expr, value_type);
                     }
@@ -3296,7 +3301,7 @@ const GenContext = struct {
                 const base_reg = try ctx.genExpr(ast.data(expr).lhs, diag);
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
                     const base_name = firstTypeWord(stripPointerText(base_text));
-                    if (std.mem.eql(u8, base_name, "Type_Info_Struct")) {
+                    if (std.mem.eql(u8, firstTypeWord(base_text), "Type") or std.mem.eql(u8, base_name, "Type_Info_Pointer") or std.mem.eql(u8, base_name, "Type_Info_Struct")) {
                         const field_idx = try program.addString(field_name);
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -3311,7 +3316,7 @@ const GenContext = struct {
                         return reg;
                     }
                 }
-                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "expression") or std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "notes") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64") or std.mem.eql(u8, field_name, "_string")) {
+                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "expression") or std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "notes") or std.mem.eql(u8, field_name, "type") or std.mem.eql(u8, field_name, "subexpressions") or std.mem.eql(u8, field_name, "enclosing_load") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64") or std.mem.eql(u8, field_name, "_string")) {
                     if (isCodeNodeExpression(ctx, ast.data(expr).lhs, diag)) {
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -3325,6 +3330,12 @@ const GenContext = struct {
                             .code_node_field_name
                         else if (std.mem.eql(u8, field_name, "notes"))
                             .code_node_field_notes
+                        else if (std.mem.eql(u8, field_name, "type"))
+                            .code_node_field_type
+                        else if (std.mem.eql(u8, field_name, "subexpressions"))
+                            .code_node_field_subexpressions
+                        else if (std.mem.eql(u8, field_name, "enclosing_load"))
+                            .code_node_field_enclosing_load
                         else if (std.mem.eql(u8, field_name, "arguments_unsorted"))
                             .code_proc_call_arguments
                         else if (std.mem.eql(u8, field_name, "value_type"))
@@ -4889,6 +4900,20 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitContextualUnqualifiedEnum(ctx: *GenContext, candidate: NodeIndex, context: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+        const ast = ctx.ast;
+        if (candidate == @import("Ast.zig").null_node or candidate >= ast.node_tags.items.len or ast.tag(candidate) != .field_access) return null;
+        if (ast.data(candidate).lhs != @import("Ast.zig").null_node) return null;
+        const field_name = ast.tokenSlice(ast.data(candidate).rhs);
+        if (codeLiteralValueTypeByName(field_name)) |value| {
+            if (isCodeLiteralValueTypeContext(ctx, context, diag)) return try ctx.emitInt(source_node, value);
+        }
+        if (typeInfoTagValue(field_name)) |value| {
+            if (isTypeInfoTagContext(ctx, context, diag)) return try ctx.emitInt(source_node, value);
+        }
+        return null;
+    }
+
     fn emitBool(ctx: *GenContext, source_node: NodeIndex, value: bool) !Bytecode.Register {
         const reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
@@ -5939,6 +5964,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "expression")) return "*Code_Node";
                 if (std.mem.eql(u8, field_name, "name")) return "string";
                 if (std.mem.eql(u8, field_name, "notes")) return "[] Code_Note";
+                if (std.mem.eql(u8, field_name, "type")) return "Type";
+                if (std.mem.eql(u8, field_name, "subexpressions")) return "[] Code_Node";
+                if (std.mem.eql(u8, field_name, "enclosing_load")) return "bool";
                 if (std.mem.eql(u8, field_name, "arguments_unsorted")) return "[] Code_Argument";
                 if (std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64")) return "int";
                 if (std.mem.eql(u8, field_name, "_string")) return "string";
@@ -5957,6 +5985,14 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "type")) return "int";
                 if (std.mem.eql(u8, field_name, "name")) return "string";
                 if (std.mem.eql(u8, field_name, "members")) return "[..] Type_Info_Struct_Member";
+            }
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Type")) {
+                if (std.mem.eql(u8, field_name, "type")) return "int";
+                if (std.mem.eql(u8, field_name, "pointer_to")) return "Type";
+            }
+            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Pointer")) {
+                if (std.mem.eql(u8, field_name, "type")) return "int";
+                if (std.mem.eql(u8, field_name, "pointer_to")) return "Type";
             }
             if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Struct_Member")) {
                 if (std.mem.eql(u8, field_name, "name")) return "string";
@@ -6226,6 +6262,24 @@ fn isCodeNodeExpression(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) boo
         .identifier => false,
         else => false,
     };
+}
+
+fn isCodeLiteralValueTypeContext(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
+    const ast = ctx.ast;
+    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len or ast.tag(expr) != .field_access) return false;
+    if (!std.mem.eql(u8, ast.tokenSlice(ast.data(expr).rhs), "value_type")) return false;
+    return isCodeNodeExpression(ctx, ast.data(expr).lhs, diag);
+}
+
+fn isTypeInfoTagContext(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
+    const ast = ctx.ast;
+    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len or ast.tag(expr) != .field_access) return false;
+    if (!std.mem.eql(u8, ast.tokenSlice(ast.data(expr).rhs), "type")) return false;
+    const base_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return false;
+    const base_name = firstTypeWord(stripPointerText(base_ty));
+    return std.mem.eql(u8, firstTypeWord(base_ty), "Type") or
+        std.mem.eql(u8, base_name, "Type_Info_Pointer") or
+        std.mem.eql(u8, base_name, "Type_Info_Struct");
 }
 
 fn isCodeArgumentExpression(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {

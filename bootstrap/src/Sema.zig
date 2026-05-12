@@ -1440,6 +1440,7 @@ fn isCompilerMetaTypeName(name: []const u8) bool {
         std.mem.eql(u8, name, "Code_Procedure_Call") or
         std.mem.eql(u8, name, "Code_Declaration") or
         std.mem.eql(u8, name, "Source_Code_Location") or
+        std.mem.eql(u8, name, "Type_Info_Pointer") or
         std.mem.eql(u8, name, "Message") or
         std.mem.eql(u8, name, "Message_File") or
         std.mem.eql(u8, name, "Message_Import") or

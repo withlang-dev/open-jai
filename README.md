@@ -38,6 +38,7 @@ out/         Generated build output, ignored by git
 
 Important docs:
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): clean-room contribution rules.
 - [`docs/open_jai_spec.md`](docs/open_jai_spec.md): language goals and
   specification notes.
 - [`docs/OpenJai_implementation_notes.md`](docs/OpenJai_implementation_notes.md):

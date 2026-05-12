@@ -17,3 +17,7 @@ compiler_intercept_messages_are_real_values :: () {
 compiler_report_uses_code_declaration_locations :: () {
     expect_compile_output_contains("test/examples/workspace/compiler_report_location.jai", "test/examples/workspace/report_target.jai:3: declaration was reported\n");
 } @TestProcedure
+
+typechecked_subexpressions_drive_compiler_reports :: () {
+    expect_compile_output("examples/30/30.9_house_rules.jai", "main5.jai:4: Too many levels of pointer indirection.\n");
+} @TestProcedure
