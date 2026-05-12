@@ -195,7 +195,12 @@ export fn __openjai_print_bool(value: bool) void {
 export fn __openjai_print_type(type_id: u64) void {
     const text = switch (type_id) {
         1 => "bool",
+        4 => "s32",
         5 => "s64",
+        7 => "u8",
+        8 => "u16",
+        9 => "u32",
+        10 => "*void",
         12 => "float32",
         13 => "float64",
         14 => "string",

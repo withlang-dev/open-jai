@@ -246,6 +246,7 @@ pub const Compilation = struct {
             if (ast.tag(decl) != .proc_decl) continue;
             const next_decl: @import("Ast.zig").NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
             if (procHasExpandModifier(ast, decl, next_decl)) continue;
+            if (procHasPolymorphicParams(ast, decl)) continue;
             try comp.evaluateRunInitializersInBlock(ast, typed, resolved, ast.data(decl).lhs, diag);
         }
     }
@@ -286,6 +287,7 @@ pub const Compilation = struct {
             if (ast.tag(decl) != .proc_decl) continue;
             const next_decl: @import("Ast.zig").NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
             if (procHasExpandModifier(ast, decl, next_decl)) continue;
+            if (procHasPolymorphicParams(ast, decl)) continue;
             try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(decl).lhs, diag);
         }
     }
@@ -864,6 +866,35 @@ pub const Compilation = struct {
             ast.source.len;
         if (end <= start or end > ast.source.len) return false;
         return std.mem.indexOf(u8, ast.source[start..end], "#expand") != null;
+    }
+
+    const ProcSig = struct { params_extra: u32, return_type: @import("Ast.zig").NodeIndex };
+    fn procSignature(ast: *const @import("Ast.zig").Ast, proc: @import("Ast.zig").NodeIndex) ?ProcSig {
+        if (ast.data(proc).rhs == @import("Ast.zig").null_node) return null;
+        const sig = ast.extraSlice(ast.data(proc).rhs);
+        if (sig.len < 2) return null;
+        return .{ .params_extra = sig[0], .return_type = sig[1] };
+    }
+
+    fn procHasPolymorphicParams(ast: *const @import("Ast.zig").Ast, proc: @import("Ast.zig").NodeIndex) bool {
+        const sig = procSignature(ast, proc) orelse return false;
+        for (ast.extraSlice(sig.params_extra)) |param_idx| {
+            const param: @import("Ast.zig").NodeIndex = @intCast(param_idx);
+            const type_node = ast.data(param).lhs;
+            if (type_node == @import("Ast.zig").null_node) continue;
+            if (nodeTypeTextIncludesDollar(ast, type_node)) return true;
+        }
+        return false;
+    }
+
+    fn nodeTypeTextIncludesDollar(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return false;
+        const tok = ast.mainToken(node);
+        var start = ast.tokens[tok].start;
+        const end = ast.tokens[tok].end;
+        while (start > 0 and (ast.source[start - 1] == ' ' or ast.source[start - 1] == '\t')) start -= 1;
+        if (start > 0 and ast.source[start - 1] == '$') return true;
+        return std.mem.indexOfScalar(u8, ast.source[start..@min(end, ast.source.len)], '$') != null;
     }
 
     fn blockContainsDirectiveInsert(ast: *const @import("Ast.zig").Ast, block: @import("Ast.zig").NodeIndex) bool {

@@ -195,6 +195,7 @@ const GenContext = struct {
     external_registers: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
     external_types: std.StringHashMapUnmanaged([]const u8) = .empty,
     binding_option_fields: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
+    emitted_specialized_runs: std.StringHashMapUnmanaged(void) = .empty,
     local_code_bindings: std.ArrayList(CodeBinding) = .empty,
     owned_type_texts: std.ArrayList([]const u8) = .empty,
     return_type_node: NodeIndex = @import("Ast.zig").null_node,
@@ -237,6 +238,7 @@ const GenContext = struct {
         ctx.external_registers.deinit(ctx.program.allocator);
         ctx.external_types.deinit(ctx.program.allocator);
         ctx.binding_option_fields.deinit(ctx.program.allocator);
+        ctx.emitted_specialized_runs.deinit(ctx.program.allocator);
         for (ctx.loop_stack.items) |*frame| frame.break_patches.deinit(ctx.program.allocator);
         ctx.loop_stack.deinit(ctx.program.allocator);
         ctx.defer_stmts.deinit(ctx.program.allocator);
@@ -312,6 +314,34 @@ const GenContext = struct {
             const actual_type = typeTextForExpr(ctx, arg, diag) orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(arg)].start, "cannot infer polymorphic compile-time argument type for ${s}", .{name});
             try ctx.polymorph_types.put(ctx.program.allocator, name, actual_type);
             arg_index += 1;
+        }
+    }
+
+    fn bindInlinePolymorphTypes(ctx: *GenContext, params: []const u32, param_args: []const NodeIndex, restores: *std.ArrayList(TypeArgRestore), diag: Diagnostic) !void {
+        for (params, 0..) |param_idx, i| {
+            const param: NodeIndex = @intCast(param_idx);
+            const param_type = ctx.ast.data(param).lhs;
+            if (param_type == @import("Ast.zig").null_node) continue;
+            var type_text = std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n");
+            const explicitly_polymorphic = std.mem.startsWith(u8, type_text, "$");
+            if (explicitly_polymorphic) type_text = std.mem.trim(u8, type_text[1..], " \t\r\n");
+            const name = firstTypeWord(type_text);
+            if (name.len == 0) continue;
+            if (!explicitly_polymorphic and (isBuiltinTypeName(name) or ctx.resolved.lookup(name) != null)) continue;
+            const source = if (i < param_args.len and param_args[i] != @import("Ast.zig").null_node)
+                param_args[i]
+            else if (ctx.ast.data(param).rhs != @import("Ast.zig").null_node)
+                ctx.ast.data(param).rhs
+            else
+                continue;
+            const actual_type = typeTextForExpr(ctx, source, diag) orelse
+                return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source)].start, "cannot infer polymorphic argument type for ${s}", .{name});
+            try restores.append(ctx.program.allocator, .{
+                .name = name,
+                .had_old = ctx.polymorph_types.contains(name),
+                .old = ctx.polymorph_types.get(name) orelse "",
+            });
+            try ctx.polymorph_types.put(ctx.program.allocator, name, actual_type);
         }
     }
 
@@ -647,6 +677,13 @@ const GenContext = struct {
                 positional_index += 1;
             }
         }
+
+        var type_arg_restores = std.ArrayList(TypeArgRestore).empty;
+        defer {
+            restoreContainerTypeArgs(ctx, type_arg_restores.items) catch {};
+            type_arg_restores.deinit(allocator);
+        }
+        try ctx.bindInlinePolymorphTypes(params, param_args, &type_arg_restores, diag);
 
         var restores = std.ArrayList(ParamBindingRestore).empty;
         defer restores.deinit(allocator);
@@ -1595,6 +1632,10 @@ const GenContext = struct {
                     try ctx.genBlock(ast.data(stmt).lhs, diag);
                     return;
                 }
+                if (ctx.polymorph_types.count() != 0) {
+                    if (try tryExecuteSpecializedRunPrint(ctx, stmt, diag)) return;
+                    return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "unsupported specialized #run in polymorphic procedure", .{});
+                }
                 // `#run` is executed by Compilation before bytecode generation. It must
                 // not leave a runtime expression behind; otherwise compile-time-only
                 // compiler APIs can leak into the generated executable as placeholders.
@@ -2292,6 +2333,12 @@ const GenContext = struct {
             .identifier => {
                 const identifier_name = ast.tokenSlice(ast.mainToken(expr));
                 if (allocatorProcIdByName(identifier_name)) |proc_id| return try ctx.emitInt(expr, proc_id);
+                if (ctx.polymorph_types.get(identifier_name)) |actual_type| {
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .load_type, .dest = reg, .arg1 = typeIdFromTypeText(actual_type), .source_node = expr });
+                    return reg;
+                }
                 if (ctx.resolved.local_values.get(expr)) |decl| {
                     if (decl == @import("Ast.zig").null_node) {
                         const unresolved_name = ast.tokenSlice(ast.mainToken(expr));
@@ -5037,6 +5084,25 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     switch (ast.tag(expr)) {
         .string_literal => return "string",
         .char_literal => return "u8",
+        .integer_literal => return "int",
+        .float_literal => return "float32",
+        .binary_expr => {
+            const lhs_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag);
+            const rhs_ty = typeTextForExpr(ctx, ast.data(expr).rhs, diag);
+            if (lhs_ty) |lhs| {
+                const lhs_name = firstTypeWord(std.mem.trim(u8, lhs, " \t\r\n"));
+                if (std.mem.eql(u8, lhs_name, "float64")) return lhs;
+                if (std.mem.eql(u8, lhs_name, "float") or std.mem.eql(u8, lhs_name, "float32")) return "float32";
+                if (!std.mem.eql(u8, lhs_name, "int") and !std.mem.eql(u8, lhs_name, "s64")) return lhs;
+            }
+            if (rhs_ty) |rhs| {
+                const rhs_name = firstTypeWord(std.mem.trim(u8, rhs, " \t\r\n"));
+                if (std.mem.eql(u8, rhs_name, "float64")) return rhs;
+                if (std.mem.eql(u8, rhs_name, "float") or std.mem.eql(u8, rhs_name, "float32")) return "float32";
+                if (!std.mem.eql(u8, rhs_name, "int") and !std.mem.eql(u8, rhs_name, "s64")) return rhs;
+            }
+            return lhs_ty orelse rhs_ty;
+        },
         .identifier => {
             const ident_name = ast.tokenSlice(ast.mainToken(expr));
             if (ctx.polymorph_types.get(ident_name)) |actual_type| return actual_type;
@@ -6896,6 +6962,101 @@ fn firstTypeWord(text: []const u8) []const u8 {
         if (!(std.ascii.isAlphanumeric(c) or c == '_')) break;
     }
     return text[0..end];
+}
+
+fn tryExecuteSpecializedRunPrint(ctx: *GenContext, run_stmt: NodeIndex, diag: Diagnostic) anyerror!bool {
+    const ast = ctx.ast;
+    if (ast.tokens[ast.mainToken(run_stmt)].tag != .directive_run) return false;
+    const call = ast.data(run_stmt).lhs;
+    if (call == @import("Ast.zig").null_node or ast.tag(call) != .call_expr) return false;
+    const callee = ast.data(call).lhs;
+    if (callee == @import("Ast.zig").null_node or ast.tag(callee) != .identifier) return false;
+    const name = ast.tokenSlice(ast.mainToken(callee));
+    if (!std.mem.eql(u8, name, "print") and !std.mem.eql(u8, name, "log")) return false;
+    const args = ast.extraSlice(ast.data(call).rhs);
+    if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(call)].start, "#run print expects at least one argument", .{});
+    const fmt_node: NodeIndex = @intCast(args[0]);
+    if (ast.tag(fmt_node) != .string_literal) return diag.failAt(ast.tokens[ast.mainToken(fmt_node)].start, "specialized #run print requires a string literal format", .{});
+
+    const raw_fmt = ast.stringTokenContents(ast.mainToken(fmt_node));
+    const fmt = try decodeString(ctx.program.allocator, raw_fmt, diag, ast.tokens[ast.mainToken(fmt_node)].start);
+    defer ctx.program.allocator.free(fmt);
+
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(ctx.program.allocator);
+    var start: usize = 0;
+    var arg_index: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) : (i += 1) {
+        if (fmt[i] != '%') continue;
+        if (i > 0 and fmt[i - 1] == '\\') {
+            if (start < i - 1) try output.appendSlice(ctx.program.allocator, fmt[start .. i - 1]);
+            try output.append(ctx.program.allocator, '%');
+            start = i + 1;
+            continue;
+        }
+        if (i + 1 < fmt.len and fmt[i + 1] == '%') {
+            try output.appendSlice(ctx.program.allocator, fmt[start .. i + 1]);
+            i += 1;
+            start = i + 1;
+            continue;
+        }
+        if (start < i) try output.appendSlice(ctx.program.allocator, fmt[start..i]);
+        var selected_arg_index = arg_index;
+        var next_start = i + 1;
+        if (i + 1 < fmt.len and fmt[i + 1] >= '1' and fmt[i + 1] <= '9') {
+            selected_arg_index = fmt[i + 1] - '1';
+            next_start = i + 2;
+        } else {
+            arg_index += 1;
+        }
+        if (selected_arg_index + 1 >= args.len) return diag.failAt(ast.tokens[ast.mainToken(fmt_node)].start, "print format references argument index out of range", .{});
+        try appendSpecializedRunPrintArg(ctx, &output, @intCast(args[selected_arg_index + 1]), diag);
+        start = next_start;
+    }
+    if (start < fmt.len) try output.appendSlice(ctx.program.allocator, fmt[start..]);
+
+    const key = try std.fmt.allocPrint(ctx.program.allocator, "{d}:{s}", .{ run_stmt, output.items });
+    if (ctx.emitted_specialized_runs.contains(key)) {
+        ctx.program.allocator.free(key);
+        return true;
+    }
+    try ctx.emitted_specialized_runs.put(ctx.program.allocator, key, {});
+    try ctx.owned_type_texts.append(ctx.program.allocator, key);
+    std.debug.print("{s}", .{output.items});
+    return true;
+}
+
+fn appendSpecializedRunPrintArg(ctx: *GenContext, output: *std.ArrayList(u8), arg_node: NodeIndex, diag: Diagnostic) anyerror!void {
+    const ast = ctx.ast;
+    switch (ast.tag(arg_node)) {
+        .identifier => {
+            const name = ast.tokenSlice(ast.mainToken(arg_node));
+            if (ctx.polymorph_types.get(name)) |actual_type| {
+                try output.appendSlice(ctx.program.allocator, displayTypeText(actual_type));
+                return;
+            }
+        },
+        .string_literal => {
+            const decoded = try decodeString(ctx.program.allocator, ast.stringTokenContents(ast.mainToken(arg_node)), diag, ast.tokens[ast.mainToken(arg_node)].start);
+            defer ctx.program.allocator.free(decoded);
+            try output.appendSlice(ctx.program.allocator, decoded);
+            return;
+        },
+        .integer_literal, .float_literal => {
+            try output.appendSlice(ctx.program.allocator, ast.tokenSlice(ast.mainToken(arg_node)));
+            return;
+        },
+        else => {},
+    }
+    return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "unsupported specialized #run print argument", .{});
+}
+
+fn displayTypeText(raw: []const u8) []const u8 {
+    const clean = std.mem.trim(u8, raw, " \t\r\n");
+    const name = firstTypeWord(clean);
+    if (std.mem.eql(u8, name, "float")) return "float32";
+    return name;
 }
 
 fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const u32, diag: Diagnostic) anyerror!void {

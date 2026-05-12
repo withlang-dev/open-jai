@@ -2259,7 +2259,7 @@ fn typeName(type_id: u32) []const u8 {
         8 => "u16",
         9 => "u32",
         10 => "*void",
-        12 => "float",
+        12 => "float32",
         13 => "float64",
         14 => "string",
         15 => "Type",
