@@ -68,8 +68,20 @@ compile_time_if_output :: () {
     expect_program_output_contains("examples/26/26.5_if.jai", "name is ");
 } @TestProcedure
 
+insert_multi_output :: () {
+    expect_program_output("examples/26/26.24_insert_multi.jai", "Start of the report:\n    ... one iteration! Incrementing!\n    ... one iteration! Incrementing!\n    ... one iteration! Incrementing!\n    ... one iteration! Incrementing!\n    ... one iteration! Incrementing!\nEnd of the report - count is: 5.\n");
+} @TestProcedure
+
+insert_code_output :: () {
+    expect_program_output("examples/26/26.26_insert_code.jai", "x is 69105\nT is s64\nT is string\n");
+} @TestProcedure
+
 binary_swap_output :: () {
     expect_example_annotations("examples/28/28.13_binary_swap.jai");
+} @TestProcedure
+
+macro_swap_output :: () {
+    expect_program_output("examples/26/26.28_swap_macro.jai", "Pre-swap:  a is 3, b is 5\nPost-swap: a is 5, b is 3\n");
 } @TestProcedure
 
 placeholder_fulfillment_output :: () {

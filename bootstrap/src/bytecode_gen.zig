@@ -570,6 +570,12 @@ const GenContext = struct {
                 }
             },
             .identifier => {
+                const name = ast.tokenSlice(ast.mainToken(lhs));
+                if (ctx.external_registers.get(name)) |old_reg| {
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = result, .source_node = source_node });
+                    try ctx.external_registers.put(ctx.program.allocator, name, old_reg);
+                    return old_reg;
+                }
                 if (ctx.resolved.local_values.get(lhs)) |decl| {
                     if (ctx.decl_registers.get(decl)) |old_reg| {
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = result, .source_node = source_node });
@@ -727,10 +733,18 @@ const GenContext = struct {
                 ast.data(param).rhs
             else
                 return null;
-            const code = try ctx.codeTextForMacroArg(source, &[_]MacroCodeBinding{}, diag);
+            const param_type = ast.data(param).lhs;
+            const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
+            const captures_syntax = std.mem.eql(u8, param_type_text, "Code") or isCallerCodeExpr(ast, source);
+            const code = if (captures_syntax and !(ast.tag(source) == .meta_expr and ast.tokens[ast.mainToken(source)].tag == .directive_code))
+                ctx.nodeSource(source)
+            else
+                try ctx.codeTextForMacroArg(source, &[_]MacroCodeBinding{}, diag);
             try ctx.rememberLocalCode(param, code);
             const arg_reg = if (param_args[i] == @import("Ast.zig").null_node and isCallerLocationExpr(ast, source))
                 try ctx.emitSourceLocation(call_expr, call_expr, diag)
+            else if (captures_syntax)
+                try ctx.emitString(source, code)
             else
                 try genCallArg(ctx, source, diag);
             const old = ctx.decl_registers.get(param);
@@ -772,8 +786,13 @@ const GenContext = struct {
         while (i > 0) {
             i -= 1;
             const binding = ctx.local_code_bindings.items[i];
-            if (binding.decl == decl) return binding.code;
             if (std.mem.eql(u8, binding.name, name)) return binding.code;
+        }
+        i = ctx.local_code_bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            const binding = ctx.local_code_bindings.items[i];
+            if (decl != @import("Ast.zig").null_node and binding.decl == decl) return binding.code;
         }
         return null;
     }
@@ -813,11 +832,17 @@ const GenContext = struct {
             const using_default = i >= args.len;
             const arg = if (!using_default) @as(NodeIndex, @intCast(args[i])) else ast.data(param).rhs;
             if (arg == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(param)].start, "#expand parameter has no argument or default value", .{});
-            const code = if (using_default and isCallerCodeExpr(ast, arg)) ctx.nodeSource(expr) else try ctx.codeTextForMacroArg(arg, bindings.items, diag);
-            try bindings.append(ctx.program.allocator, .{ .decl = param, .code = code });
-            try ctx.rememberLocalCode(param, code);
             const param_type = ast.data(param).lhs;
             const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
+            const captures_syntax = std.mem.eql(u8, param_type_text, "Code") or (using_default and isCallerCodeExpr(ast, arg));
+            const code = if (using_default and isCallerCodeExpr(ast, arg))
+                ctx.nodeSource(expr)
+            else if (captures_syntax and !(ast.tag(arg) == .meta_expr and ast.tokens[ast.mainToken(arg)].tag == .directive_code))
+                ctx.nodeSource(arg)
+            else
+                try ctx.codeTextForMacroArg(arg, bindings.items, diag);
+            try bindings.append(ctx.program.allocator, .{ .decl = param, .code = code });
+            try ctx.rememberLocalCode(param, code);
             if (std.mem.eql(u8, param_type_text, "Code") or (using_default and isCallerCodeExpr(ast, arg))) {
                 continue;
             }
@@ -1160,6 +1185,7 @@ const GenContext = struct {
 
     fn shouldParseInsertedCode(code: []const u8) bool {
         return std.mem.indexOf(u8, code, ":") != null or
+            std.mem.indexOfScalar(u8, code, '=') != null or
             std.mem.indexOf(u8, code, "print(") != null or
             std.mem.indexOf(u8, code, "for ") != null or
             std.mem.indexOf(u8, code, "#insert") != null;
@@ -1200,6 +1226,7 @@ const GenContext = struct {
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
         try child_ctx.genBlock(inserted_ast.data(main_proc).lhs, insert_diag);
+        try ctx.importInsertedLocals(&child_ctx, main_proc, diag);
     }
 
     fn insertedStatementNeedsSemicolon(code: []const u8) bool {
@@ -1253,7 +1280,66 @@ const GenContext = struct {
         };
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
-        return try child_ctx.genExpr(value_expr, insert_diag);
+        const value = try child_ctx.genExpr(value_expr, insert_diag);
+        const copy = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const value_type = typeTextForExpr(&child_ctx, value_expr, insert_diag);
+        if (value_type != null and (std.mem.eql(u8, firstTypeWord(value_type.?), "int") or std.mem.eql(u8, firstTypeWord(value_type.?), "s64") or std.mem.eql(u8, firstTypeWord(value_type.?), "u8") or std.mem.eql(u8, firstTypeWord(value_type.?), "s32"))) {
+            const zero = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = zero, .arg1 = 0, .source_node = source_node });
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .add_int, .dest = copy, .arg1 = value, .arg2 = zero, .source_node = source_node });
+        } else {
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = copy, .arg1 = value, .source_node = source_node });
+        }
+        return copy;
+    }
+
+    fn typeIdForCodeText(ctx: *GenContext, code: []const u8, source_node: NodeIndex, diag: Diagnostic) !u32 {
+        const allocator = ctx.program.allocator;
+        const source = try std.fmt.allocPrint(allocator, "main :: () {{\n__openjai_code_type_value := ({s});\n}}\n", .{std.mem.trim(u8, code, " \t\r\n;")});
+        defer allocator.free(source);
+
+        const lexer = @import("lexer.zig");
+        const parser = @import("parser.zig");
+        const resolve_mod = @import("resolve.zig");
+        const type_diag = Diagnostic.init(allocator, "#code-type", source);
+        var tokens = try lexer.tokenize(allocator, source, type_diag);
+        defer tokens.deinit(allocator);
+        const slice = tokens.slice();
+        var code_ast = try parser.parse(allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), type_diag);
+        defer {
+            allocator.free(code_ast.tokens);
+            code_ast.deinit();
+        }
+        var code_resolved = try resolve_mod.resolve(allocator, &code_ast, type_diag, false);
+        defer code_resolved.deinit();
+        const main_proc = code_resolved.main_proc orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code.type could not wrap captured code as an expression", .{});
+        const block = code_ast.data(main_proc).lhs;
+        const stmts = code_ast.extraSlice(code_ast.data(block).lhs);
+        if (stmts.len != 1) return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code.type expression wrapper is malformed", .{});
+        const stmt: NodeIndex = @intCast(stmts[0]);
+        if (code_ast.tag(stmt) != .const_decl and code_ast.tag(stmt) != .var_decl) {
+            return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code.type wrapper did not produce a value declaration", .{});
+        }
+        const value_expr = if (code_ast.tag(stmt) == .const_decl) code_ast.data(stmt).lhs else code_ast.data(stmt).rhs;
+        var child_ctx = GenContext{
+            .ast = &code_ast,
+            .resolved = &code_resolved,
+            .typed = null,
+            .program = ctx.program,
+            .proc = ctx.proc,
+            .allow_root_proc_calls = true,
+            .compile_time_host = ctx.compile_time_host,
+            .current_proc_node = main_proc,
+            .current_proc_index = ctx.current_proc_index,
+        };
+        defer child_ctx.deinit();
+        try ctx.exportVisibleValueNames(&child_ctx, diag);
+        const type_text = typeTextForExpr(&child_ctx, value_expr, type_diag) orelse {
+            return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code.type cannot infer the type of captured code '{s}'", .{code});
+        };
+        return typeIdFromTypeText(type_text);
     }
 
     fn exportVisibleValueNames(ctx: *GenContext, child: *GenContext, diag: Diagnostic) !void {
@@ -1277,6 +1363,30 @@ const GenContext = struct {
             try child.external_registers.put(child.program.allocator, name, entry.value_ptr.*);
             if (typeTextForDecl(ctx, decl, diag)) |ty| {
                 try child.external_types.put(child.program.allocator, name, ty);
+            }
+        }
+    }
+
+    fn importInsertedLocals(ctx: *GenContext, child: *GenContext, child_proc: NodeIndex, diag: Diagnostic) !void {
+        const block = child.ast.data(child_proc).lhs;
+        if (block == @import("Ast.zig").null_node or child.ast.tag(block) != .block) return;
+        for (child.ast.extraSlice(child.ast.data(block).lhs)) |stmt_idx| {
+            const stmt: NodeIndex = @intCast(stmt_idx);
+            if (stmt >= child.ast.node_tags.items.len) continue;
+            switch (child.ast.tag(stmt)) {
+                .var_decl, .const_decl => {},
+                else => continue,
+            }
+            const reg = child.decl_registers.get(stmt) orelse continue;
+            const raw_name = child.ast.tokenSlice(child.ast.mainToken(stmt));
+            const name = ctx.external_registers.getKey(raw_name) orelse blk: {
+                const name_index = try ctx.program.addByteArray(raw_name);
+                break :blk ctx.program.byte_arrays.items[name_index];
+            };
+            try ctx.external_registers.put(ctx.program.allocator, name, reg);
+            if (typeTextForDecl(child, stmt, diag)) |ty| {
+                const ty_index = try ctx.program.addByteArray(ty);
+                try ctx.external_types.put(ctx.program.allocator, name, ctx.program.byte_arrays.items[ty_index]);
             }
         }
     }
@@ -1503,6 +1613,10 @@ const GenContext = struct {
                     }
                 }
                 const rhs = try ctx.genExpr(rhs_node, diag);
+                if (ast.tag(lhs) == .meta_expr and ast.tokens[ast.mainToken(lhs)].tag == .directive_insert) {
+                    try ctx.storeInsertedLvalue(lhs, rhs, stmt, diag);
+                    return;
+                }
                 if (ast.tag(lhs) == .field_access) {
                     if (std.mem.eql(u8, ast.tokenSlice(ast.data(lhs).rhs), "_s64") and isCodeNodeExpression(ctx, ast.data(lhs).lhs, diag)) {
                         const base = try ctx.genExpr(ast.data(lhs).lhs, diag);
@@ -1602,7 +1716,7 @@ const GenContext = struct {
                     const init_type_text = typeTextForExpr(ctx, init, diag);
                     const init_first_word = if (init_type_text) |text| firstTypeWord(text) else "";
                     const init_is_code_node = if (init_type_text) |text| isCodeNodeTypeText(text) else false;
-                    const init_is_addressable_scalar = std.mem.eql(u8, init_first_word, "string") or
+                    const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
                     if (!init_is_code_node and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar)) {
                         const addr_reg = ctx.proc.num_registers;
@@ -1903,6 +2017,50 @@ const GenContext = struct {
             .block => try ctx.genBlock(stmt, diag),
             else => return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "unsupported statement in bytecode generator", .{}),
         }
+    }
+
+    fn storeInsertedLvalue(ctx: *GenContext, lhs: NodeIndex, rhs: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) !void {
+        const ast = ctx.ast;
+        const raw = try ctx.codeTextForMacroArg(ast.data(lhs).lhs, &[_]MacroCodeBinding{}, diag);
+        const clean = std.mem.trim(u8, raw, " \t\r\n;()");
+        if (clean.len == 0) return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "#insert lvalue produced empty code", .{});
+        if (isSimpleIdentifierText(clean)) {
+            const target = try ctx.visibleRegisterForName(clean, lhs, diag);
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = target, .arg1 = rhs, .source_node = source_node });
+            try ctx.external_registers.put(ctx.program.allocator, clean, target);
+            return;
+        }
+        return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "#insert lvalue currently requires an assignable identifier, got '{s}'", .{clean});
+    }
+
+    fn visibleRegisterForName(ctx: *GenContext, name: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        if (ctx.external_registers.get(name)) |reg| return reg;
+        var it = ctx.decl_registers.iterator();
+        while (it.next()) |entry| {
+            const decl = entry.key_ptr.*;
+            if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
+            switch (ctx.ast.tag(decl)) {
+                .var_decl, .const_decl => {},
+                else => continue,
+            }
+            if (std.mem.eql(u8, ctx.ast.tokenSlice(ctx.ast.mainToken(decl)), name)) return entry.value_ptr.*;
+        }
+        if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+            .const_value => |decl| {
+                if (ctx.decl_registers.get(decl)) |reg| return reg;
+                if (ctx.isTopLevelVarDecl(decl)) {
+                    const type_node = ctx.ast.data(decl).lhs;
+                    const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else "int";
+                    const addr = try ctx.emitGlobalAddress(decl, source_node, type_text, diag);
+                    const reg = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = reg, .arg1 = addr, .source_node = source_node });
+                    return reg;
+                }
+            },
+            else => {},
+        };
+        return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "#insert lvalue target '{s}' is unresolved", .{name});
     }
 
     fn tryEmitStaticArrayLiteralDeclaration(ctx: *GenContext, decl: NodeIndex, init: NodeIndex, diag: Diagnostic) !bool {
@@ -2670,6 +2828,14 @@ const GenContext = struct {
                     if (std.mem.eql(u8, field_name, "data")) return base_reg;
                 }
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
+                    if (std.mem.eql(u8, firstTypeWord(base_text), "Code") and std.mem.eql(u8, field_name, "type")) {
+                        const code = try ctx.codeTextForMacroArg(ast.data(expr).lhs, &[_]MacroCodeBinding{}, diag);
+                        const type_id = try ctx.typeIdForCodeText(code, expr, diag);
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_type, .dest = reg, .arg1 = type_id, .source_node = expr });
+                        return reg;
+                    }
                     if (std.mem.eql(u8, firstTypeWord(base_text), "Pool")) {
                         if (std.mem.eql(u8, field_name, "memblock_size")) return try ctx.emitInt(expr, 65536);
                         if (std.mem.eql(u8, field_name, "bytes_left")) {
@@ -5135,6 +5301,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
         .field_access => {
             const base_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
             const field_name = ast.tokenSlice(ast.data(expr).rhs);
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Code")) {
+                if (std.mem.eql(u8, field_name, "type")) return "Type";
+            }
             if (std.mem.eql(u8, firstTypeWord(base_ty), "string")) {
                 if (std.mem.eql(u8, field_name, "count")) return "int";
                 if (std.mem.eql(u8, field_name, "data")) return "*u8";
@@ -6962,6 +7131,32 @@ fn firstTypeWord(text: []const u8) []const u8 {
         if (!(std.ascii.isAlphanumeric(c) or c == '_')) break;
     }
     return text[0..end];
+}
+
+fn isAddressableScalarTypeWord(name: []const u8) bool {
+    return std.mem.eql(u8, name, "int") or
+        std.mem.eql(u8, name, "s64") or
+        std.mem.eql(u8, name, "u64") or
+        std.mem.eql(u8, name, "s32") or
+        std.mem.eql(u8, name, "u32") or
+        std.mem.eql(u8, name, "s16") or
+        std.mem.eql(u8, name, "u16") or
+        std.mem.eql(u8, name, "s8") or
+        std.mem.eql(u8, name, "u8") or
+        std.mem.eql(u8, name, "bool") or
+        std.mem.eql(u8, name, "float") or
+        std.mem.eql(u8, name, "float32") or
+        std.mem.eql(u8, name, "float64") or
+        std.mem.eql(u8, name, "string");
+}
+
+fn isSimpleIdentifierText(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (!(std.ascii.isAlphabetic(text[0]) or text[0] == '_')) return false;
+    for (text[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+    }
+    return true;
 }
 
 fn tryExecuteSpecializedRunPrint(ctx: *GenContext, run_stmt: NodeIndex, diag: Diagnostic) anyerror!bool {
