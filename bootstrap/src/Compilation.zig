@@ -982,15 +982,28 @@ pub const Compilation = struct {
         };
     }
 
-    fn findModule(comp: *Compilation, name: []const u8) ![]u8 {
-        const candidates = [_][]const u8{ ".reference/The_Way_to_Jai/my_modules", "examples/08" };
+    fn findModule(comp: *Compilation, name: []const u8, from_path: []const u8) ![]u8 {
+        const from_dir = std.fs.path.dirname(from_path) orelse ".";
+        const candidates = [_][]const u8{
+            from_dir,
+            "modules",
+        };
         for (candidates) |base| {
-            const path = try std.fs.path.join(comp.allocator, &[_][]const u8{ base, name, "module.jai" });
-            std.Io.Dir.cwd().access(comp.io, path, .{}) catch {
-                comp.allocator.free(path);
+            const module_path = try std.fs.path.join(comp.allocator, &.{ base, name, "module.jai" });
+            if (std.Io.Dir.cwd().access(comp.io, module_path, .{})) {
+                return module_path;
+            } else |_| {
+                comp.allocator.free(module_path);
+            }
+
+            const flat_name = try std.fmt.allocPrint(comp.allocator, "{s}.jai", .{name});
+            defer comp.allocator.free(flat_name);
+            const flat_path = try std.fs.path.join(comp.allocator, &.{ base, flat_name });
+            std.Io.Dir.cwd().access(comp.io, flat_path, .{}) catch {
+                comp.allocator.free(flat_path);
                 continue;
             };
-            return path;
+            return flat_path;
         }
         return error.SourceReadFailed;
     }
@@ -1021,7 +1034,19 @@ pub const Compilation = struct {
         return try out.toOwnedSlice(comp.allocator);
     }
 
-    fn loadSourceWithLoads(comp: *Compilation, path: []const u8) ![]u8 {
+    fn appendLoadedModule(comp: *Compilation, out: *std.ArrayList(u8), module_path: []const u8, source_path: []const u8) anyerror!void {
+        const loaded = try comp.loadSourceWithLoads(module_path);
+        defer comp.allocator.free(loaded);
+        try out.appendSlice(comp.allocator, "#load \"");
+        try out.appendSlice(comp.allocator, module_path);
+        try out.appendSlice(comp.allocator, "\";\n");
+        try out.appendSlice(comp.allocator, loaded);
+        if (loaded.len == 0 or loaded[loaded.len - 1] != '\n') try out.append(comp.allocator, '\n');
+        try out.appendSlice(comp.allocator, "#load \"__main_resume\";\n");
+        _ = source_path;
+    }
+
+    fn loadSourceWithLoads(comp: *Compilation, path: []const u8) anyerror![]u8 {
         const source = std.Io.Dir.cwd().readFileAlloc(comp.io, path, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
             std.debug.print("{s}: error: unable to read source file: {s}\n", .{ path, @errorName(err) });
             return error.SourceReadFailed;
@@ -1033,15 +1058,24 @@ pub const Compilation = struct {
         while (std.mem.indexOf(u8, rest, "#import \"")) |idx| {
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
             const line = rest[idx .. idx + line_end];
+            const name_start = idx + "#import \"".len;
+            const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module name", .{});
+            const module_name = rest[name_start .. name_start + name_end_rel];
+            const line_start = if (std.mem.lastIndexOfScalar(u8, rest[0..idx], '\n')) |newline| newline + 1 else 0;
+            const import_prefix = std.mem.trim(u8, rest[line_start..idx], " \t\r\n");
+            const assigned_import = import_prefix.len != 0;
             if (std.mem.indexOfScalar(u8, line, '(')) |param_start_rel| {
                 try out.appendSlice(comp.allocator, rest[0..idx]);
-                const name_start = idx + "#import \"".len;
-                const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module name", .{});
-                const module_name = rest[name_start .. name_start + name_end_rel];
+                if (assigned_import) {
+                    try out.appendSlice(comp.allocator, rest[idx .. idx + line_end]);
+                    if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
+                    rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
+                    continue;
+                }
                 const param_start = idx + param_start_rel + 1;
                 const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start..], ')') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module parameters", .{});
                 const params = rest[param_start .. param_start + param_end_rel];
-                const module_path = comp.findModule(module_name) catch {
+                const module_path = comp.findModule(module_name, path) catch {
                     try out.appendSlice(comp.allocator, "#import \"");
                     try out.appendSlice(comp.allocator, module_name);
                     try out.appendSlice(comp.allocator, "\";\n");
@@ -1062,9 +1096,23 @@ pub const Compilation = struct {
                 rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                 continue;
             }
-            try out.appendSlice(comp.allocator, rest[0 .. idx + line_end]);
-            rest = if (idx + line_end < rest.len) rest[idx + line_end ..] else rest[idx + line_end ..];
-            break;
+            if (assigned_import) {
+                try out.appendSlice(comp.allocator, rest[0 .. idx + line_end]);
+                if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
+                rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
+                continue;
+            }
+            if (comp.findModule(module_name, path)) |module_path| {
+                defer comp.allocator.free(module_path);
+                try out.appendSlice(comp.allocator, rest[0..idx]);
+                try comp.appendLoadedModule(&out, module_path, path);
+                rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
+            } else |_| {
+                try out.appendSlice(comp.allocator, rest[0 .. idx + line_end]);
+                if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
+                rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
+                continue;
+            }
         }
         while (std.mem.indexOf(u8, rest, "#load \"")) |idx| {
             try out.appendSlice(comp.allocator, rest[0..idx]);
