@@ -193,6 +193,7 @@ const GenContext = struct {
     polymorph_types: std.StringHashMapUnmanaged([]const u8) = .empty,
     type_overrides: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     external_registers: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
+    external_lvalue_addresses: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
     external_types: std.StringHashMapUnmanaged([]const u8) = .empty,
     for_expansion_it_alias: ?[]const u8 = null,
     for_expansion_index_alias: ?[]const u8 = null,
@@ -240,6 +241,7 @@ const GenContext = struct {
         ctx.polymorph_types.deinit(ctx.program.allocator);
         ctx.type_overrides.deinit(ctx.program.allocator);
         ctx.external_registers.deinit(ctx.program.allocator);
+        ctx.external_lvalue_addresses.deinit(ctx.program.allocator);
         ctx.external_types.deinit(ctx.program.allocator);
         ctx.binding_option_fields.deinit(ctx.program.allocator);
         ctx.emitted_specialized_runs.deinit(ctx.program.allocator);
@@ -578,6 +580,11 @@ const GenContext = struct {
             },
             .identifier => {
                 const name = ast.tokenSlice(ast.mainToken(lhs));
+                if (ctx.external_lvalue_addresses.get(name)) |addr| {
+                    try ctx.storeExternalLvalue(name, addr, result, source_node, diag);
+                    try ctx.external_registers.put(ctx.program.allocator, name, result);
+                    return result;
+                }
                 if (ctx.external_registers.get(name)) |old_reg| {
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = result, .source_node = source_node });
                     try ctx.external_registers.put(ctx.program.allocator, name, old_reg);
@@ -842,9 +849,10 @@ const GenContext = struct {
             const param_type = ast.data(param).lhs;
             const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
             const captures_syntax = std.mem.eql(u8, param_type_text, "Code") or (using_default and isCallerCodeExpr(ast, arg));
+            const actual_is_code_value = !using_default and std.mem.eql(u8, param_type_text, "Code") and ctx.exprNamesCodeValue(arg, diag);
             const code = if (using_default and isCallerCodeExpr(ast, arg))
                 ctx.nodeSource(expr)
-            else if (captures_syntax and !(ast.tag(arg) == .meta_expr and ast.tokens[ast.mainToken(arg)].tag == .directive_code))
+            else if (captures_syntax and !actual_is_code_value and !(ast.tag(arg) == .meta_expr and ast.tokens[ast.mainToken(arg)].tag == .directive_code))
                 ctx.nodeSource(arg)
             else
                 try ctx.codeTextForMacroArg(arg, bindings.items, diag);
@@ -903,6 +911,24 @@ const GenContext = struct {
                 else => try ctx.genStmt(stmt, diag),
             }
         }
+    }
+
+    fn exprNamesCodeValue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
+        const ast = ctx.ast;
+        if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len) return false;
+        if (ast.tag(expr) == .meta_expr and ast.tokens[ast.mainToken(expr)].tag == .directive_code) return true;
+        if (typeTextForExpr(ctx, expr, diag)) |actual_type| {
+            if (std.mem.eql(u8, firstTypeWord(actual_type), "Code")) return true;
+        }
+        if (ast.tag(expr) != .identifier) return false;
+        if (ctx.localCodeForIdentifier(expr) != null) return true;
+        const decl = ctx.resolved.local_values.get(expr) orelse @import("Ast.zig").null_node;
+        if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return false;
+        if (ast.tag(decl) != .const_decl and ast.tag(decl) != .var_decl) return false;
+        const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else ast.data(decl).rhs;
+        if (type_node != @import("Ast.zig").null_node and std.mem.eql(u8, firstTypeWord(ctx.nodeSource(type_node)), "Code")) return true;
+        const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
+        return init != @import("Ast.zig").null_node and ast.tag(init) == .meta_expr and ast.tokens[ast.mainToken(init)].tag == .directive_code;
     }
 
     fn tryEmitForExpansion(ctx: *GenContext, stmt: NodeIndex, range: []const u32, diag: Diagnostic) !bool {
@@ -1456,10 +1482,15 @@ const GenContext = struct {
         while (inherited_regs.next()) |entry| {
             try child.external_registers.put(child.program.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
+        var inherited_lvalues = ctx.external_lvalue_addresses.iterator();
+        while (inherited_lvalues.next()) |entry| {
+            try child.external_lvalue_addresses.put(child.program.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
         var inherited_types = ctx.external_types.iterator();
         while (inherited_types.next()) |entry| {
             try child.external_types.put(child.program.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
+        try ctx.exportTopLevelMutableValues(child, diag);
         var it = ctx.decl_registers.iterator();
         while (it.next()) |entry| {
             const decl = entry.key_ptr.*;
@@ -1511,6 +1542,23 @@ const GenContext = struct {
                     if (typeTextForDecl(ctx, decl, diag)) |ty| try child.external_types.put(child.program.allocator, alias, ty);
                 }
             }
+        }
+    }
+
+    fn exportTopLevelMutableValues(ctx: *GenContext, child: *GenContext, diag: Diagnostic) !void {
+        if (ctx.ast.root == @import("Ast.zig").null_node) return;
+        for (ctx.ast.extraSlice(ctx.ast.data(ctx.ast.root).lhs)) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (decl >= ctx.ast.node_tags.items.len or ctx.ast.tag(decl) != .var_decl) continue;
+            const raw_name = ctx.ast.tokenSlice(ctx.ast.mainToken(decl));
+            const name = externalNameForSourceName(raw_name);
+            if (child.external_lvalue_addresses.contains(name)) continue;
+            const type_text = typeTextForDecl(ctx, decl, diag) orelse "int";
+            const addr = try ctx.emitGlobalAddress(decl, decl, type_text, diag);
+            const value = try emitLoadFromAddressForType(ctx, addr, type_text, decl, diag);
+            try child.external_registers.put(child.program.allocator, name, value);
+            try child.external_lvalue_addresses.put(child.program.allocator, name, addr);
+            try child.external_types.put(child.program.allocator, name, type_text);
         }
     }
 
@@ -1827,6 +1875,11 @@ const GenContext = struct {
                         return;
                     }
                     if (ctx.external_registers.get(lhs_name)) |old_reg| {
+                        if (ctx.external_lvalue_addresses.get(lhs_name)) |addr| {
+                            try ctx.storeExternalLvalue(lhs_name, addr, rhs, stmt, diag);
+                            try ctx.external_registers.put(ctx.program.allocator, lhs_name, rhs);
+                            return;
+                        }
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = rhs, .source_node = stmt });
                         try ctx.external_registers.put(ctx.program.allocator, lhs_name, old_reg);
                         return;
@@ -2219,6 +2272,18 @@ const GenContext = struct {
             return;
         }
         return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "#insert lvalue currently requires an assignable identifier, got '{s}'", .{clean});
+    }
+
+    fn storeExternalLvalue(ctx: *GenContext, name: []const u8, addr: Bytecode.Register, rhs: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) !void {
+        const type_text = ctx.external_types.get(name) orelse "int";
+        const first = firstTypeWord(type_text);
+        const opcode: Bytecode.Opcode = if (std.mem.eql(u8, first, "float") or std.mem.eql(u8, first, "float32") or std.mem.eql(u8, first, "float64"))
+            .store_ptr_float
+        else if ((try typeTextSize(ctx, type_text, diag)) == 1)
+            .store_ptr_byte
+        else
+            .store_ptr;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = rhs, .source_node = source_node });
     }
 
     fn visibleRegisterForName(ctx: *GenContext, name: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {

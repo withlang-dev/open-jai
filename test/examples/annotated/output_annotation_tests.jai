@@ -62,6 +62,10 @@ print_proc_output :: () {
     expect_example_annotations("examples/18/18.11_print_proc.jai");
 } @TestProcedure
 
+code_nodes_compile_time_output :: () {
+    expect_compile_output("examples/26/26.11_code_nodes.jai", "The code is: a := Vector3.{1, 2, 3}\nHere are the types of all expressions in this syntax tree:\n[0] IDENT 0\n[1] TYPE_INSTANTIATION 0\n[2] LITERAL 0\n[3] LITERAL 0\n[4] LITERAL 0\n[5] LITERAL 0\n[6] DECLARATION ALLOWED_BY_CONTEXT\n");
+} @TestProcedure
+
 compile_time_if_output :: () {
     expect_program_output_contains("examples/26/26.5_if.jai", "The operating system is ");
     expect_program_output_contains("examples/26/26.5_if.jai", "CONSTANT is 3");
@@ -76,6 +80,10 @@ insert_code_output :: () {
     expect_program_output("examples/26/26.26_insert_code.jai", "x is 69105\nT is s64\nT is string\n");
 } @TestProcedure
 
+caller_code_argument_name_output :: () {
+    expect_compile_output("examples/26/26.23_get_variable_name.jai", "a_constant\n");
+} @TestProcedure
+
 binary_swap_output :: () {
     expect_example_annotations("examples/28/28.13_binary_swap.jai");
 } @TestProcedure
@@ -86,6 +94,10 @@ macro_swap_output :: () {
 
 abstracting_loop_output :: () {
     expect_program_output("examples/26/26.34_abstracting_loop.jai", "Player no 0 is {\"Jane\", 82}\nPlayer no 1 is {\"John\", 75}\nPlayer is {\"Jane\", 82}\nPlayer is {\"John\", 75}\ninside macro! \nPlayer is {\"Jane\", 82}\ninside macro! \nPlayer is {\"John\", 75}\ninside macro player_loop! \nPlayer 0 is {\"Jane\", 82}\ninside macro player_loop! \nPlayer 1 is {\"John\", 75}\n");
+} @TestProcedure
+
+changing_ast_output :: () {
+    expect_program_output("examples/26/26.36_changing_ast.jai", "314928\n");
 } @TestProcedure
 
 step_iterator_output :: () {
