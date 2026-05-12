@@ -7,6 +7,7 @@ pub const Opcode = enum(u8) {
     load_int,
     load_float,
     load_string,
+    load_code,
     load_source_location,
     load_bytes,
     load_bool,
@@ -225,6 +226,12 @@ pub const TypeInfo = struct {
     members: []TypeInfoMember,
 };
 
+pub const CodeLiteral = struct {
+    text: []const u8,
+    path: []const u8,
+    line_number: i64,
+};
+
 pub const ProcBytecode = struct {
     name: []const u8,
     instructions: std.ArrayList(Instruction) = .empty,
@@ -248,6 +255,7 @@ pub const Global = struct {
 pub const Program = struct {
     allocator: std.mem.Allocator,
     strings: std.ArrayList([]const u8) = .empty,
+    code_literals: std.ArrayList(CodeLiteral) = .empty,
     byte_arrays: std.ArrayList([]const u8) = .empty,
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
@@ -262,6 +270,10 @@ pub const Program = struct {
 
     pub fn deinit(p: *Program) void {
         for (p.strings.items) |s| p.allocator.free(s);
+        for (p.code_literals.items) |literal| {
+            p.allocator.free(literal.text);
+            p.allocator.free(literal.path);
+        }
         for (p.byte_arrays.items) |b| p.allocator.free(b);
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
         for (p.type_infos.items) |info| {
@@ -274,6 +286,7 @@ pub const Program = struct {
         }
         p.call_args.deinit(p.allocator);
         p.strings.deinit(p.allocator);
+        p.code_literals.deinit(p.allocator);
         p.byte_arrays.deinit(p.allocator);
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
@@ -294,6 +307,20 @@ pub const Program = struct {
         errdefer p.allocator.free(owned);
         const idx: StringIndex = @intCast(p.strings.items.len);
         try p.strings.append(p.allocator, owned);
+        return idx;
+    }
+
+    pub fn addCodeLiteral(p: *Program, text: []const u8, path: []const u8, line_number: i64) !u32 {
+        const owned_text = try p.allocator.dupe(u8, text);
+        errdefer p.allocator.free(owned_text);
+        const owned_path = try p.allocator.dupe(u8, path);
+        errdefer p.allocator.free(owned_path);
+        const idx: u32 = @intCast(p.code_literals.items.len);
+        try p.code_literals.append(p.allocator, .{
+            .text = owned_text,
+            .path = owned_path,
+            .line_number = line_number,
+        });
         return idx;
     }
 

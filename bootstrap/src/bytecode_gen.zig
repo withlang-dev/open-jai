@@ -1170,6 +1170,7 @@ const GenContext = struct {
         const text = switch (result) {
             .string => |value| value,
             .bytes => |value| value,
+            .code => |value| value.text,
             else => return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(run_expr)].start, "#insert #run must return Code or string", .{}),
         };
         const idx = try ctx.program.addByteArray(text);
@@ -1353,6 +1354,10 @@ const GenContext = struct {
                 const idx = try ctx.program.addByteArray(value);
                 break :blk ctx.program.byte_arrays.items[idx];
             },
+            .code => |value| blk: {
+                const idx = try ctx.program.addByteArray(value.text);
+                break :blk ctx.program.byte_arrays.items[idx];
+            },
             else => diag.failAt(ast.tokens[ast.mainToken(run_expr)].start, "#expand #run must return Code or string", .{}),
         };
     }
@@ -1406,6 +1411,7 @@ const GenContext = struct {
         const text = switch (result) {
             .string => |value| value,
             .bytes => |value| value,
+            .code => |value| value.text,
             else => return diag.failAt(ast.tokens[ast.mainToken(block)].start, "#insert -> string/Code block returned a non-text value", .{}),
         };
         const idx = try ctx.program.addByteArray(text);
@@ -2695,6 +2701,10 @@ const GenContext = struct {
                 const idx = try ctx.program.addByteArray(value);
                 break :blk ctx.program.byte_arrays.items[idx];
             },
+            .code => |value| blk: {
+                const idx = try ctx.program.addByteArray(value.text);
+                break :blk ctx.program.byte_arrays.items[idx];
+            },
             else => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "container #insert #run must return string or Code", .{}),
         };
     }
@@ -2881,7 +2891,8 @@ const GenContext = struct {
                         ctx.codeDirectiveTokenSource(ast.mainToken(expr))
                     else
                         ctx.nodeSource(payload);
-                    return try ctx.emitString(expr, text);
+                    const location_node = if (payload == @import("Ast.zig").null_node) expr else payload;
+                    return try ctx.emitCode(expr, location_node, text, diag);
                 }
                 if (ast.tokens[ast.mainToken(expr)].tag == .directive_insert) {
                     const inserted = try ctx.codeTextForMacroArg(ast.data(expr).lhs, &[_]MacroCodeBinding{}, diag);
@@ -2934,6 +2945,7 @@ const GenContext = struct {
                     },
                     .bool => |bool_value| return try ctx.emitBool(expr, bool_value),
                     .string => |string_value| return try ctx.emitString(expr, string_value),
+                    .code => |code_value| return try ctx.emitCodeValue(expr, code_value),
                     .bytes => |bytes_value| {
                         const idx = try program.addByteArray(bytes_value);
                         const reg = proc.num_registers;
@@ -5048,6 +5060,27 @@ const GenContext = struct {
         const reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_string, .dest = reg, .arg1 = string_idx, .source_node = source_node });
+        return reg;
+    }
+
+    fn emitCode(ctx: *GenContext, source_node: NodeIndex, location_node: NodeIndex, value: []const u8, diag: Diagnostic) !Bytecode.Register {
+        const tok = ctx.ast.mainToken(location_node);
+        const line = sourceLineNumber(ctx.ast.source, ctx.ast.tokens[tok].start);
+        const path = try canonicalSourcePath(ctx.program.allocator, diag.file_path);
+        defer ctx.program.allocator.free(path);
+        return try ctx.emitCodeLiteral(source_node, value, path, line);
+    }
+
+    fn emitCodeValue(ctx: *GenContext, source_node: NodeIndex, value: vm_mod.CodeValue) !Bytecode.Register {
+        return try ctx.emitCodeLiteral(source_node, value.text, value.path, value.line_number);
+    }
+
+    fn emitCodeLiteral(ctx: *GenContext, source_node: NodeIndex, value: []const u8, path: []const u8, line: i64) !Bytecode.Register {
+        const code_idx = try ctx.program.addCodeLiteral(value, path, line);
+        const string_idx = try ctx.program.addString(value);
+        const reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_code, .dest = reg, .arg1 = code_idx, .arg2 = string_idx, .source_node = source_node });
         return reg;
     }
 

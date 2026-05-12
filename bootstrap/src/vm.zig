@@ -4,6 +4,12 @@ const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 
+pub const CodeValue = struct {
+    text: []const u8,
+    path: []const u8 = "",
+    line_number: i64 = 1,
+};
+
 pub const Value = union(enum) {
     void,
     int: i64,
@@ -11,6 +17,7 @@ pub const Value = union(enum) {
     bool: bool,
     string: []const u8,
     bytes: []const u8,
+    code: CodeValue,
     type_text: []const u8,
 };
 
@@ -52,6 +59,8 @@ const CodeNote = struct {
 
 const CodeTree = struct {
     source: []const u8,
+    path: []const u8,
+    line_number: i64,
     root: CodeNode,
     nodes: []CodeNode,
     arguments: []CodeArgument,
@@ -86,6 +95,7 @@ const RegisterValue = union(enum) {
     empty,
     string: []const u8,
     bytes: []const u8,
+    code: CodeValue,
     code_node: CodeNode,
     code_nodes: []const CodeNode,
     code_note: CodeNote,
@@ -218,6 +228,7 @@ pub const VM = struct {
                 .bool => |v| .{ .bool = v },
                 .string => |v| .{ .string = v },
                 .bytes => |v| .{ .bytes = v },
+                .code => |v| .{ .code = v },
                 .type_text => |v| .{ .type_text = v },
                 .void => return diag.failAt(0, "VM #run arguments cannot be void", .{}),
             };
@@ -230,6 +241,15 @@ pub const VM = struct {
                 .load_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_string register/string index out of range", .{});
                     regs[inst.dest] = .{ .string = vm.program.strings.items[inst.arg1] };
+                },
+                .load_code => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.code_literals.items.len) return diag.failAt(0, "VM load_code register/code index out of range", .{});
+                    const literal = vm.program.code_literals.items[inst.arg1];
+                    regs[inst.dest] = .{ .code = .{
+                        .text = literal.text,
+                        .path = literal.path,
+                        .line_number = literal.line_number,
+                    } };
                 },
                 .load_source_location => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_source_location register/string index out of range", .{});
@@ -605,6 +625,7 @@ pub const VM = struct {
                         .bool => |value| .{ .bool = value },
                         .string => |value| .{ .string = value },
                         .bytes => |value| .{ .bytes = value },
+                        .code => |value| .{ .code = value },
                         .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
                         else => diag.failAt(0, "VM #run return register was not initialized", .{}),
                     };
@@ -765,14 +786,14 @@ pub const VM = struct {
                 },
                 .compiler_get_nodes_root => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes root register out of range", .{});
-                    const text = try registerCodeText(regs[inst.arg1], diag, "compiler_get_nodes");
-                    const tree = try vm.ensureCodeTree(text);
+                    const code = try registerCodeValue(regs[inst.arg1], diag, "compiler_get_nodes");
+                    const tree = try vm.ensureCodeTree(code);
                     regs[inst.dest] = .{ .code_node = vm.code_trees.items[tree].root };
                 },
                 .compiler_get_nodes_exprs => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_nodes expressions register out of range", .{});
-                    const text = try registerCodeText(regs[inst.arg1], diag, "compiler_get_nodes");
-                    const tree = try vm.ensureCodeTree(text);
+                    const code = try registerCodeValue(regs[inst.arg1], diag, "compiler_get_nodes");
+                    const tree = try vm.ensureCodeTree(code);
                     regs[inst.dest] = .{ .code_nodes = vm.code_trees.items[tree].nodes };
                 },
                 .code_node_field_kind => {
@@ -915,7 +936,11 @@ pub const VM = struct {
                         .code_node => |v| v,
                         else => return diag.failAt(0, "VM compiler_get_code requires a Code_Node value", .{}),
                     };
-                    regs[inst.dest] = .{ .string = try vm.renderCodeNode(node, diag) };
+                    regs[inst.dest] = .{ .code = .{
+                        .text = try vm.renderCodeNode(node, diag),
+                        .path = node.path,
+                        .line_number = node.line_number,
+                    } };
                 },
                 .code_node_location => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM make_location(Code_Node) register out of range", .{});
@@ -1256,6 +1281,11 @@ pub const VM = struct {
                 if (bytes.len != 0) @memcpy(try vm.blockSlice(ptr, bytes.len, diag), bytes);
                 return ptr;
             },
+            .code => |code| {
+                const ptr = try vm.allocBlock(@max(code.text.len, 1));
+                if (code.text.len != 0) @memcpy(try vm.blockSlice(ptr, code.text.len, diag), code.text);
+                return ptr;
+            },
             .string => |text| {
                 const ptr = try vm.allocBlock(@max(text.len, 1));
                 if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text);
@@ -1318,6 +1348,7 @@ pub const VM = struct {
         return switch (value) {
             .string => |text| text,
             .bytes => |bytes| bytes,
+            .code => |code| code.text,
             .ptr => |ptr| try vm.readRemainingBytes(ptr, diag),
             else => diag.failAt(0, "VM {s} requires a string value", .{context}),
         };
@@ -1740,6 +1771,10 @@ pub const VM = struct {
         return line;
     }
 
+    fn lineForCodeOffset(source: []const u8, base_line: i64, offset: usize) i64 {
+        return base_line + lineNumberAt(source, offset) - 1;
+    }
+
     fn astNodeSource(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) []const u8 {
         if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return "";
         var start = ast.tokens[ast.mainToken(node)].start;
@@ -2024,6 +2059,7 @@ pub const VM = struct {
                 if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
             },
             .string => |text| if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text),
+            .code => |code| if (code.text.len != 0) @memcpy(try vm.blockSlice(ptr, code.text.len, diag), code.text),
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
             .message => return diag.failAt(0, "VM cannot store compiler Message values into raw memory", .{}),
             .source_location => return diag.failAt(0, "VM cannot store Source_Code_Location into raw memory; use field assignment", .{}),
@@ -2146,7 +2182,7 @@ pub const VM = struct {
             };
         }
         return switch (value) {
-            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .type_text, .type_info_member, .source_location, .build_options, .build_llvm_options => value,
+            .int, .float, .bool, .string, .bytes, .code, .ptr, .type_id, .type_text, .type_info_member, .source_location, .build_options, .build_llvm_options => value,
             .empty => if (elem_size == 1)
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
@@ -2235,6 +2271,7 @@ pub const VM = struct {
         switch (value) {
             .string => |text| std.debug.print("{s}", .{text}),
             .bytes => |bytes| std.debug.print("{s}", .{bytes}),
+            .code => |code| std.debug.print("{s}", .{code.text}),
             .int => |int_value| std.debug.print("{d}", .{int_value}),
             .float => |float_value| std.debug.print("{d}", .{float_value}),
             .bool => |bool_value| std.debug.print("{s}", .{if (bool_value) "true" else "false"}),
@@ -2317,16 +2354,18 @@ pub const VM = struct {
         std.debug.print("]", .{});
     }
 
-    fn ensureCodeTree(vm: *VM, code: []const u8) !u32 {
+    fn ensureCodeTree(vm: *VM, code: CodeValue) !u32 {
         for (vm.code_trees.items, 0..) |tree, i| {
-            if (std.mem.eql(u8, tree.source, code)) return @intCast(i);
+            if (std.mem.eql(u8, tree.source, code.text) and
+                std.mem.eql(u8, tree.path, code.path) and
+                tree.line_number == code.line_number) return @intCast(i);
         }
-        const built = try vm.buildCodeNodes(@intCast(vm.code_trees.items.len), code);
+        const built = try vm.buildCodeNodes(@intCast(vm.code_trees.items.len), code.text, code.path, code.line_number);
         const nodes = built.nodes;
         errdefer vm.allocator.free(nodes);
         errdefer vm.allocator.free(built.arguments);
         const index: u32 = @intCast(vm.code_trees.items.len);
-        try vm.code_trees.append(vm.allocator, .{ .source = code, .root = built.root, .nodes = nodes, .arguments = built.arguments });
+        try vm.code_trees.append(vm.allocator, .{ .source = code.text, .path = code.path, .line_number = code.line_number, .root = built.root, .nodes = nodes, .arguments = built.arguments });
         return index;
     }
 
@@ -2336,16 +2375,17 @@ pub const VM = struct {
         arguments: []CodeArgument,
     };
 
-    fn buildCodeNodes(vm: *VM, tree_index: u32, code: []const u8) !BuiltCodeTree {
+    fn buildCodeNodes(vm: *VM, tree_index: u32, code: []const u8, path: []const u8, base_line: i64) !BuiltCodeTree {
         var nodes = std.ArrayList(CodeNode).empty;
         errdefer nodes.deinit(vm.allocator);
         var arguments = std.ArrayList(CodeArgument).empty;
         errdefer arguments.deinit(vm.allocator);
-        var root = CodeNode{ .tree = tree_index, .kind = "ROOT", .flags = "0", .text = code, .start = 0, .end = code.len };
+        var root = CodeNode{ .tree = tree_index, .kind = "ROOT", .flags = "0", .text = code, .path = path, .line_number = base_line, .start = 0, .end = code.len };
         const declaration = try vm.parseCodeDeclarationInfo(code);
 
         if (try vm.tryBuildProcedureCallCodeTree(tree_index, code, &nodes, &arguments)) |call_root| {
             root = call_root;
+            stampCodeTreeLocations(&root, nodes.items, code, path, base_line);
             return .{
                 .root = root,
                 .nodes = try nodes.toOwnedSlice(vm.allocator),
@@ -2419,11 +2459,21 @@ pub const VM = struct {
             .end = decl.end,
         });
 
+        stampCodeTreeLocations(&root, nodes.items, code, path, base_line);
         return .{
             .root = root,
             .nodes = try nodes.toOwnedSlice(vm.allocator),
             .arguments = try arguments.toOwnedSlice(vm.allocator),
         };
+    }
+
+    fn stampCodeTreeLocations(root: *CodeNode, nodes: []CodeNode, source: []const u8, path: []const u8, base_line: i64) void {
+        root.path = path;
+        root.line_number = lineForCodeOffset(source, base_line, root.start);
+        for (nodes) |*node| {
+            node.path = path;
+            node.line_number = lineForCodeOffset(source, base_line, node.start);
+        }
     }
 
     const ParsedCodeDeclaration = struct {
@@ -2776,6 +2826,7 @@ pub const VM = struct {
         switch (value) {
             .string => |text| try builder.appendSlice(vm.allocator, text),
             .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
+            .code => |code| try builder.appendSlice(vm.allocator, code.text),
             .code_node => |node| try vm.builderAppendCodeText(builder, try vm.renderCodeNode(node, diag)),
             .code_note => |note| try builder.appendSlice(vm.allocator, note.text),
             .code_nodes, .code_notes, .code_args => return diag.failAt(0, "VM cannot append a compiler meta array to a String_Builder without indexing it", .{}),
@@ -3106,6 +3157,7 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .bool => |v| if (v) 1 else 0,
         .ptr => 1,
         .bytes => |v| if (v.len == 0) 0 else 1,
+        .code => diag.failAt(0, "VM {s} cannot treat Code values as numbers", .{context}),
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .type_text => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .type_info_member => diag.failAt(0, "VM {s} cannot treat Type_Info member values as numbers", .{context}),
@@ -3134,6 +3186,7 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .float => |v| v != 0,
         .string => |v| v.len != 0,
         .bytes => |v| v.len != 0,
+        .code => |v| v.text.len != 0,
         .code_node => true,
         .code_nodes => |v| v.len != 0,
         .code_note => true,
@@ -3191,6 +3244,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
+        .code => |v| .{ .code = v },
         .type_id => |v| .{ .type_text = typeName(v) },
         .type_text => |v| .{ .type_text = v },
         .type_info_member => diag.failAt(0, "VM cannot pass Type_Info member values across procedure calls yet", .{}),
@@ -3210,6 +3264,7 @@ fn registerValueFromValue(value: Value) RegisterValue {
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
+        .code => |v| .{ .code = v },
         .type_text => |v| .{ .type_text = v },
         .void => .empty,
     };
@@ -3224,6 +3279,11 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .bytes => |l| switch (rhs) {
             .bytes => |r| std.mem.eql(u8, l, r),
+            else => false,
+        },
+        .code => |l| switch (rhs) {
+            .code => |r| std.mem.eql(u8, l.text, r.text) and std.mem.eql(u8, l.path, r.path) and l.line_number == r.line_number,
+            .string => |r| std.mem.eql(u8, l.text, r),
             else => false,
         },
         .ptr => |l| switch (rhs) {
@@ -3304,11 +3364,12 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
     };
 }
 
-fn registerCodeText(value: RegisterValue, diag: Diagnostic, context: []const u8) ![]const u8 {
+fn registerCodeValue(value: RegisterValue, diag: Diagnostic, context: []const u8) !CodeValue {
     return switch (value) {
-        .string => |text| text,
-        .bytes => |bytes| bytes,
-        .code_node => |node| node.text,
+        .code => |code| code,
+        .string => |text| .{ .text = text },
+        .bytes => |bytes| .{ .text = bytes },
+        .code_node => |node| .{ .text = node.text, .path = node.path, .line_number = node.line_number },
         else => diag.failAt(0, "VM {s} requires a Code or Code_Node value", .{context}),
     };
 }

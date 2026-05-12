@@ -209,6 +209,10 @@ pub const Compilation = struct {
                 try typed.putComptimeBytes(value_node, bytes_value);
                 try typed.putComptimeBytes(decl_node, bytes_value);
             },
+            .code => |code_value| {
+                try typed.putComptimeString(value_node, code_value.text);
+                try typed.putComptimeString(decl_node, code_value.text);
+            },
             .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
@@ -325,6 +329,7 @@ pub const Compilation = struct {
                     .bool => |bool_value| try typed.comptime_ints.put(comp.allocator, node, if (bool_value) 1 else 0),
                     .string => |string_value| try typed.putComptimeString(node, string_value),
                     .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
+                    .code => |code_value| try typed.putComptimeString(node, code_value.text),
                     .type_text => {},
                     .void => {},
                 }
@@ -684,6 +689,7 @@ pub const Compilation = struct {
             .bool => |v| std.debug.print("{s}", .{if (v) "true" else "false"}),
             .string => |v| std.debug.print("{s}", .{v}),
             .bytes => |v| std.debug.print("{s}", .{v}),
+            .code => |v| std.debug.print("{s}", .{v.text}),
             .type_text => |v| std.debug.print("{s}", .{v}),
         }
     }
@@ -750,6 +756,11 @@ pub const Compilation = struct {
                 errdefer comp.allocator.free(owned);
                 try comp.owned_run_result_bytes.append(comp.allocator, owned);
                 break :blk .{ .bytes = owned };
+            },
+            .code => |code_value| blk: {
+                const owned_text = try comp.ownRunString(code_value.text);
+                const owned_path = try comp.ownRunString(code_value.path);
+                break :blk .{ .code = .{ .text = owned_text, .path = owned_path, .line_number = code_value.line_number } };
             },
             else => value,
         };

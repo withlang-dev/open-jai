@@ -515,6 +515,10 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend string load destination register out of range", .{});
                 registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
             },
+            .load_code => {
+                if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend code load destination register out of range", .{});
+                registers[inst.dest] = try staticStringRegister(env, inst.arg2, diag);
+            },
             .load_source_location => {
                 if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend source-location load out of range", .{});
                 registers[inst.dest] = .{ .kind = .{ .source_location = .{ .file = inst.arg1, .line = inst.arg2 } } };
