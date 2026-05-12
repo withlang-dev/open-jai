@@ -81,6 +81,8 @@ pub const Opcode = enum(u8) {
     code_literal_field_value_type,
     code_literal_field_s64,
     code_literal_set_s64,
+    code_literal_field_string,
+    code_literal_set_string,
     code_node_to_code,
     memcpy,
     exit_process,

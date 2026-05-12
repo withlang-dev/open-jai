@@ -26,6 +26,7 @@ const CodeNode = struct {
     start: usize = 0,
     end: usize = 0,
     s64: ?i64 = null,
+    string_value: ?[]const u8 = null,
     arg_start: u32 = 0,
     arg_count: u32 = 0,
 };
@@ -755,7 +756,7 @@ pub const VM = struct {
                         .code_node => |v| v,
                         else => return diag.failAt(0, "VM Code_Literal.value_type requires a Code_Node value", .{}),
                     };
-                    regs[inst.dest] = .{ .int = if (node.s64 != null) 0 else 1 };
+                    regs[inst.dest] = .{ .int = if (node.s64 != null) 0 else if (node.string_value != null) 1 else -1 };
                 },
                 .code_literal_field_s64 => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Literal._s64 register out of range", .{});
@@ -770,6 +771,17 @@ pub const VM = struct {
                     };
                     try vm.updateCodeLiteralS64(regs[inst.arg1], value, diag);
                     if (inst.dest < regs.len) regs[inst.dest] = .{ .int = value };
+                },
+                .code_literal_field_string => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Literal._string register out of range", .{});
+                    const node = try vm.currentCodeNode(regs[inst.arg1], diag, "Code_Literal._string");
+                    regs[inst.dest] = .{ .string = node.string_value orelse return diag.failAt(0, "VM Code_Literal._string requires a string literal node", .{}) };
+                },
+                .code_literal_set_string => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM Code_Literal._string setter register out of range", .{});
+                    const value = try registerText(vm, regs[inst.arg2], diag, "Code_Literal._string setter");
+                    try vm.updateCodeLiteralString(regs[inst.arg1], value, diag);
+                    if (inst.dest < regs.len) regs[inst.dest] = .{ .string = value };
                 },
                 .code_node_to_code => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_get_code register out of range", .{});
@@ -1829,7 +1841,9 @@ pub const VM = struct {
                         break;
                     }
                 }
-                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..@min(i, code.len)], .start = start, .end = @min(i, code.len) });
+                const end = @min(i, code.len);
+                const payload = try vm.decodeCodeStringLiteralValue(code[start..end]);
+                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..end], .start = start, .end = end, .string_value = payload });
                 continue;
             }
             i += 1;
@@ -1877,7 +1891,7 @@ pub const VM = struct {
                 const relative = std.mem.indexOf(u8, args_text[segment_start..cursor], segment) orelse 0;
                 const start = base_offset + open_rel + 1 + segment_start + relative;
                 const expr_index: u32 = @intCast(nodes.items.len);
-                try nodes.append(vm.allocator, codeNodeForText(tree_index, expr_index, segment, start));
+                try nodes.append(vm.allocator, try vm.codeNodeForText(tree_index, expr_index, segment, start));
                 try arguments.append(vm.allocator, .{ .tree = tree_index, .expression_index = expr_index });
             }
             segment_start = cursor + 1;
@@ -1913,6 +1927,16 @@ pub const VM = struct {
         vm.code_trees.items[node.tree].nodes[node.index].s64 = new_value;
     }
 
+    fn updateCodeLiteralString(vm: *VM, value: RegisterValue, new_value: []const u8, diag: Diagnostic) !void {
+        const node = switch (value) {
+            .code_node => |v| v,
+            else => return diag.failAt(0, "VM Code_Literal._string setter requires a Code_Node value", .{}),
+        };
+        if (node.tree >= vm.code_trees.items.len or node.index >= vm.code_trees.items[node.tree].nodes.len) return diag.failAt(0, "VM Code_Literal._string setter got a detached Code_Node", .{});
+        if (vm.code_trees.items[node.tree].nodes[node.index].string_value == null) return diag.failAt(0, "VM Code_Literal._string setter requires a string literal node", .{});
+        vm.code_trees.items[node.tree].nodes[node.index].string_value = new_value;
+    }
+
     fn renderCodeNode(vm: *VM, node: CodeNode, diag: Diagnostic) ![]const u8 {
         if (node.tree >= vm.code_trees.items.len) return node.text;
         const tree = vm.code_trees.items[node.tree];
@@ -1920,12 +1944,16 @@ pub const VM = struct {
         errdefer out.deinit(vm.allocator);
         var cursor: usize = 0;
         for (tree.nodes) |literal| {
-            if (!std.mem.eql(u8, literal.kind, "LITERAL") or literal.s64 == null) continue;
+            if (!std.mem.eql(u8, literal.kind, "LITERAL") or (literal.s64 == null and literal.string_value == null)) continue;
             if (literal.start < cursor or literal.end > tree.source.len) continue;
             try out.appendSlice(vm.allocator, tree.source[cursor..literal.start]);
-            const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{literal.s64.?});
-            defer vm.allocator.free(text);
-            try out.appendSlice(vm.allocator, text);
+            if (literal.s64) |int_value| {
+                const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{int_value});
+                defer vm.allocator.free(text);
+                try out.appendSlice(vm.allocator, text);
+            } else if (literal.string_value) |string_value| {
+                try vm.appendQuotedJaiString(&out, string_value);
+            }
             cursor = literal.end;
         }
         try out.appendSlice(vm.allocator, tree.source[cursor..]);
@@ -1934,6 +1962,39 @@ pub const VM = struct {
         errdefer vm.allocator.free(rendered);
         try vm.rendered_code_strings.append(vm.allocator, rendered);
         return rendered;
+    }
+
+    fn appendQuotedJaiString(vm: *VM, out: *std.ArrayList(u8), value: []const u8) !void {
+        try out.append(vm.allocator, '"');
+        for (value) |ch| switch (ch) {
+            '\\' => try out.appendSlice(vm.allocator, "\\\\"),
+            '"' => try out.appendSlice(vm.allocator, "\\\""),
+            '\n' => try out.appendSlice(vm.allocator, "\\n"),
+            '\r' => try out.appendSlice(vm.allocator, "\\r"),
+            '\t' => try out.appendSlice(vm.allocator, "\\t"),
+            else => try out.append(vm.allocator, ch),
+        };
+        try out.append(vm.allocator, '"');
+    }
+
+    fn codeNodeForText(vm: *VM, tree_index: u32, node_index: u32, text: []const u8, start: usize) !CodeNode {
+        if (std.fmt.parseInt(i64, text, 10)) |value| {
+            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .s64 = value };
+        } else |_| {}
+        if (text.len >= 2 and ((text[0] == '"' and text[text.len - 1] == '"') or (text[0] == '\'' and text[text.len - 1] == '\''))) {
+            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .string_value = try vm.decodeCodeStringLiteralValue(text) };
+        }
+        if (isSimpleIdentifier(text)) {
+            return .{ .tree = tree_index, .index = node_index, .kind = "IDENT", .flags = "0", .text = text, .start = start, .end = start + text.len };
+        }
+        return .{ .tree = tree_index, .index = node_index, .kind = "EXPRESSION", .flags = "0", .text = text, .start = start, .end = start + text.len };
+    }
+
+    fn decodeCodeStringLiteralValue(vm: *VM, literal: []const u8) ![]const u8 {
+        const decoded = try decodeJaiStringLiteralValue(vm.allocator, literal);
+        errdefer vm.allocator.free(decoded);
+        try vm.rendered_code_strings.append(vm.allocator, decoded);
+        return decoded;
     }
 
     fn pointerKey(ptr: Pointer) u64 {
@@ -2090,14 +2151,30 @@ fn appendFormatted(allocator: std.mem.Allocator, builder: *std.ArrayList(u8), co
     try builder.appendSlice(allocator, text);
 }
 
-fn codeNodeForText(tree_index: u32, node_index: u32, text: []const u8, start: usize) CodeNode {
-    if (std.fmt.parseInt(i64, text, 10)) |value| {
-        return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .s64 = value };
-    } else |_| {}
-    if (isSimpleIdentifier(text)) {
-        return .{ .tree = tree_index, .index = node_index, .kind = "IDENT", .flags = "0", .text = text, .start = start, .end = start + text.len };
+fn decodeJaiStringLiteralValue(allocator: std.mem.Allocator, literal: []const u8) ![]const u8 {
+    if (literal.len < 2) return try allocator.dupe(u8, "");
+    const body = literal[1 .. literal.len - 1];
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < body.len) : (i += 1) {
+        if (body[i] != '\\' or i + 1 >= body.len) {
+            try out.append(allocator, body[i]);
+            continue;
+        }
+        i += 1;
+        try out.append(allocator, switch (body[i]) {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            '\\' => '\\',
+            '"' => '"',
+            '\'' => '\'',
+            '0' => 0,
+            else => body[i],
+        });
     }
-    return .{ .tree = tree_index, .index = node_index, .kind = "EXPRESSION", .flags = "0", .text = text, .start = start, .end = start + text.len };
+    return try out.toOwnedSlice(allocator);
 }
 
 fn isSimpleIdentifier(text: []const u8) bool {

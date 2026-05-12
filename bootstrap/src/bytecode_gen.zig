@@ -2022,6 +2022,11 @@ const GenContext = struct {
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .code_literal_set_s64, .dest = rhs, .arg1 = base, .arg2 = rhs, .source_node = stmt });
                         return;
                     }
+                    if (std.mem.eql(u8, ast.tokenSlice(ast.data(lhs).rhs), "_string") and isCodeNodeExpression(ctx, ast.data(lhs).lhs, diag)) {
+                        const base = try ctx.genExpr(ast.data(lhs).lhs, diag);
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .code_literal_set_string, .dest = rhs, .arg1 = base, .arg2 = rhs, .source_node = stmt });
+                        return;
+                    }
                     const field_info = blk: {
                         const base_text = typeTextForExpr(ctx, ast.data(lhs).lhs, diag) orelse break :blk null;
                         break :blk try fieldInfoFromTypeText(ctx, base_text, ast.tokenSlice(ast.data(lhs).rhs), diag);
@@ -3242,6 +3247,9 @@ const GenContext = struct {
                     if (isOsEnumName(field_name)) {
                         return try ctx.emitString(expr, field_name);
                     }
+                    if (codeLiteralValueTypeByName(field_name)) |value_type| {
+                        return try ctx.emitInt(expr, value_type);
+                    }
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     const value: u32 = if (try enumValueByName(ctx, field_name, diag)) |enum_value|
@@ -3295,7 +3303,7 @@ const GenContext = struct {
                         return reg;
                     }
                 }
-                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64")) {
+                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64") or std.mem.eql(u8, field_name, "_string")) {
                     if (isCodeNodeExpression(ctx, ast.data(expr).lhs, diag)) {
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -3307,8 +3315,10 @@ const GenContext = struct {
                             .code_proc_call_arguments
                         else if (std.mem.eql(u8, field_name, "value_type"))
                             .code_literal_field_value_type
+                        else if (std.mem.eql(u8, field_name, "_s64"))
+                            .code_literal_field_s64
                         else
-                            .code_literal_field_s64;
+                            .code_literal_field_string;
                         try proc.instructions.append(program.allocator, .{
                             .opcode = opcode,
                             .dest = reg,
@@ -5829,6 +5839,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags")) return "string";
                 if (std.mem.eql(u8, field_name, "arguments_unsorted")) return "[] Code_Argument";
                 if (std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64")) return "int";
+                if (std.mem.eql(u8, field_name, "_string")) return "string";
             }
             if (isCodeArgumentTypeText(base_ty)) {
                 if (std.mem.eql(u8, field_name, "expression")) return "*Code_Node";
@@ -6061,6 +6072,12 @@ fn isCodeNodeKindName(name: []const u8) bool {
         std.mem.eql(u8, name, "UNARY_OPERATOR") or
         std.mem.eql(u8, name, "BLOCK") or
         std.mem.eql(u8, name, "STATEMENT");
+}
+
+fn codeLiteralValueTypeByName(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "NUMBER")) return 0;
+    if (std.mem.eql(u8, name, "STRING")) return 1;
+    return null;
 }
 
 fn isOsEnumName(name: []const u8) bool {
