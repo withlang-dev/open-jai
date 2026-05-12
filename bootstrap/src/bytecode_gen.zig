@@ -4576,6 +4576,13 @@ const GenContext = struct {
             return reg;
         }
         if (std.mem.eql(u8, name, "make_location")) {
+            if (args.len > 0 and isCodeNodeExpression(ctx, @intCast(args[0]), diag)) {
+                const node = try ctx.genExpr(@intCast(args[0]), diag);
+                const reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .code_node_location, .dest = reg, .arg1 = node, .source_node = expr });
+                return reg;
+            }
             const target = if (args.len > 0) ctx.locationTargetNode(@intCast(args[0])) else expr;
             return try ctx.emitSourceLocation(target, expr, diag);
         }
@@ -4603,11 +4610,25 @@ const GenContext = struct {
         if (std.mem.eql(u8, name, "set_build_options") or
             std.mem.eql(u8, name, "set_build_options_dc") or
             std.mem.eql(u8, name, "set_optimization") or
-            std.mem.eql(u8, name, "compiler_set_workspace_status") or
-            std.mem.eql(u8, name, "compiler_report"))
+            std.mem.eql(u8, name, "compiler_set_workspace_status"))
         {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
             return try ctx.emitInt(expr, 0);
+        }
+        if (std.mem.eql(u8, name, "compiler_report")) {
+            if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_report expects a message and optional Source_Code_Location", .{});
+            const message = try ctx.genExpr(@intCast(args[0]), diag);
+            const location = if (args.len > 1) try ctx.genExpr(@intCast(args[1]), diag) else std.math.maxInt(u32);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{
+                .opcode = .compiler_report,
+                .dest = reg,
+                .arg1 = message,
+                .arg2 = location,
+                .source_node = expr,
+            });
+            return reg;
         }
         return null;
     }

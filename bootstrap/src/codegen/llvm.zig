@@ -1054,7 +1054,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     },
                 }
             },
-            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags, .code_node_field_expression, .code_node_field_name, .code_node_field_notes, .code_note_field_text, .code_proc_call_arguments, .code_argument_field_expression, .code_literal_field_value_type, .code_literal_field_s64, .code_literal_set_s64, .code_literal_field_string, .code_literal_set_string, .code_node_to_code, .host_add_build_file, .host_compiler_begin_intercept, .host_compiler_end_intercept, .host_compiler_wait_for_message, .message_get_field => {
+            .compiler_get_nodes_root, .compiler_get_nodes_exprs, .code_node_field_kind, .code_node_field_flags, .code_node_field_expression, .code_node_field_name, .code_node_field_notes, .code_note_field_text, .code_proc_call_arguments, .code_argument_field_expression, .code_literal_field_value_type, .code_literal_field_s64, .code_literal_set_s64, .code_literal_field_string, .code_literal_set_string, .code_node_to_code, .code_node_location, .compiler_report, .host_add_build_file, .host_compiler_begin_intercept, .host_compiler_end_intercept, .host_compiler_wait_for_message, .message_get_field => {
                 return diag.failAt(inst.source_node, "compiler Code_Node opcode {s} is compile-time only", .{@tagName(inst.opcode)});
             },
             .source_location_get_field => {

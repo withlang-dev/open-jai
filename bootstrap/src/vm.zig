@@ -26,6 +26,8 @@ const CodeNode = struct {
     flags: []const u8,
     text: []const u8,
     name: []const u8 = "",
+    path: []const u8 = "",
+    line_number: i64 = 1,
     start: usize = 0,
     end: usize = 0,
     s64: ?i64 = null,
@@ -868,6 +870,39 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .string = try vm.renderCodeNode(node, diag) };
                 },
+                .code_node_location => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM make_location(Code_Node) register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM make_location requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .source_location = .{
+                        .fully_pathed_filename = node.path,
+                        .line_number = node.line_number,
+                    } };
+                },
+                .compiler_report => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_report message register out of range", .{});
+                    const message = switch (regs[inst.arg1]) {
+                        .string => |value| value,
+                        else => return diag.failAt(0, "VM compiler_report expects a string message", .{}),
+                    };
+                    if (inst.arg2 != std.math.maxInt(u32)) {
+                        if (inst.arg2 >= regs.len) return diag.failAt(0, "VM compiler_report location register out of range", .{});
+                        const loc = switch (regs[inst.arg2]) {
+                            .source_location => |value| value,
+                            else => return diag.failAt(0, "VM compiler_report second argument must be a Source_Code_Location", .{}),
+                        };
+                        if (loc.fully_pathed_filename.len != 0) {
+                            std.debug.print("{s}:{d}: {s}", .{ loc.fully_pathed_filename, loc.line_number, message });
+                        } else {
+                            std.debug.print("{s}", .{message});
+                        }
+                    } else {
+                        std.debug.print("{s}", .{message});
+                    }
+                    if (inst.dest < regs.len) regs[inst.dest] = .{ .int = 0 };
+                },
                 .cpu_has_feature => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM cpu_has_feature destination register out of range", .{});
                     regs[inst.dest] = .{ .bool = false };
@@ -1498,19 +1533,31 @@ pub const VM = struct {
                 const text = ast.tokenSlice(@intCast(note_tok));
                 try vm.compiler_message_notes.append(vm.allocator, .{ .text = text });
             }
-            const name = ast.tokenSlice(ast.mainToken(decl));
+            const name_token = ast.mainToken(decl);
+            const name = ast.tokenSlice(name_token);
+            const token_start = ast.tokens[name_token].start;
             try vm.compiler_message_nodes.append(vm.allocator, .{
                 .kind = "DECLARATION",
                 .flags = "ALLOWED_BY_CONTEXT",
                 .text = name,
                 .name = name,
-                .start = ast.tokens[ast.mainToken(decl)].start,
-                .end = ast.tokens[ast.mainToken(decl)].end,
+                .path = path,
+                .line_number = lineNumberAt(source, token_start),
+                .start = token_start,
+                .end = ast.tokens[name_token].end,
                 .note_start = note_start,
                 .note_count = vm.compiler_message_notes.items.len - note_start,
             });
         }
         _ = parent_diag;
+    }
+
+    fn lineNumberAt(source: []const u8, offset: usize) i64 {
+        var line: i64 = 1;
+        for (source[0..@min(offset, source.len)]) |c| {
+            if (c == '\n') line += 1;
+        }
+        return line;
     }
 
     fn hostCompilerWaitForMessage(vm: *VM) ?usize {
