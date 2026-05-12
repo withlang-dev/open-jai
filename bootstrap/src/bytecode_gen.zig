@@ -1392,6 +1392,18 @@ const GenContext = struct {
                 if (try ctx.tryEmitAssignCompound(lhs, rhs_node, stmt, diag)) |_| return;
                 if (try ctx.tryEmitSelfBinaryAssignment(lhs, rhs_node, stmt, diag)) |_| return;
                 if (try ctx.tryEmitStaticArrayLiteralAssignment(lhs, rhs_node, stmt, diag)) return;
+                if (ast.tag(lhs) == .field_access) {
+                    if (typeTextForExpr(ctx, ast.data(lhs).lhs, diag)) |base_text| {
+                        if (isBuildOptionsValueType(base_text)) {
+                            const base = try ctx.genExpr(ast.data(lhs).lhs, diag);
+                            const field_name = ast.tokenSlice(ast.data(lhs).rhs);
+                            const rhs = try ctx.genBuildOptionsFieldAssignmentValue(field_name, rhs_node, diag);
+                            const field_index = try ctx.program.addString(field_name);
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .build_options_set_field, .dest = base, .arg1 = base, .arg2 = field_index, .arg3 = rhs, .source_node = stmt });
+                            return;
+                        }
+                    }
+                }
                 const rhs = try ctx.genExpr(rhs_node, diag);
                 if (ast.tag(lhs) == .field_access) {
                     if (std.mem.eql(u8, ast.tokenSlice(ast.data(lhs).rhs), "_s64") and isCodeNodeExpression(ctx, ast.data(lhs).lhs, diag)) {
@@ -2556,8 +2568,12 @@ const GenContext = struct {
                         try proc.instructions.append(program.allocator, .{ .opcode = .array_data, .dest = reg, .arg1 = base_reg, .source_node = expr });
                         return reg;
                     }
-                    if (std.mem.eql(u8, firstTypeWord(base_text), "Build_Options")) {
-                        if (try ctx.emitDefaultBuildOptionsField(field_name, expr, diag)) |reg| return reg;
+                    if (isBuildOptionsValueType(base_text)) {
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        const field_index = try program.addString(field_name);
+                        try proc.instructions.append(program.allocator, .{ .opcode = .build_options_get_field, .dest = reg, .arg1 = base_reg, .arg2 = field_index, .source_node = expr });
+                        return reg;
                     }
                     if (try fieldInfoFromTypeText(ctx, base_text, field_name, diag)) |info| {
                         const addr = if (info.offset == 0) base_reg else blk: {
@@ -3199,10 +3215,12 @@ const GenContext = struct {
                         last_reg = try ctx.genDefaultValue(@import("Ast.zig").null_node, expr, diag);
                     } else {
                         for (args[1..]) |item_idx| {
-                            const item_reg = try ctx.genExpr(@intCast(item_idx), diag);
+                            const item_node: NodeIndex = @intCast(item_idx);
+                            const spread = ast.tag(item_node) == .unary_expr and ast.tokens[ast.mainToken(item_node)].tag == .dot_dot;
+                            const item_reg = try ctx.genExpr(if (spread) ast.data(item_node).lhs else item_node, diag);
                             const reg = proc.num_registers;
                             proc.num_registers += 1;
-                            try proc.instructions.append(program.allocator, .{ .opcode = .array_add, .dest = reg, .arg1 = array_slot, .arg2 = item_reg, .arg3 = @intCast(elem_size), .arg4 = if (elem_is_struct) 1 else 0, .source_node = expr });
+                            try proc.instructions.append(program.allocator, .{ .opcode = .array_add, .dest = reg, .arg1 = array_slot, .arg2 = item_reg, .arg3 = @intCast(elem_size), .arg4 = if (elem_is_struct) 1 else 0, .arg5 = if (spread) 1 else 0, .source_node = expr });
                             last_reg = reg;
                         }
                     }
@@ -3659,11 +3677,16 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .code_node_to_code, .dest = reg, .arg1 = node, .source_node = expr });
             return reg;
         }
-        if (std.mem.eql(u8, name, "get_build_options") or
-            std.mem.eql(u8, name, "make_location"))
-        {
+        if (std.mem.eql(u8, name, "get_build_options")) {
+            const workspace_reg = if (args.len > 0) try ctx.genExpr(@intCast(args[0]), diag) else std.math.maxInt(u32);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_build_options, .dest = reg, .arg1 = workspace_reg, .source_node = expr });
+            return reg;
+        }
+        if (std.mem.eql(u8, name, "make_location")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.genDefaultValueFromText(if (std.mem.eql(u8, name, "get_build_options")) "Build_Options" else "Source_Code_Location", expr, diag);
+            return try ctx.genDefaultValueFromText("Source_Code_Location", expr, diag);
         }
         if (std.mem.eql(u8, name, "print_expression")) {
             if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "print_expression expects a builder pointer and a Code_Node", .{});
@@ -4377,7 +4400,9 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
         } else if (std.mem.eql(u8, firstTypeWord(type_text), "bool")) {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_bool, .dest = reg, .arg1 = 0, .source_node = source_node });
-        } else if (std.mem.eql(u8, firstTypeWord(type_text), "Build_Options") or std.mem.eql(u8, firstTypeWord(type_text), "Generate_Bindings_Options")) {
+        } else if (std.mem.eql(u8, firstTypeWord(type_text), "Build_Options")) {
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_build_options, .dest = reg, .arg1 = std.math.maxInt(u32), .source_node = source_node });
+        } else if (std.mem.eql(u8, firstTypeWord(type_text), "Generate_Bindings_Options")) {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = 8, .source_node = source_node });
         } else {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = 0, .source_node = source_node });
@@ -4405,6 +4430,15 @@ const GenContext = struct {
             return try ctx.emitString(source_node, "");
         }
         return null;
+    }
+
+    fn genBuildOptionsFieldAssignmentValue(ctx: *GenContext, field_name: []const u8, rhs_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const ast = ctx.ast;
+        _ = field_name;
+        if (ast.tag(rhs_node) == .field_access and ast.data(rhs_node).lhs == @import("Ast.zig").null_node) {
+            return try ctx.emitString(rhs_node, ast.tokenSlice(ast.data(rhs_node).rhs));
+        }
+        return try ctx.genExpr(rhs_node, diag);
     }
 };
 
@@ -4881,6 +4915,12 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "count")) return "int";
                 if (std.mem.eql(u8, field_name, "data")) return "*u8";
             }
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Build_Options")) {
+                if (buildOptionsFieldType(field_name)) |field_ty| return field_ty;
+            }
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Build_Options_LLVM_Options")) {
+                if (buildOptionsLlvmFieldType(field_name)) |field_ty| return field_ty;
+            }
             if (staticArrayElementText(base_ty) != null) {
                 if (std.mem.eql(u8, field_name, "count")) return "int";
                 if (std.mem.eql(u8, field_name, "data")) return "*u8";
@@ -5153,6 +5193,41 @@ fn bindingOptionFieldType(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "header")) return "string";
     if (std.mem.eql(u8, name, "strip_flags")) return "int";
     return null;
+}
+
+fn buildOptionsFieldType(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "import_path") or std.mem.eql(u8, name, "compile_time_command_line")) return "[..] string";
+    if (std.mem.eql(u8, name, "llvm_options")) return "Build_Options_LLVM_Options";
+    if (std.mem.eql(u8, name, "output_executable_name") or
+        std.mem.eql(u8, name, "output_path") or
+        std.mem.eql(u8, name, "intermediate_path") or
+        std.mem.eql(u8, name, "output_type") or
+        std.mem.eql(u8, name, "backend") or
+        std.mem.eql(u8, name, "backtrace_on_crash") or
+        std.mem.eql(u8, name, "array_bounds_check") or
+        std.mem.eql(u8, name, "cast_bounds_check") or
+        std.mem.eql(u8, name, "null_pointer_check"))
+    {
+        return "string";
+    }
+    if (std.mem.eql(u8, name, "write_added_strings") or
+        std.mem.eql(u8, name, "stack_trace") or
+        std.mem.eql(u8, name, "enable_bytecode_inliner") or
+        std.mem.eql(u8, name, "runtime_storageless_type_info"))
+    {
+        return "bool";
+    }
+    return null;
+}
+
+fn buildOptionsLlvmFieldType(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "output_bitcode")) return "bool";
+    return null;
+}
+
+fn isBuildOptionsValueType(type_text: []const u8) bool {
+    const first = firstTypeWord(type_text);
+    return std.mem.eql(u8, first, "Build_Options") or std.mem.eql(u8, first, "Build_Options_LLVM_Options");
 }
 
 fn isBindingOptionField(name: []const u8) bool {

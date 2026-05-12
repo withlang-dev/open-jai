@@ -988,6 +988,12 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .array_add => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend array_add register out of range", .{});
+                if (inst.arg5 != 0) {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstPointerNull(env.ptr_ty), .kind = .pointer };
+                    _ = c.LLVMBuildCall2(env.builder, env.assert_fail_fn_ty, env.assert_fail_fn, null, 0, "");
+                    _ = c.LLVMBuildUnreachable(env.builder);
+                    continue;
+                }
                 const slot_ptr = try pointerValue(env, registers[inst.arg1], diag, "array_add slot");
                 const item_ptr = if (inst.arg4 != 0)
                     try pointerValue(env, registers[inst.arg2], diag, "array_add struct item")
@@ -1657,6 +1663,17 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             .call_proc0 => {
                 if (inst.arg1 >= env.proc_functions.len or env.proc_functions[inst.arg1] == null) return diag.failAt(0, "LLVM backend call_proc0 target out of range", .{});
                 _ = c.LLVMBuildCall2(env.builder, env.proc_void_ty, env.proc_functions[inst.arg1], null, 0, "");
+            },
+            .load_build_options,
+            .build_options_get_field,
+            .build_options_set_field,
+            .host_compiler_create_workspace,
+            .host_get_current_workspace,
+            => {
+                if (inst.dest < registers.len) registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, 0, 0), .kind = .int };
+                _ = c.LLVMBuildCall2(env.builder, env.assert_fail_fn_ty, env.assert_fail_fn, null, 0, "");
+                _ = c.LLVMBuildUnreachable(env.builder);
+                terminates_block = true;
             },
             else => return diag.failAt(0, "unsupported bytecode opcode in LLVM backend: {s}", .{@tagName(inst.opcode)}),
         }

@@ -38,11 +38,32 @@ const RegisterValue = union(enum) {
     bytes: []const u8,
     code_node: CodeNode,
     code_nodes: []const CodeNode,
+    build_options: usize,
+    build_llvm_options: usize,
     type_id: u32,
     ptr: Pointer,
     int: i64,
     float: f64,
     bool: bool,
+};
+
+const BuildOptions = struct {
+    output_executable_name: []const u8 = "",
+    output_path: []const u8 = "",
+    intermediate_path: []const u8 = ".build/",
+    output_type: []const u8 = "EXECUTABLE",
+    backend: []const u8 = "LLVM",
+    write_added_strings: bool = true,
+    stack_trace: bool = true,
+    backtrace_on_crash: []const u8 = "ON",
+    array_bounds_check: []const u8 = "ON",
+    cast_bounds_check: []const u8 = "NONFATAL",
+    null_pointer_check: []const u8 = "ON",
+    enable_bytecode_inliner: bool = false,
+    runtime_storageless_type_info: bool = false,
+    llvm_output_bitcode: bool = false,
+    import_path: ?usize = null,
+    compile_time_command_line: ?usize = null,
 };
 
 const DynamicArray = struct {
@@ -63,8 +84,11 @@ pub const VM = struct {
     dynamic_array_refs: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     code_trees: std.ArrayList(CodeTree) = .empty,
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
+    build_options: std.ArrayList(BuildOptions) = .empty,
+    workspace_build_options: std.AutoHashMapUnmanaged(i64, usize) = .empty,
     io: ?std.Io = null,
     base_dir: []const u8 = ".",
+    command_line: []const []const u8 = &.{},
     current_workspace_build_strings: ?*std.ArrayList([]const u8) = null,
     next_workspace_id: ?*i64 = null,
     current_workspace_id: i64 = 2,
@@ -91,6 +115,8 @@ pub const VM = struct {
         vm.code_trees.deinit(vm.allocator);
         for (vm.rendered_code_strings.items) |text| vm.allocator.free(text);
         vm.rendered_code_strings.deinit(vm.allocator);
+        vm.build_options.deinit(vm.allocator);
+        vm.workspace_build_options.deinit(vm.allocator);
     }
 
     pub fn runProc(vm: *VM, proc_index: u32, diag: Diagnostic) !Value {
@@ -389,6 +415,10 @@ pub const VM = struct {
                 },
                 .addr_of_local => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM addr_of_local register out of range", .{});
+                    if (regs[inst.arg1] == .build_options or regs[inst.arg1] == .build_llvm_options) {
+                        regs[inst.dest] = regs[inst.arg1];
+                        continue;
+                    }
                     const ptr = local_ptrs[inst.arg1] orelse blk: {
                         const allocated = try vm.materializeRegister(regs[inst.arg1], diag);
                         local_ptrs[inst.arg1] = allocated;
@@ -534,7 +564,10 @@ pub const VM = struct {
                 .array_add => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_add register out of range", .{});
                     const slot = try registerPointer(regs[inst.arg1], diag, "array_add slot");
-                    regs[inst.dest] = .{ .ptr = try vm.dynamicArrayAdd(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag) };
+                    regs[inst.dest] = .{ .ptr = if (inst.arg5 != 0)
+                        try vm.dynamicArrayAddSpread(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag)
+                    else
+                        try vm.dynamicArrayAdd(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag) };
                 },
                 .sort_array => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM sort_array register out of range", .{});
@@ -744,6 +777,43 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM get_current_workspace register out of range", .{});
                     regs[inst.dest] = .{ .int = vm.hostGetCurrentWorkspace() };
                 },
+                .load_build_options => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM get_build_options register out of range", .{});
+                    const workspace = if (inst.arg1 == std.math.maxInt(u32))
+                        vm.hostGetCurrentWorkspace()
+                    else blk: {
+                        if (inst.arg1 >= regs.len) return diag.failAt(0, "VM get_build_options workspace register out of range", .{});
+                        break :blk try registerInt(regs[inst.arg1], diag, "get_build_options workspace");
+                    };
+                    regs[inst.dest] = .{ .build_options = try vm.buildOptionsForWorkspace(workspace, diag) };
+                },
+                .build_options_get_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Build_Options field access out of range", .{});
+                    const index = switch (regs[inst.arg1]) {
+                        .build_options => |v| v,
+                        .build_llvm_options => |v| v,
+                        else => return diag.failAt(0, "VM Build_Options field access requires a Build_Options value", .{}),
+                    };
+                    regs[inst.dest] = switch (regs[inst.arg1]) {
+                        .build_options => try vm.buildOptionsGetField(index, vm.program.strings.items[inst.arg2], diag),
+                        .build_llvm_options => try vm.buildOptionsLlvmGetField(index, vm.program.strings.items[inst.arg2], diag),
+                        else => unreachable,
+                    };
+                },
+                .build_options_set_field => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM Build_Options field assignment out of range", .{});
+                    const index = switch (regs[inst.arg1]) {
+                        .build_options => |v| v,
+                        .build_llvm_options => |v| v,
+                        else => return diag.failAt(0, "VM Build_Options field assignment requires a Build_Options value", .{}),
+                    };
+                    switch (regs[inst.arg1]) {
+                        .build_options => try vm.buildOptionsSetField(index, vm.program.strings.items[inst.arg2], regs[inst.arg3], diag),
+                        .build_llvm_options => try vm.buildOptionsLlvmSetField(index, vm.program.strings.items[inst.arg2], regs[inst.arg3], diag),
+                        else => unreachable,
+                    }
+                    if (inst.dest < regs.len) regs[inst.dest] = regs[inst.arg1];
+                },
                 .get_command_line_arguments, .file_open => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
@@ -870,6 +940,7 @@ pub const VM = struct {
                 return ptr;
             },
             .code_node, .code_nodes => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot materialize Build_Options as raw bytes; access its fields instead", .{}),
             .empty => return diag.failAt(0, "VM cannot take address of an uninitialized register", .{}),
         }
     }
@@ -1074,6 +1145,142 @@ pub const VM = struct {
         return vm.current_workspace_id;
     }
 
+    fn buildOptionsForWorkspace(vm: *VM, workspace: i64, diag: Diagnostic) !usize {
+        _ = diag;
+        if (vm.workspace_build_options.get(workspace)) |index| return index;
+        const index = vm.build_options.items.len;
+        try vm.build_options.append(vm.allocator, .{});
+        try vm.workspace_build_options.put(vm.allocator, workspace, index);
+        return index;
+    }
+
+    fn buildOptionsGetField(vm: *VM, index: usize, field_name: []const u8, diag: Diagnostic) !RegisterValue {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options handle out of range", .{});
+        const options = vm.build_options.items[index];
+        if (std.mem.eql(u8, field_name, "output_executable_name")) return .{ .string = options.output_executable_name };
+        if (std.mem.eql(u8, field_name, "output_path")) return .{ .string = options.output_path };
+        if (std.mem.eql(u8, field_name, "intermediate_path")) return .{ .string = options.intermediate_path };
+        if (std.mem.eql(u8, field_name, "output_type")) return .{ .string = options.output_type };
+        if (std.mem.eql(u8, field_name, "backend")) return .{ .string = options.backend };
+        if (std.mem.eql(u8, field_name, "write_added_strings")) return .{ .bool = options.write_added_strings };
+        if (std.mem.eql(u8, field_name, "stack_trace")) return .{ .bool = options.stack_trace };
+        if (std.mem.eql(u8, field_name, "backtrace_on_crash")) return .{ .string = options.backtrace_on_crash };
+        if (std.mem.eql(u8, field_name, "array_bounds_check")) return .{ .string = options.array_bounds_check };
+        if (std.mem.eql(u8, field_name, "cast_bounds_check")) return .{ .string = options.cast_bounds_check };
+        if (std.mem.eql(u8, field_name, "null_pointer_check")) return .{ .string = options.null_pointer_check };
+        if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
+        if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
+        if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = index };
+        if (std.mem.eql(u8, field_name, "import_path")) return .{ .ptr = try vm.buildOptionsImportPath(index, diag) };
+        if (std.mem.eql(u8, field_name, "compile_time_command_line")) return .{ .ptr = try vm.buildOptionsCommandLine(index, diag) };
+        return diag.failAt(0, "VM Build_Options has no implemented field '{s}'", .{field_name});
+    }
+
+    fn buildOptionsLlvmGetField(vm: *VM, index: usize, field_name: []const u8, diag: Diagnostic) !RegisterValue {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options.llvm_options handle out of range", .{});
+        const options = vm.build_options.items[index];
+        if (std.mem.eql(u8, field_name, "output_bitcode")) return .{ .bool = options.llvm_output_bitcode };
+        return diag.failAt(0, "VM Build_Options.llvm_options has no implemented field '{s}'", .{field_name});
+    }
+
+    fn buildOptionsLlvmSetField(vm: *VM, index: usize, field_name: []const u8, value: RegisterValue, diag: Diagnostic) !void {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options.llvm_options handle out of range", .{});
+        const options = &vm.build_options.items[index];
+        if (std.mem.eql(u8, field_name, "output_bitcode")) {
+            options.llvm_output_bitcode = try registerTruthy(value, diag, "Build_Options.llvm_options.output_bitcode");
+            return;
+        }
+        return diag.failAt(0, "VM Build_Options.llvm_options has no implemented field '{s}'", .{field_name});
+    }
+
+    fn buildOptionsSetField(vm: *VM, index: usize, field_name: []const u8, value: RegisterValue, diag: Diagnostic) !void {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options handle out of range", .{});
+        const options = &vm.build_options.items[index];
+        if (std.mem.eql(u8, field_name, "output_executable_name")) {
+            options.output_executable_name = try vm.registerText(value, diag, "Build_Options.output_executable_name");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "output_path")) {
+            options.output_path = try vm.registerText(value, diag, "Build_Options.output_path");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "intermediate_path")) {
+            options.intermediate_path = try vm.registerText(value, diag, "Build_Options.intermediate_path");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "output_type")) {
+            options.output_type = try buildOptionsEnumText(value, "output_type", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "backend")) {
+            options.backend = try buildOptionsEnumText(value, "backend", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "write_added_strings")) {
+            options.write_added_strings = try registerTruthy(value, diag, "Build_Options.write_added_strings");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "stack_trace")) {
+            options.stack_trace = try registerTruthy(value, diag, "Build_Options.stack_trace");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "backtrace_on_crash")) {
+            options.backtrace_on_crash = try buildOptionsEnumText(value, "backtrace_on_crash", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "array_bounds_check")) {
+            options.array_bounds_check = try buildOptionsEnumText(value, "array_bounds_check", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "cast_bounds_check")) {
+            options.cast_bounds_check = try buildOptionsEnumText(value, "cast_bounds_check", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "null_pointer_check")) {
+            options.null_pointer_check = try buildOptionsEnumText(value, "null_pointer_check", diag);
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) {
+            options.enable_bytecode_inliner = try registerTruthy(value, diag, "Build_Options.enable_bytecode_inliner");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) {
+            options.runtime_storageless_type_info = try registerTruthy(value, diag, "Build_Options.runtime_storageless_type_info");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "import_path")) {
+            const ptr = try registerPointer(value, diag, "Build_Options.import_path");
+            options.import_path = vm.dynamicArrayIndexForPointer(ptr) orelse return diag.failAt(0, "Build_Options.import_path requires a dynamic string array", .{});
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "compile_time_command_line")) {
+            const ptr = try registerPointer(value, diag, "Build_Options.compile_time_command_line");
+            options.compile_time_command_line = vm.dynamicArrayIndexForPointer(ptr) orelse return diag.failAt(0, "Build_Options.compile_time_command_line requires a dynamic string array", .{});
+            return;
+        }
+        return diag.failAt(0, "VM Build_Options has no implemented field '{s}'", .{field_name});
+    }
+
+    fn buildOptionsImportPath(vm: *VM, index: usize, diag: Diagnostic) !Pointer {
+        const options = &vm.build_options.items[index];
+        if (options.import_path) |array_index| return vm.dynamic_arrays.items[array_index].header orelse vm.dynamic_arrays.items[array_index].slot orelse return diag.failAt(0, "Build_Options.import_path array has no handle", .{});
+        const header = try vm.newDynamicArray(0, 16, diag);
+        const array_index = vm.dynamicArrayIndexForPointer(header) orelse return diag.failAt(0, "Build_Options.import_path allocation failed", .{});
+        _ = try vm.dynamicArrayAdd(header, .{ .string = "modules" }, 16, diag);
+        options.import_path = array_index;
+        return header;
+    }
+
+    fn buildOptionsCommandLine(vm: *VM, index: usize, diag: Diagnostic) !Pointer {
+        const options = &vm.build_options.items[index];
+        if (options.compile_time_command_line) |array_index| return vm.dynamic_arrays.items[array_index].header orelse vm.dynamic_arrays.items[array_index].slot orelse return diag.failAt(0, "Build_Options.compile_time_command_line array has no handle", .{});
+        const header = try vm.newDynamicArray(0, 16, diag);
+        const array_index = vm.dynamicArrayIndexForPointer(header) orelse return diag.failAt(0, "Build_Options.compile_time_command_line allocation failed", .{});
+        for (vm.command_line) |arg| _ = try vm.dynamicArrayAdd(header, .{ .string = arg }, 16, diag);
+        options.compile_time_command_line = array_index;
+        return header;
+    }
+
     fn loadByte(vm: *VM, ptr: Pointer, diag: Diagnostic) !i64 {
         return (try vm.blockSlice(ptr, 1, diag))[0];
     }
@@ -1099,6 +1306,7 @@ pub const VM = struct {
             },
             .string => |text| if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text),
             .code_node, .code_nodes => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot store Build_Options into raw memory; use field assignment", .{}),
             .empty => return diag.failAt(0, "VM cannot store an uninitialized register", .{}),
         }
     }
@@ -1161,6 +1369,16 @@ pub const VM = struct {
         return item_ptr;
     }
 
+    fn dynamicArrayAddSpread(vm: *VM, array_ptr: Pointer, source: RegisterValue, elem_size: usize, diag: Diagnostic) !Pointer {
+        const source_ptr = try registerPointer(source, diag, "array_add spread source");
+        const source_index = vm.dynamicArrayIndexForPointer(source_ptr) orelse return diag.failAt(0, "array_add spread source must be a dynamic array", .{});
+        var last: ?Pointer = null;
+        for (vm.dynamic_arrays.items[source_index].elems.items) |item| {
+            last = try vm.dynamicArrayAdd(array_ptr, item, elem_size, diag);
+        }
+        return last orelse array_ptr;
+    }
+
     fn sortDynamicArray(vm: *VM, array_ptr: Pointer, kind: u32, diag: Diagnostic) !void {
         const array_index = vm.dynamicArrayIndexForPointer(array_ptr) orelse return diag.failAt(0, "VM sort_array requires a dynamic array pointer", .{});
         const array = &vm.dynamic_arrays.items[array_index];
@@ -1199,7 +1417,7 @@ pub const VM = struct {
             };
         }
         return switch (value) {
-            .int, .float, .bool, .string, .bytes, .ptr, .type_id => value,
+            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .build_options, .build_llvm_options => value,
             .empty => if (elem_size == 1)
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
@@ -1307,8 +1525,31 @@ pub const VM = struct {
                 }
                 std.debug.print("]", .{});
             },
+            .build_options, .build_llvm_options => |index| try vm.printBuildOptions(index, diag),
             .empty => return diag.failAt(0, "VM {s} cannot print an uninitialized value", .{context}),
         }
+    }
+
+    fn printBuildOptions(vm: *VM, index: usize, diag: Diagnostic) anyerror!void {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options handle out of range", .{});
+        const options = vm.build_options.items[index];
+        std.debug.print("{{\n", .{});
+        std.debug.print("    output_type = {s};\n", .{options.output_type});
+        std.debug.print("    backend = {s};\n", .{options.backend});
+        std.debug.print("    output_executable_name = \"{s}\";\n", .{options.output_executable_name});
+        std.debug.print("    output_path = \"{s}\";\n", .{options.output_path});
+        std.debug.print("    intermediate_path = \"{s}\";\n", .{options.intermediate_path});
+        std.debug.print("    write_added_strings = {s};\n", .{if (options.write_added_strings) "true" else "false"});
+        std.debug.print("    stack_trace = {s};\n", .{if (options.stack_trace) "true" else "false"});
+        std.debug.print("    backtrace_on_crash = {s};\n", .{options.backtrace_on_crash});
+        std.debug.print("    array_bounds_check = {s};\n", .{options.array_bounds_check});
+        std.debug.print("    cast_bounds_check = {s};\n", .{options.cast_bounds_check});
+        std.debug.print("    null_pointer_check = {s};\n", .{options.null_pointer_check});
+        std.debug.print("    enable_bytecode_inliner = {s};\n", .{if (options.enable_bytecode_inliner) "true" else "false"});
+        std.debug.print("    runtime_storageless_type_info = {s};\n", .{if (options.runtime_storageless_type_info) "true" else "false"});
+        std.debug.print("    import_path = ", .{});
+        try vm.printValue(.{ .ptr = try vm.buildOptionsImportPath(index, diag) }, diag, "Build_Options.import_path print");
+        std.debug.print(";\n}}", .{});
     }
 
     fn printDynamicArray(vm: *VM, array_index: usize, diag: Diagnostic) anyerror!void {
@@ -1468,6 +1709,8 @@ pub const VM = struct {
             .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
             .code_node => |node| try vm.builderAppendCodeText(builder, node.text),
             .code_nodes => return diag.failAt(0, "VM cannot append a Code_Node array to a String_Builder without indexing it", .{}),
+            .build_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
+            .build_llvm_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
             .ptr => |ptr| try builder.appendSlice(vm.allocator, try vm.readRemainingBytes(ptr, diag)),
             .int => |int_value| {
                 const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{int_value});
@@ -1500,7 +1743,43 @@ pub const VM = struct {
             }
         }
     }
+
+    fn builderAppendBuildOptions(vm: *VM, builder: *std.ArrayList(u8), index: usize, diag: Diagnostic) !void {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options handle out of range", .{});
+        const options = vm.build_options.items[index];
+        const prefix = try std.fmt.allocPrint(
+            vm.allocator,
+            "{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; intermediate_path = \"{s}\"; write_added_strings = {s}; stack_trace = {s}; backtrace_on_crash = {s}; array_bounds_check = {s}; cast_bounds_check = {s}; null_pointer_check = {s}; enable_bytecode_inliner = {s}; runtime_storageless_type_info = {s}; import_path = ",
+            .{ options.output_type, options.backend, options.output_executable_name, options.output_path, options.intermediate_path, if (options.write_added_strings) "true" else "false", if (options.stack_trace) "true" else "false", options.backtrace_on_crash, options.array_bounds_check, options.cast_bounds_check, options.null_pointer_check, if (options.enable_bytecode_inliner) "true" else "false", if (options.runtime_storageless_type_info) "true" else "false" },
+        );
+        defer vm.allocator.free(prefix);
+        try builder.appendSlice(vm.allocator, prefix);
+        try vm.builderAppendDynamicArray(builder, vm.dynamicArrayIndexForPointer(try vm.buildOptionsImportPath(index, diag)) orelse return diag.failAt(0, "Build_Options.import_path allocation failed", .{}), diag);
+        try builder.appendSlice(vm.allocator, "; }");
+    }
+
+    fn builderAppendDynamicArray(vm: *VM, builder: *std.ArrayList(u8), array_index: usize, diag: Diagnostic) !void {
+        try builder.append(vm.allocator, '[');
+        for (vm.dynamic_arrays.items[array_index].elems.items, 0..) |item, i| {
+            if (i != 0) try builder.appendSlice(vm.allocator, ", ");
+            switch (item) {
+                .string => |text| try appendFormatted(vm.allocator, builder, "\"{s}\"", .{text}),
+                .bytes => |bytes| try appendFormatted(vm.allocator, builder, "\"{s}\"", .{bytes}),
+                .int => |int_value| try appendFormatted(vm.allocator, builder, "{d}", .{int_value}),
+                .float => |float_value| try appendFormatted(vm.allocator, builder, "{d}", .{float_value}),
+                .bool => |bool_value| try builder.appendSlice(vm.allocator, if (bool_value) "true" else "false"),
+                else => return diag.failAt(0, "VM cannot append {s} dynamic-array element to Build_Options string", .{@tagName(item)}),
+            }
+        }
+        try builder.append(vm.allocator, ']');
+    }
 };
+
+fn appendFormatted(allocator: std.mem.Allocator, builder: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(text);
+    try builder.appendSlice(allocator, text);
+}
 
 fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !f64 {
     return switch (value) {
@@ -1511,6 +1790,7 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .bytes => |v| if (v.len == 0) 0 else 1,
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .code_node, .code_nodes => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
+        .build_options, .build_llvm_options => diag.failAt(0, "VM {s} cannot treat Build_Options values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
     };
 }
@@ -1535,6 +1815,8 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .bytes => |v| v.len != 0,
         .code_node => true,
         .code_nodes => |v| v.len != 0,
+        .build_options => true,
+        .build_llvm_options => true,
         .type_id => true,
         .ptr => true,
         .empty => false,
@@ -1582,6 +1864,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .bytes => |v| .{ .bytes = v },
         .type_id => diag.failAt(0, "VM cannot pass Type values across procedure calls yet", .{}),
         .code_node, .code_nodes => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
     };
@@ -1625,6 +1908,14 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
             .code_nodes => |r| l.ptr == r.ptr and l.len == r.len,
             else => false,
         },
+        .build_options => |l| switch (rhs) {
+            .build_options => |r| l == r,
+            else => false,
+        },
+        .build_llvm_options => |l| switch (rhs) {
+            .build_llvm_options => |r| l == r,
+            else => false,
+        },
         .int => |l| switch (rhs) {
             .int => |r| l == r,
             .float => |r| @as(f64, @floatFromInt(l)) == r,
@@ -1652,6 +1943,55 @@ fn registerCodeText(value: RegisterValue, diag: Diagnostic, context: []const u8)
         .bytes => |bytes| bytes,
         .code_node => |node| node.text,
         else => diag.failAt(0, "VM {s} requires a Code or Code_Node value", .{context}),
+    };
+}
+
+fn buildOptionsEnumText(value: RegisterValue, field_name: []const u8, diag: Diagnostic) ![]const u8 {
+    return switch (value) {
+        .string => |text| text,
+        .bytes => |bytes| bytes,
+        .int => |int_value| buildOptionsEnumTextFromInt(field_name, int_value),
+        else => diag.failAt(0, "VM Build_Options.{s} requires an enum-like value", .{field_name}),
+    };
+}
+
+fn buildOptionsEnumTextFromInt(field_name: []const u8, value: i64) []const u8 {
+    if (std.mem.eql(u8, field_name, "backend")) {
+        return switch (value) {
+            0 => "LLVM",
+            1 => "C",
+            2 => "INTERPRETER",
+            else => "UNKNOWN",
+        };
+    }
+    if (std.mem.eql(u8, field_name, "output_type")) {
+        return switch (value) {
+            0 => "EXECUTABLE",
+            1 => "DYNAMIC_LIBRARY",
+            2 => "STATIC_LIBRARY",
+            else => "UNKNOWN",
+        };
+    }
+    if (std.mem.eql(u8, field_name, "backtrace_on_crash")) {
+        return switch (value) {
+            0 => "OFF",
+            1 => "ON",
+            else => "UNKNOWN",
+        };
+    }
+    if (std.mem.endsWith(u8, field_name, "_check")) {
+        return switch (value) {
+            0 => "OFF",
+            1 => "ON",
+            2 => "FATAL",
+            3 => "ALWAYS",
+            else => "UNKNOWN",
+        };
+    }
+    return switch (value) {
+        0 => "OFF",
+        1 => "ON",
+        else => "UNKNOWN",
     };
 }
 

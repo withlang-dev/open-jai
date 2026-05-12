@@ -16,6 +16,7 @@ pub const Options = struct {
     output_path: []const u8,
     runtime_path: []const u8 = "zig-out/lib/openjai_runtime.manifest",
     check_only: bool = false,
+    command_line: []const []const u8 = &.{},
 };
 
 pub const Compilation = struct {
@@ -418,6 +419,7 @@ pub const Compilation = struct {
             var block_vm = vm_mod.VM.initWithContext(comp.allocator, &block_program, comp.io, comp.sourceBaseDir());
             block_vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
             block_vm.next_workspace_id = &comp.next_workspace_id;
+            block_vm.command_line = comp.options.command_line;
             defer block_vm.deinit();
             const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
             try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
@@ -518,6 +520,7 @@ pub const Compilation = struct {
         var vm = vm_mod.VM.initWithContext(comp.allocator, &run_program, comp.io, comp.sourceBaseDir());
         vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
         vm.next_workspace_id = &comp.next_workspace_id;
+        vm.command_line = comp.options.command_line;
         defer vm.deinit();
         return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
     }
