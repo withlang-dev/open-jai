@@ -194,6 +194,9 @@ const GenContext = struct {
     type_overrides: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     external_registers: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
     external_types: std.StringHashMapUnmanaged([]const u8) = .empty,
+    for_expansion_it_alias: ?[]const u8 = null,
+    for_expansion_index_alias: ?[]const u8 = null,
+    type_context_parent: ?*GenContext = null,
     binding_option_fields: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
     emitted_specialized_runs: std.StringHashMapUnmanaged(void) = .empty,
     local_code_bindings: std.ArrayList(CodeBinding) = .empty,
@@ -217,6 +220,7 @@ const GenContext = struct {
     const LoopFrame = struct {
         label: []const u8, // empty = anonymous
         continue_target: u32, // instruction index to jump to on 'continue'
+        continue_patches: std.ArrayList(usize), // instruction indices to patch when continue target is not known yet
         break_patches: std.ArrayList(usize), // instruction indices to patch on 'break'
         defer_depth: usize, // defer_stmts.items.len at loop entry
     };
@@ -239,7 +243,10 @@ const GenContext = struct {
         ctx.external_types.deinit(ctx.program.allocator);
         ctx.binding_option_fields.deinit(ctx.program.allocator);
         ctx.emitted_specialized_runs.deinit(ctx.program.allocator);
-        for (ctx.loop_stack.items) |*frame| frame.break_patches.deinit(ctx.program.allocator);
+        for (ctx.loop_stack.items) |*frame| {
+            frame.continue_patches.deinit(ctx.program.allocator);
+            frame.break_patches.deinit(ctx.program.allocator);
+        }
         ctx.loop_stack.deinit(ctx.program.allocator);
         ctx.defer_stmts.deinit(ctx.program.allocator);
         ctx.inline_stack.deinit(ctx.program.allocator);
@@ -898,6 +905,105 @@ const GenContext = struct {
         }
     }
 
+    fn tryEmitForExpansion(ctx: *GenContext, stmt: NodeIndex, range: []const u32, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        const is_explicit = range.len == 4 and (range[1] & 0x80000000) != 0;
+        const iterated: NodeIndex = @intCast(range[0]);
+        const expansion_name = if (is_explicit)
+            ast.tokenSlice(range[1] & 0x7fffffff)
+        else blk: {
+            if (!(range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3)) return false;
+            const iterated_type = typeTextForExpr(ctx, iterated, diag) orelse return false;
+            if (dynamicArrayElementText(iterated_type) != null or staticArrayElementText(iterated_type) != null) return false;
+            break :blk "for_expansion";
+        };
+        const target = ctx.resolveProcCallTarget(stmt, expansion_name, 3) orelse return if (is_explicit)
+            diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "unresolved for-expansion macro '{s}'", .{expansion_name})
+        else
+            false;
+        if (!procHasExpandModifierLocal(ast, target)) return if (is_explicit)
+            diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must be marked #expand", .{expansion_name})
+        else
+            false;
+        const sig = procSignature(ast, target) orelse return diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must have parameters", .{expansion_name});
+        const params = ast.extraSlice(sig.params_extra);
+        if (params.len < 2) return diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must accept iterator and body parameters", .{expansion_name});
+
+        var param_restores = std.ArrayList(ParamBindingRestore).empty;
+        defer param_restores.deinit(ctx.program.allocator);
+        var type_restores = std.ArrayList(TypeOverrideRestore).empty;
+        defer type_restores.deinit(ctx.program.allocator);
+        var bindings = std.ArrayList(MacroCodeBinding).empty;
+        defer bindings.deinit(ctx.program.allocator);
+        const code_binding_base = ctx.local_code_bindings.items.len;
+        defer ctx.local_code_bindings.shrinkRetainingCapacity(code_binding_base);
+
+        const iterator_param: NodeIndex = @intCast(params[0]);
+        try param_restores.append(ctx.program.allocator, .{
+            .decl = iterator_param,
+            .had_old = ctx.decl_registers.contains(iterator_param),
+            .old = ctx.decl_registers.get(iterator_param) orelse 0,
+        });
+        const iterator_reg = try ctx.genExpr(iterated, diag);
+        try ctx.decl_registers.put(ctx.program.allocator, iterator_param, iterator_reg);
+        if (typeTextForExpr(ctx, iterated, diag)) |iterated_type| {
+            try type_restores.append(ctx.program.allocator, .{
+                .decl = iterator_param,
+                .had_old = ctx.type_overrides.contains(iterator_param),
+                .old = ctx.type_overrides.get(iterator_param) orelse "",
+            });
+            try ctx.type_overrides.put(ctx.program.allocator, iterator_param, iterated_type);
+        }
+
+        const body_param: NodeIndex = @intCast(params[1]);
+        const body_code = ctx.nodeSource(ast.data(stmt).rhs);
+        try bindings.append(ctx.program.allocator, .{ .decl = body_param, .code = body_code });
+        try ctx.rememberLocalCode(body_param, body_code);
+        try type_restores.append(ctx.program.allocator, .{
+            .decl = body_param,
+            .had_old = ctx.type_overrides.contains(body_param),
+            .old = ctx.type_overrides.get(body_param) orelse "",
+        });
+        try ctx.type_overrides.put(ctx.program.allocator, body_param, "Code");
+
+        if (params.len >= 3) {
+            const flags_param: NodeIndex = @intCast(params[2]);
+            try param_restores.append(ctx.program.allocator, .{
+                .decl = flags_param,
+                .had_old = ctx.decl_registers.contains(flags_param),
+                .old = ctx.decl_registers.get(flags_param) orelse 0,
+            });
+            try ctx.decl_registers.put(ctx.program.allocator, flags_param, try ctx.emitInt(stmt, 0));
+            try type_restores.append(ctx.program.allocator, .{
+                .decl = flags_param,
+                .had_old = ctx.type_overrides.contains(flags_param),
+                .old = ctx.type_overrides.get(flags_param) orelse "",
+            });
+            try ctx.type_overrides.put(ctx.program.allocator, flags_param, "For_Flags");
+        }
+        defer ctx.restoreParamBindings(param_restores.items) catch {};
+        defer ctx.restoreTypeOverrides(type_restores.items) catch {};
+
+        const old_it_alias = ctx.for_expansion_it_alias;
+        const old_index_alias = ctx.for_expansion_index_alias;
+        if (is_explicit) {
+            ctx.for_expansion_it_alias = if (range[2] & 0x80000000 != 0) ast.tokenSlice(range[2] & 0x7fffffff) else null;
+            ctx.for_expansion_index_alias = if (range[3] != 0) ast.tokenSlice(range[3]) else null;
+        } else {
+            ctx.for_expansion_it_alias = if (range.len >= 2 and (range[1] & 0x80000000) != 0) ast.tokenSlice(range[1] & 0x7fffffff) else null;
+            ctx.for_expansion_index_alias = if (range.len >= 3) ast.tokenSlice(range[2]) else null;
+        }
+        defer {
+            ctx.for_expansion_it_alias = old_it_alias;
+            ctx.for_expansion_index_alias = old_index_alias;
+        }
+
+        const body = ast.data(target).lhs;
+        if (body == @import("Ast.zig").null_node or ast.tag(body) != .block) return diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must have a block body", .{expansion_name});
+        try ctx.genExpandBlock(body, bindings.items, diag);
+        return true;
+    }
+
     fn restoreTypeOverrides(ctx: *GenContext, restores: []const TypeOverrideRestore) !void {
         for (restores) |restore| {
             if (restore.had_old) {
@@ -1222,6 +1328,7 @@ const GenContext = struct {
             .compile_time_host = ctx.compile_time_host,
             .current_proc_node = main_proc,
             .current_proc_index = ctx.current_proc_index,
+            .type_context_parent = ctx,
         };
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
@@ -1277,6 +1384,7 @@ const GenContext = struct {
             .compile_time_host = ctx.compile_time_host,
             .current_proc_node = main_proc,
             .current_proc_index = ctx.current_proc_index,
+            .type_context_parent = ctx,
         };
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
@@ -1333,6 +1441,7 @@ const GenContext = struct {
             .compile_time_host = ctx.compile_time_host,
             .current_proc_node = main_proc,
             .current_proc_index = ctx.current_proc_index,
+            .type_context_parent = ctx,
         };
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
@@ -1357,12 +1466,50 @@ const GenContext = struct {
             if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
             switch (ctx.ast.tag(decl)) {
                 .var_decl, .const_decl => {},
+                .for_stmt => {
+                    const range = ctx.ast.extraSlice(ctx.ast.data(decl).lhs);
+                    const iterator_name = forStmtIteratorName(ctx.ast, range) orelse continue;
+                    const name = externalNameForSourceName(iterator_name);
+                    try child.external_registers.put(child.program.allocator, name, entry.value_ptr.*);
+                    if (ctx.type_overrides.get(decl)) |ty| try child.external_types.put(child.program.allocator, name, ty);
+                    if (std.mem.eql(u8, name, "it")) {
+                        if (ctx.for_expansion_it_alias) |alias| {
+                            try child.external_registers.put(child.program.allocator, alias, entry.value_ptr.*);
+                            if (ctx.type_overrides.get(decl)) |ty| try child.external_types.put(child.program.allocator, alias, ty);
+                        }
+                    }
+                    if (forStmtIndexName(ctx.ast, range)) |index_name_raw| {
+                        if (ctx.loop_index_registers.get(decl)) |index_reg| {
+                            const index_name = externalNameForSourceName(index_name_raw);
+                            try child.external_registers.put(child.program.allocator, index_name, index_reg);
+                            try child.external_types.put(child.program.allocator, index_name, "int");
+                            if (std.mem.eql(u8, index_name, "it_index")) {
+                                if (ctx.for_expansion_index_alias) |alias| {
+                                    try child.external_registers.put(child.program.allocator, alias, index_reg);
+                                    try child.external_types.put(child.program.allocator, alias, "int");
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                },
                 else => continue,
             }
-            const name = ctx.ast.tokenSlice(ctx.ast.mainToken(decl));
+            const name = externalNameForSourceName(ctx.ast.tokenSlice(ctx.ast.mainToken(decl)));
             try child.external_registers.put(child.program.allocator, name, entry.value_ptr.*);
             if (typeTextForDecl(ctx, decl, diag)) |ty| {
                 try child.external_types.put(child.program.allocator, name, ty);
+            }
+            if (std.mem.eql(u8, name, "it")) {
+                if (ctx.for_expansion_it_alias) |alias| {
+                    try child.external_registers.put(child.program.allocator, alias, entry.value_ptr.*);
+                    if (typeTextForDecl(ctx, decl, diag)) |ty| try child.external_types.put(child.program.allocator, alias, ty);
+                }
+            } else if (std.mem.eql(u8, name, "it_index")) {
+                if (ctx.for_expansion_index_alias) |alias| {
+                    try child.external_registers.put(child.program.allocator, alias, entry.value_ptr.*);
+                    if (typeTextForDecl(ctx, decl, diag)) |ty| try child.external_types.put(child.program.allocator, alias, ty);
+                }
             }
         }
     }
@@ -1378,7 +1525,7 @@ const GenContext = struct {
                 else => continue,
             }
             const reg = child.decl_registers.get(stmt) orelse continue;
-            const raw_name = child.ast.tokenSlice(child.ast.mainToken(stmt));
+            const raw_name = externalNameForSourceName(child.ast.tokenSlice(child.ast.mainToken(stmt)));
             const name = ctx.external_registers.getKey(raw_name) orelse blk: {
                 const name_index = try ctx.program.addByteArray(raw_name);
                 break :blk ctx.program.byte_arrays.items[name_index];
@@ -1718,12 +1865,16 @@ const GenContext = struct {
                     const init_is_code_node = if (init_type_text) |text| isCodeNodeTypeText(text) else false;
                     const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
+                    var bind_reg = reg;
                     if (!init_is_code_node and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar)) {
+                        bind_reg = ctx.proc.num_registers;
+                        ctx.proc.num_registers += 1;
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
                         const addr_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
-                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = reg, .source_node = stmt });
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = bind_reg, .source_node = stmt });
                     }
-                    try ctx.decl_registers.put(ctx.program.allocator, stmt, reg);
+                    try ctx.decl_registers.put(ctx.program.allocator, stmt, bind_reg);
                 } else if (ast.tag(stmt) == .var_decl and init == @import("Ast.zig").null_node) {
                     const reg = try ctx.genDefaultValue(ast.data(stmt).lhs, stmt, diag);
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, reg);
@@ -1835,6 +1986,7 @@ const GenContext = struct {
                 var frame = LoopFrame{
                     .label = label,
                     .continue_target = loop_start,
+                    .continue_patches = std.ArrayList(usize).empty,
                     .break_patches = std.ArrayList(usize).empty,
                     .defer_depth = ctx.defer_stmts.items.len,
                 };
@@ -1849,6 +2001,7 @@ const GenContext = struct {
                 for (frame.break_patches.items) |patch_idx| {
                     ctx.proc.instructions.items[patch_idx].arg1 = loop_exit;
                 }
+                frame.continue_patches.deinit(ctx.program.allocator);
                 frame.break_patches.deinit(ctx.program.allocator);
             },
             .defer_stmt => {
@@ -1884,7 +2037,9 @@ const GenContext = struct {
                     const f = &ctx.loop_stack.items[frame_idx];
                     if (label_name.len == 0 or std.mem.eql(u8, f.label, label_name)) {
                         try ctx.emitDeferred(f.defer_depth, diag);
-                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump, .arg1 = f.continue_target, .source_node = stmt });
+                        const patch_idx = ctx.proc.instructions.items.len;
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump, .arg1 = if (f.continue_target == std.math.maxInt(u32)) 0 else f.continue_target, .source_node = stmt });
+                        if (f.continue_target == std.math.maxInt(u32)) try f.continue_patches.append(ctx.program.allocator, patch_idx);
                         return;
                     }
                 }
@@ -1892,6 +2047,7 @@ const GenContext = struct {
             },
             .for_stmt => {
                 const range = ast.extraSlice(ast.data(stmt).lhs);
+                if (try ctx.tryEmitForExpansion(stmt, range, diag)) return;
                 if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
                     const iterated: NodeIndex = @intCast(range[0]);
                     const array_slot = try ctx.genExpr(iterated, diag);
@@ -1913,7 +2069,15 @@ const GenContext = struct {
                     const index_addr = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = index_addr, .arg1 = index_reg, .source_node = stmt });
+                    const old_loop_index_reg = ctx.loop_index_registers.get(stmt);
                     try ctx.loop_index_registers.put(ctx.program.allocator, stmt, index_reg);
+                    defer {
+                        if (old_loop_index_reg) |reg| {
+                            ctx.loop_index_registers.put(ctx.program.allocator, stmt, reg) catch {};
+                        } else {
+                            _ = ctx.loop_index_registers.remove(stmt);
+                        }
+                    }
 
                     const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
                     const cond_reg = ctx.proc.num_registers;
@@ -1933,7 +2097,15 @@ const GenContext = struct {
                         .arg4 = if (elem_is_struct) 1 else if (elem_is_string) 2 else 0,
                         .source_node = stmt,
                     });
+                    const old_iter_reg = ctx.decl_registers.get(stmt);
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, it_reg);
+                    defer {
+                        if (old_iter_reg) |reg| {
+                            ctx.decl_registers.put(ctx.program.allocator, stmt, reg) catch {};
+                        } else {
+                            _ = ctx.decl_registers.remove(stmt);
+                        }
+                    }
                     const old_iter_type = ctx.type_overrides.get(stmt);
                     if (elem_text) |text| try ctx.type_overrides.put(ctx.program.allocator, stmt, text);
                     defer {
@@ -1946,12 +2118,16 @@ const GenContext = struct {
 
                     var frame = LoopFrame{
                         .label = if (range.len >= 2 and (range[1] & 0x80000000) != 0) ast.tokenSlice(range[1] & 0x7fffffff) else "",
-                        .continue_target = loop_start,
+                        .continue_target = std.math.maxInt(u32),
+                        .continue_patches = std.ArrayList(usize).empty,
                         .break_patches = std.ArrayList(usize).empty,
                         .defer_depth = ctx.defer_stmts.items.len,
                     };
                     try ctx.loop_stack.append(ctx.program.allocator, frame);
                     try ctx.genBlock(ast.data(stmt).rhs, diag);
+                    frame = ctx.loop_stack.pop().?;
+                    const continue_target: u32 = @intCast(ctx.proc.instructions.items.len);
+                    for (frame.continue_patches.items) |patch_idx| ctx.proc.instructions.items[patch_idx].arg1 = continue_target;
                     const one_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = one_reg, .arg1 = 1, .source_node = stmt });
@@ -1959,9 +2135,9 @@ const GenContext = struct {
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump, .arg1 = loop_start, .source_node = stmt });
                     const end_index: u32 = @intCast(ctx.proc.instructions.items.len);
                     ctx.proc.instructions.items[jump_if_index].arg2 = end_index;
-                    frame = ctx.loop_stack.pop().?;
                     var popped = frame;
                     for (popped.break_patches.items) |patch_idx| ctx.proc.instructions.items[patch_idx].arg1 = end_index;
+                    popped.continue_patches.deinit(ctx.program.allocator);
                     popped.break_patches.deinit(ctx.program.allocator);
                 } else if (range.len == 4 or (range.len == 2 and (range[1] & 0x80000000) == 0)) {
                     const is_reverse = range.len == 4 and range[3] != 0;
@@ -1971,7 +2147,15 @@ const GenContext = struct {
                     const index_addr = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = index_addr, .arg1 = index_reg, .source_node = stmt });
+                    const old_iter_reg = ctx.decl_registers.get(stmt);
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, index_reg);
+                    defer {
+                        if (old_iter_reg) |reg| {
+                            ctx.decl_registers.put(ctx.program.allocator, stmt, reg) catch {};
+                        } else {
+                            _ = ctx.decl_registers.remove(stmt);
+                        }
+                    }
                     const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
                     const cond_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
@@ -1986,12 +2170,16 @@ const GenContext = struct {
                     const iter_label: []const u8 = if (iterator_tok != 0) ast.tokenSlice(iterator_tok) else "";
                     var frame = LoopFrame{
                         .label = iter_label,
-                        .continue_target = loop_start,
+                        .continue_target = std.math.maxInt(u32),
+                        .continue_patches = std.ArrayList(usize).empty,
                         .break_patches = std.ArrayList(usize).empty,
                         .defer_depth = ctx.defer_stmts.items.len,
                     };
                     try ctx.loop_stack.append(ctx.program.allocator, frame);
                     try ctx.genBlock(ast.data(stmt).rhs, diag);
+                    frame = ctx.loop_stack.pop().?;
+                    const continue_target: u32 = @intCast(ctx.proc.instructions.items.len);
+                    for (frame.continue_patches.items) |patch_idx| ctx.proc.instructions.items[patch_idx].arg1 = continue_target;
                     // Increment/decrement.
                     const one_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
@@ -2004,10 +2192,10 @@ const GenContext = struct {
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump, .arg1 = loop_start, .source_node = stmt });
                     const loop_exit: u32 = @intCast(ctx.proc.instructions.items.len);
                     ctx.proc.instructions.items[jump_if_index].arg2 = loop_exit;
-                    frame = ctx.loop_stack.pop().?;
                     for (frame.break_patches.items) |patch_idx| {
                         ctx.proc.instructions.items[patch_idx].arg1 = loop_exit;
                     }
+                    frame.continue_patches.deinit(ctx.program.allocator);
                     frame.break_patches.deinit(ctx.program.allocator);
                 } else {
                     return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "for loop requires start and end range expressions", .{});
@@ -5282,6 +5470,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (ctx.external_types.get(ident_name)) |actual_type| return actual_type;
                 return null;
             }
+            if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) return "int";
             if (ctx.type_overrides.get(decl)) |actual_type| return actual_type;
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
@@ -5766,7 +5955,10 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
         if (std.mem.eql(u8, field_name, "count")) return .{ .offset = 0, .type_text = "int" };
         if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*u8" };
     }
-    const type_node = try structTypeNodeByName(ctx, type_name) orelse return null;
+    const type_node = try structTypeNodeByName(ctx, type_name) orelse {
+        if (ctx.type_context_parent) |parent| return try fieldInfoFromTypeText(parent, raw_type, field_name, diag);
+        return null;
+    };
     var restores = try bindContainerTypeArgs(ctx, raw_type, type_node);
     defer {
         restoreContainerTypeArgs(ctx, restores.items) catch {};
@@ -5776,10 +5968,12 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
 }
 
 fn typeTextIsStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !bool {
-    _ = diag;
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return false;
     if (std.mem.eql(u8, type_name, "Allocator") or std.mem.eql(u8, type_name, "Pool") or std.mem.eql(u8, type_name, "Flat_Pool")) return true;
+    if (ctx.type_context_parent) |parent| {
+        if (try typeTextIsStruct(parent, raw_type, diag)) return true;
+    }
     return (try structTypeNodeByName(ctx, type_name)) != null;
 }
 
@@ -7150,6 +7344,56 @@ fn isAddressableScalarTypeWord(name: []const u8) bool {
         std.mem.eql(u8, name, "string");
 }
 
+fn externalNameForSourceName(name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, name, "`")) return name[1..];
+    return name;
+}
+
+fn forStmtIteratorName(ast: *const Ast, range: []const u32) ?[]const u8 {
+    if (range.len == 0) return null;
+
+    // Explicit for-expansion form: for :expansion iterator, index: iterable
+    if (range.len == 4 and (range[1] & 0x80000000) != 0) {
+        const tok = range[2];
+        if (tok == 0) return "it";
+        return ast.tokenSlice(tok & 0x7fffffff);
+    }
+
+    // Iterable form: for iterator[, index]: iterable
+    if ((range.len == 2 or range.len == 3) and (range[1] & 0x80000000) != 0) {
+        return ast.tokenSlice(range[1] & 0x7fffffff);
+    }
+
+    // Range form: for iterator: first..last
+    if (range.len == 4 and range[2] != 0 and (range[2] & 0x80000000) == 0) {
+        return ast.tokenSlice(range[2]);
+    }
+
+    // Jai exposes implicit loop variables in ordinary iterable loops.
+    if (range.len == 1) return "it";
+    return null;
+}
+
+fn forStmtIndexName(ast: *const Ast, range: []const u32) ?[]const u8 {
+    if (range.len == 0) return null;
+
+    // Explicit for-expansion form: for :expansion iterator, index: iterable
+    if (range.len == 4 and (range[1] & 0x80000000) != 0) {
+        const tok = range[3];
+        if (tok == 0) return "it_index";
+        return ast.tokenSlice(tok & 0x7fffffff);
+    }
+
+    // Iterable form: for iterator, index: iterable
+    if (range.len == 3 and (range[1] & 0x80000000) != 0) {
+        return ast.tokenSlice(range[2] & 0x7fffffff);
+    }
+
+    // Jai exposes an implicit index alongside the implicit iterator.
+    if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0)) return "it_index";
+    return null;
+}
+
 fn isSimpleIdentifierText(text: []const u8) bool {
     if (text.len == 0) return false;
     if (!(std.ascii.isAlphabetic(text[0]) or text[0] == '_')) return false;
@@ -7290,7 +7534,10 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
         if (selected_arg_index >= arg_nodes.len) return diag.failAt(ast.tokens[ast.mainToken(fmt_node)].start, "print format references argument index out of range", .{});
         const arg_node: NodeIndex = @intCast(arg_nodes[selected_arg_index]);
         if (typeTextForExpr(ctx, arg_node, diag)) |arg_type| {
-            if (staticArrayElementText(arg_type)) |elem_type| {
+            if (try typeTextIsEmbeddedStruct(ctx, arg_type, diag)) {
+                const arg_reg = try genCallArg(ctx, arg_node, diag);
+                try emitFormattedValueForType(ctx, arg_reg, arg_type, arg_node, false, diag);
+            } else if (staticArrayElementText(arg_type)) |elem_type| {
                 const elem_name = firstTypeWord(elem_type);
                 const count = try staticArrayCountFromText(ctx, arg_type, diag) orelse return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "formatted static array output requires a known element count", .{});
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
@@ -7319,6 +7566,86 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
     }
     if (start < fmt.len) try emitLiteralPrint(program, proc, fmt[start..], fmt_node);
     if (arg_index > arg_nodes.len) return diag.failAt(ast.tokens[ast.mainToken(fmt_node)].start, "print format consumed more arguments than provided", .{});
+}
+
+fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, quote_strings: bool, diag: Diagnostic) anyerror!void {
+    const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
+    if (try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
+        try emitFormattedStructValue(ctx, value_reg, clean_type, source_node, diag);
+        return;
+    }
+    if (std.mem.eql(u8, firstTypeWord(clean_type), "string") and quote_strings) {
+        try emitLiteralPrint(ctx.program, ctx.proc, "\"", source_node);
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+        try emitLiteralPrint(ctx.program, ctx.proc, "\"", source_node);
+        return;
+    }
+    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+}
+
+fn emitLoadFromAddressForType(ctx: *GenContext, addr: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!Bytecode.Register {
+    const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
+    if (isDynamicArrayTypeText(clean_type) or isStaticArrayTypeText(clean_type) or try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) return addr;
+    const reg = ctx.proc.num_registers;
+    ctx.proc.num_registers += 1;
+    const opcode: Bytecode.Opcode = if (std.mem.eql(u8, firstTypeWord(clean_type), "string"))
+        .load_ptr_string
+    else if (std.mem.eql(u8, firstTypeWord(clean_type), "float") or std.mem.eql(u8, firstTypeWord(clean_type), "float32") or std.mem.eql(u8, firstTypeWord(clean_type), "float64"))
+        .load_ptr_float
+    else if ((try typeTextSize(ctx, clean_type, diag)) == 1)
+        .load_ptr_byte
+    else
+        .load_ptr;
+    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = addr, .source_node = source_node });
+    return reg;
+}
+
+fn emitFormattedStructValue(ctx: *GenContext, base_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
+    const type_name = firstTypeWord(stripPointerText(raw_type));
+    const type_node = try structTypeNodeByName(ctx, type_name) orelse {
+        if (ctx.type_context_parent) |parent| {
+            try emitFormattedStructValue(parent, base_reg, raw_type, source_node, diag);
+            return;
+        }
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = base_reg, .source_node = source_node });
+        return;
+    };
+    var restores = try bindContainerTypeArgs(ctx, raw_type, type_node);
+    defer {
+        restoreContainerTypeArgs(ctx, restores.items) catch {};
+        restores.deinit(ctx.program.allocator);
+    }
+    const body = containerBodySource(ctx.ast, type_node) orelse {
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = base_reg, .source_node = source_node });
+        return;
+    };
+
+    try emitLiteralPrint(ctx.program, ctx.proc, "{", source_node);
+    var offset: u64 = 0;
+    var printed_any = false;
+    var fields = FieldSegmentIterator{ .source = body };
+    while (fields.next()) |segment| {
+        const parsed = parseFieldSegment(segment) orelse continue;
+        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
+        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        var split = std.mem.splitScalar(u8, parsed.names_text, ',');
+        while (split.next()) |raw_name| {
+            _ = lastWord(std.mem.trim(u8, raw_name, " \t\r\n"));
+            offset = alignForward(offset, field_align);
+            if (printed_any) try emitLiteralPrint(ctx.program, ctx.proc, ", ", source_node);
+            printed_any = true;
+            const field_addr = if (offset == 0) base_reg else blk: {
+                const tmp = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = tmp, .arg1 = base_reg, .arg2 = @intCast(offset), .source_node = source_node });
+                break :blk tmp;
+            };
+            const field_value = try emitLoadFromAddressForType(ctx, field_addr, parsed.type_text, source_node, diag);
+            try emitFormattedValueForType(ctx, field_value, parsed.type_text, source_node, true, diag);
+            offset += field_size;
+        }
+    }
+    try emitLiteralPrint(ctx.program, ctx.proc, "}", source_node);
 }
 
 fn builderSlotArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.Register {

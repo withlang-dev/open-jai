@@ -902,9 +902,10 @@ const Parser = struct {
         const is_reverse: u32 = if (p.matchDiscard(.less_than)) 1 else 0;
         _ = p.matchDiscard(.star);
         // Named iterator: "for i: 0..5 { }" or "for number: 1..5 print(...)"
+        var expansion_tok: u32 = 0;
         var iterator_tok: u32 = 0;
         var index_tok: u32 = 0;
-        if (p.matchDiscard(.colon)) _ = try p.expect(.identifier, "expected for-expansion name after ':'", .{});
+        if (p.matchDiscard(.colon)) expansion_tok = try p.expect(.identifier, "expected for-expansion name after ':'", .{});
         if (p.checkIdentifierLike() and p.peekTag(1) == .comma and (p.peekTag(2) == .identifier or p.peekTag(2) == .keyword_it or p.peekTag(2) == .keyword_it_index) and p.peekTag(3) == .colon) {
             iterator_tok = p.index;
             index_tok = p.index + 2;
@@ -916,7 +917,10 @@ const Parser = struct {
         const start_expr = try p.parseExpr();
         if (!p.matchDiscard(.dot_dot)) {
             // Iterable-form: "for collection { }"
-            const iterable_extra = if (index_tok != 0) blk: {
+            const iterable_extra = if (expansion_tok != 0) blk: {
+                const iterable_values = [_]u32{ start_expr, expansion_tok | 0x80000000, if (iterator_tok != 0) iterator_tok | 0x80000000 else 0, index_tok };
+                break :blk try p.ast.addExtraSlice(&iterable_values);
+            } else if (index_tok != 0) blk: {
                 const iterable_values = [_]u32{ start_expr, iterator_tok | 0x80000000, index_tok };
                 break :blk try p.ast.addExtraSlice(&iterable_values);
             } else if (iterator_tok != 0) blk: {

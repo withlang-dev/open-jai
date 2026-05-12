@@ -84,6 +84,14 @@ macro_swap_output :: () {
     expect_program_output("examples/26/26.28_swap_macro.jai", "Pre-swap:  a is 3, b is 5\nPost-swap: a is 5, b is 3\n");
 } @TestProcedure
 
+abstracting_loop_output :: () {
+    expect_program_output("examples/26/26.34_abstracting_loop.jai", "Player no 0 is {\"Jane\", 82}\nPlayer no 1 is {\"John\", 75}\nPlayer is {\"Jane\", 82}\nPlayer is {\"John\", 75}\ninside macro! \nPlayer is {\"Jane\", 82}\ninside macro! \nPlayer is {\"John\", 75}\ninside macro player_loop! \nPlayer 0 is {\"Jane\", 82}\ninside macro player_loop! \nPlayer 1 is {\"John\", 75}\n");
+} @TestProcedure
+
+step_iterator_output :: () {
+    expect_program_output("examples/26/26.40_step_iterator.jai", "0 - 2 - 4 - 6 - 8 - 10 - ");
+} @TestProcedure
+
 placeholder_fulfillment_output :: () {
     expect_example_annotations("examples/30/30.12_placeholder.jai");
 } @TestProcedure

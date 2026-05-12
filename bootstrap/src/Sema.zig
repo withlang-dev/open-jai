@@ -445,7 +445,11 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
         .break_stmt, .continue_stmt => Type.voidType(),
         .for_stmt => blk: {
             const operands = ast.extraSlice(ast.data(node).lhs);
-            if (operands.len == 4 or (operands.len == 2 and (operands[1] & 0x80000000) == 0)) {
+            if (operands.len == 4 and (operands[1] & 0x80000000) != 0) {
+                const iterable = @as(NodeIndex, @intCast(operands[0]));
+                _ = try analyzeNode(ast, resolved, typed, iterable, diag);
+                try analyzeBlock(ast, resolved, typed, ast.data(node).rhs, diag);
+            } else if (operands.len == 4 or (operands.len == 2 and (operands[1] & 0x80000000) == 0)) {
                 // Range for: [start, end] or [start, end, iterator_tok, is_reverse]
                 _ = try analyzeNode(ast, resolved, typed, @intCast(operands[0]), diag);
                 _ = try analyzeNode(ast, resolved, typed, @intCast(operands[1]), diag);

@@ -1121,7 +1121,27 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         .break_stmt, .continue_stmt => {},
         .for_stmt => {
             const range = ast.extraSlice(ast.data(node).lhs);
-            if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
+            if (range.len == 4 and (range[1] & 0x80000000) != 0) {
+                try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
+                try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
+                const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
+                const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
+                const iter_name = if (range[2] != 0 and (range[2] & 0x80000000) != 0) ast.tokenSlice(range[2] & 0x7fffffff) else "";
+                const old_iter = if (iter_name.len != 0) r.symbols.fetchPut(r.allocator, iter_name, .{ .const_value = node }) catch |err| return err else null;
+                const index_name = if (range[3] != 0) ast.tokenSlice(range[3]) else "";
+                const old_index = if (range[3] != 0) r.symbols.fetchPut(r.allocator, index_name, .{ .const_value = node }) catch |err| return err else null;
+                defer {
+                    if (old_it_index) |entry| r.symbols.put(r.allocator, "it_index", entry.value) catch unreachable else _ = r.symbols.remove("it_index");
+                    if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
+                    if (iter_name.len != 0) {
+                        if (old_iter) |entry| r.symbols.put(r.allocator, iter_name, entry.value) catch unreachable else _ = r.symbols.remove(iter_name);
+                    }
+                    if (range[3] != 0) {
+                        if (old_index) |entry| r.symbols.put(r.allocator, index_name, entry.value) catch unreachable else _ = r.symbols.remove(index_name);
+                    }
+                }
+                try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
+            } else if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
                 try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
                 const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
