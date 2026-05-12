@@ -2577,17 +2577,41 @@ pub const VM = struct {
         };
     }
 
-    fn appendCodeStatements(vm: *VM, tree_index: u32, body: []const u8, body_start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !void {
+    fn appendCodeStatements(vm: *VM, tree_index: u32, body: []const u8, body_start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!void {
         var cursor: usize = 0;
         var segment_start: usize = 0;
         var depth: usize = 0;
         while (cursor <= body.len) : (cursor += 1) {
             const at_end = cursor == body.len;
             if (!at_end) {
+                if (body[cursor] == '"' or body[cursor] == '\'') {
+                    const quote = body[cursor];
+                    cursor += 1;
+                    while (cursor < body.len) : (cursor += 1) {
+                        if (body[cursor] == '\\' and cursor + 1 < body.len) {
+                            cursor += 1;
+                            continue;
+                        }
+                        if (body[cursor] == quote) break;
+                    }
+                    continue;
+                }
                 switch (body[cursor]) {
                     '{', '(', '[' => depth += 1,
                     '}', ')', ']' => {
                         if (depth > 0) depth -= 1;
+                        if (body[cursor] == '}' and depth == 0 and isBlockStatementText(std.mem.trim(u8, body[segment_start .. cursor + 1], " \t\r\n;"))) {
+                            const next = nextNonWhitespace(body, cursor + 1);
+                            if (next >= body.len or !startsWithKeyword(body[next..], "else")) {
+                                const raw = body[segment_start .. cursor + 1];
+                                const statement = std.mem.trim(u8, raw, " \t\r\n;");
+                                if (statement.len != 0) {
+                                    const relative = std.mem.indexOf(u8, raw, statement) orelse 0;
+                                    _ = try vm.appendCodeStatementNode(tree_index, statement, body_start + segment_start + relative, nodes, arguments);
+                                }
+                                segment_start = cursor + 1;
+                            }
+                        }
                     },
                     else => {},
                 }
@@ -2603,7 +2627,9 @@ pub const VM = struct {
         }
     }
 
-    fn appendCodeStatementNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !u32 {
+    fn appendCodeStatementNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        if (try vm.tryAppendControlStatementNode(tree_index, text, start, nodes, arguments)) |index| return index;
+
         const node_index: u32 = @intCast(nodes.items.len);
         const assignment = findTopLevelAssignmentOperator(text);
         const subexpression_start: usize = nodes.items.len + 1;
@@ -2631,6 +2657,108 @@ pub const VM = struct {
         } else {
             _ = try vm.appendCodeExpressionNode(tree_index, text, start, nodes, arguments);
         }
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return node_index;
+    }
+
+    fn tryAppendControlStatementNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!?u32 {
+        if (startsWithKeyword(text, "return")) {
+            const expr_raw = std.mem.trim(u8, text["return".len..], " \t\r\n;");
+            const node_index: u32 = @intCast(nodes.items.len);
+            const subexpression_start: usize = nodes.items.len + 1;
+            try nodes.append(vm.allocator, .{ .tree = tree_index, .index = node_index, .kind = "RETURN", .flags = "0", .text = text, .start = start, .end = start + text.len });
+            if (expr_raw.len != 0) {
+                const relative = std.mem.indexOf(u8, text, expr_raw) orelse "return".len;
+                _ = try vm.appendCodeExpressionNode(tree_index, expr_raw, start + relative, nodes, arguments);
+            }
+            nodes.items[node_index].subexpression_start = subexpression_start;
+            nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+            return node_index;
+        }
+
+        if (startsWithKeyword(text, "if")) {
+            return try vm.appendConditionalStatementNode(tree_index, text, start, nodes, arguments);
+        }
+        if (startsWithKeyword(text, "while")) {
+            return try vm.appendLoopStatementNode(tree_index, "WHILE", "while".len, text, start, nodes, arguments);
+        }
+        if (startsWithKeyword(text, "for")) {
+            return try vm.appendLoopStatementNode(tree_index, "FOR", "for".len, text, start, nodes, arguments);
+        }
+        return null;
+    }
+
+    fn appendConditionalStatementNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        const open = findTopLevelChar(text, '{') orelse return try vm.appendGenericControlFallback(tree_index, "IF", text, start, nodes, arguments);
+        const close = matchingCloseBrace(text, open) orelse return try vm.appendGenericControlFallback(tree_index, "IF", text, start, nodes, arguments);
+        const node_index: u32 = @intCast(nodes.items.len);
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{ .tree = tree_index, .index = node_index, .kind = "IF", .flags = "0", .text = text, .start = start, .end = start + text.len });
+
+        const condition = std.mem.trim(u8, text["if".len..open], " \t\r\n");
+        if (condition.len != 0) {
+            const relative = std.mem.indexOf(u8, text["if".len..open], condition) orelse 0;
+            _ = try vm.appendCodeExpressionNode(tree_index, condition, start + "if".len + relative, nodes, arguments);
+        }
+        _ = try vm.appendCodeBlockNode(tree_index, text[open .. close + 1], start + open, nodes, arguments);
+
+        const tail = text[close + 1 ..];
+        const tail_relative = nextNonWhitespace(tail, 0);
+        if (tail_relative < tail.len and startsWithKeyword(tail[tail_relative..], "else")) {
+            const else_text = std.mem.trim(u8, tail[tail_relative + "else".len ..], " \t\r\n");
+            if (else_text.len != 0) {
+                const else_start = start + close + 1 + tail_relative + "else".len + (std.mem.indexOf(u8, tail[tail_relative + "else".len ..], else_text) orelse 0);
+                if (startsWithKeyword(else_text, "if")) {
+                    _ = try vm.appendConditionalStatementNode(tree_index, else_text, else_start, nodes, arguments);
+                } else if (else_text[0] == '{') {
+                    _ = try vm.appendCodeBlockNode(tree_index, else_text, else_start, nodes, arguments);
+                } else {
+                    _ = try vm.appendCodeStatementNode(tree_index, else_text, else_start, nodes, arguments);
+                }
+            }
+        }
+
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return node_index;
+    }
+
+    fn appendLoopStatementNode(vm: *VM, tree_index: u32, kind: []const u8, keyword_len: usize, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        const open = findTopLevelChar(text, '{') orelse return try vm.appendGenericControlFallback(tree_index, kind, text, start, nodes, arguments);
+        const close = matchingCloseBrace(text, open) orelse return try vm.appendGenericControlFallback(tree_index, kind, text, start, nodes, arguments);
+        const node_index: u32 = @intCast(nodes.items.len);
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{ .tree = tree_index, .index = node_index, .kind = kind, .flags = "0", .text = text, .start = start, .end = start + text.len });
+
+        const header = std.mem.trim(u8, text[keyword_len..open], " \t\r\n");
+        if (header.len != 0) {
+            const relative = std.mem.indexOf(u8, text[keyword_len..open], header) orelse 0;
+            _ = try vm.appendCodeExpressionNode(tree_index, header, start + keyword_len + relative, nodes, arguments);
+        }
+        _ = try vm.appendCodeBlockNode(tree_index, text[open .. close + 1], start + open, nodes, arguments);
+
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return node_index;
+    }
+
+    fn appendCodeBlockNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        const close = matchingCloseBrace(text, 0) orelse text.len - 1;
+        const node_index: u32 = @intCast(nodes.items.len);
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{ .tree = tree_index, .index = node_index, .kind = "BLOCK", .flags = "0", .text = text[0 .. close + 1], .start = start, .end = start + close + 1 });
+        if (close > 0) try vm.appendCodeStatements(tree_index, text[1..close], start + 1, nodes, arguments);
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return node_index;
+    }
+
+    fn appendGenericControlFallback(vm: *VM, tree_index: u32, kind: []const u8, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) anyerror!u32 {
+        const node_index: u32 = @intCast(nodes.items.len);
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{ .tree = tree_index, .index = node_index, .kind = kind, .flags = "0", .text = text, .start = start, .end = start + text.len });
+        _ = try vm.appendCodeExpressionNode(tree_index, text, start, nodes, arguments);
         nodes.items[node_index].subexpression_start = subexpression_start;
         nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
         return node_index;
@@ -3134,6 +3262,61 @@ fn matchingCloseBrace(text: []const u8, open_index: usize) ?usize {
                 }
             },
             else => {},
+        }
+    }
+    return null;
+}
+
+fn startsWithKeyword(text: []const u8, keyword: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, keyword)) return false;
+    if (trimmed.len == keyword.len) return true;
+    return !isMetaIdentContinue(trimmed[keyword.len]);
+}
+
+fn isMetaIdentContinue(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
+fn isBlockStatementText(text: []const u8) bool {
+    return startsWithKeyword(text, "if") or startsWithKeyword(text, "while") or startsWithKeyword(text, "for");
+}
+
+fn nextNonWhitespace(text: []const u8, start: usize) usize {
+    var i = start;
+    while (i < text.len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
+    return i;
+}
+
+fn findTopLevelChar(text: []const u8, needle: u8) ?usize {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '"' , '\'' => {
+                const quote = text[i];
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (text[i] == quote) break;
+                }
+            },
+            '(', '[' => depth += 1,
+            ')', ']' => if (depth > 0) {
+                depth -= 1;
+            },
+            '{' => if (depth == 0 and needle == '{') {
+                return i;
+            } else {
+                depth += 1;
+            },
+            '}' => if (depth > 0) {
+                depth -= 1;
+            },
+            else => if (depth == 0 and text[i] == needle) return i,
         }
     }
     return null;
