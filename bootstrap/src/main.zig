@@ -18,44 +18,53 @@ pub fn main(init: std.process.Init) !void {
 fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !Options {
     var args = std.process.Args.Iterator.init(init.args);
 
-    var command_line = std.ArrayList([]const u8).empty;
-    errdefer command_line.deinit(allocator);
-    while (args.next()) |arg| try command_line.append(allocator, arg);
+    var raw_args = std.ArrayList([]const u8).empty;
+    defer raw_args.deinit(allocator);
+    while (args.next()) |arg| try raw_args.append(allocator, arg);
 
-    if (command_line.items.len < 2) {
+    if (raw_args.items.len < 2) {
         usage();
         return error.InvalidArguments;
     }
-    const input_path = command_line.items[1];
+    const input_path = raw_args.items[1];
     if (std.mem.eql(u8, input_path, "--help") or std.mem.eql(u8, input_path, "-h")) {
         usage();
         std.process.exit(0);
     }
 
+    var compile_time_command_line = std.ArrayList([]const u8).empty;
+    errdefer compile_time_command_line.deinit(allocator);
+    try compile_time_command_line.append(allocator, raw_args.items[0]);
+    try compile_time_command_line.append(allocator, input_path);
+
     var output_path: []const u8 = "out/a.out";
     var runtime_path: []const u8 = "zig-out/lib/openjai_runtime.manifest";
     var check_only = false;
     var i: usize = 2;
-    while (i < command_line.items.len) : (i += 1) {
-        const arg = command_line.items[i];
+    while (i < raw_args.items.len) : (i += 1) {
+        const arg = raw_args.items[i];
         if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            i += 1;
+            while (i < raw_args.items.len) : (i += 1) try compile_time_command_line.append(allocator, raw_args.items[i]);
+            break;
         } else if (std.mem.eql(u8, arg, "--no-implicit-placeholders") or std.mem.eql(u8, arg, "--strict-placeholders")) {
             // This is the default bootstrap policy; keep the flag accepted for scripts.
         } else if (std.mem.eql(u8, arg, "-o")) {
             i += 1;
-            if (i >= command_line.items.len) {
+            if (i >= raw_args.items.len) {
                 std.debug.print("openjai: error: expected output path after -o\n", .{});
                 return error.InvalidArguments;
             }
-            output_path = command_line.items[i];
+            output_path = raw_args.items[i];
         } else if (std.mem.eql(u8, arg, "--runtime")) {
             i += 1;
-            if (i >= command_line.items.len) {
+            if (i >= raw_args.items.len) {
                 std.debug.print("openjai: error: expected runtime object path after --runtime\n", .{});
                 return error.InvalidArguments;
             }
-            runtime_path = command_line.items[i];
+            runtime_path = raw_args.items[i];
         } else {
             std.debug.print("openjai: error: unrecognized argument '{s}'\n", .{arg});
             usage();
@@ -68,12 +77,12 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !Opti
         .output_path = output_path,
         .runtime_path = runtime_path,
         .check_only = check_only,
-        .command_line = try command_line.toOwnedSlice(allocator),
+        .command_line = try compile_time_command_line.toOwnedSlice(allocator),
     };
 }
 
 fn usage() void {
-    std.debug.print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o]\n", .{});
+    std.debug.print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o] [-- compile-time-args...]\n", .{});
 }
 
 test "argument parser module loads" {

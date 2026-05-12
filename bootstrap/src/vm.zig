@@ -1,6 +1,8 @@
 const std = @import("std");
 const Bytecode = @import("Bytecode.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
+const lexer = @import("lexer.zig");
+const parser = @import("parser.zig");
 
 pub const Value = union(enum) {
     void,
@@ -23,17 +25,24 @@ const CodeNode = struct {
     kind: []const u8,
     flags: []const u8,
     text: []const u8,
+    name: []const u8 = "",
     start: usize = 0,
     end: usize = 0,
     s64: ?i64 = null,
     string_value: ?[]const u8 = null,
     arg_start: u32 = 0,
     arg_count: u32 = 0,
+    note_start: usize = 0,
+    note_count: usize = 0,
 };
 
 const CodeArgument = struct {
     tree: u32 = std.math.maxInt(u32),
     expression_index: u32 = std.math.maxInt(u32),
+};
+
+const CodeNote = struct {
+    text: []const u8,
 };
 
 const CodeTree = struct {
@@ -48,15 +57,36 @@ const SourceLocation = struct {
     line_number: i64,
 };
 
+const CompilerMessage = struct {
+    kind: []const u8,
+    workspace: i64,
+    phase: []const u8 = "",
+    executable_name: []const u8 = "",
+    executable_write_failed: bool = false,
+    linker_exit_code: i64 = 0,
+    all_start: usize = 0,
+    all_count: usize = 0,
+    dump_text: []const u8 = "",
+};
+
+const WorkspaceSource = struct {
+    workspace: i64,
+    path: []const u8,
+    source: []const u8,
+};
+
 const RegisterValue = union(enum) {
     empty,
     string: []const u8,
     bytes: []const u8,
     code_node: CodeNode,
     code_nodes: []const CodeNode,
+    code_note: CodeNote,
+    code_notes: []const CodeNote,
     code_arg: CodeArgument,
     code_args: []const CodeArgument,
     source_location: SourceLocation,
+    message: usize,
     build_options: usize,
     build_llvm_options: usize,
     type_id: u32,
@@ -107,6 +137,12 @@ pub const VM = struct {
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
     build_options: std.ArrayList(BuildOptions) = .empty,
     workspace_build_options: std.AutoHashMapUnmanaged(i64, usize) = .empty,
+    compiler_messages: std.ArrayList(CompilerMessage) = .empty,
+    compiler_message_queue: std.ArrayList(usize) = .empty,
+    compiler_message_nodes: std.ArrayList(CodeNode) = .empty,
+    compiler_message_notes: std.ArrayList(CodeNote) = .empty,
+    workspace_sources: std.ArrayList(WorkspaceSource) = .empty,
+    intercepted_workspace: i64 = 0,
     io: ?std.Io = null,
     base_dir: []const u8 = ".",
     command_line: []const []const u8 = &.{},
@@ -141,6 +177,15 @@ pub const VM = struct {
         vm.rendered_code_strings.deinit(vm.allocator);
         vm.build_options.deinit(vm.allocator);
         vm.workspace_build_options.deinit(vm.allocator);
+        vm.compiler_messages.deinit(vm.allocator);
+        vm.compiler_message_queue.deinit(vm.allocator);
+        vm.compiler_message_nodes.deinit(vm.allocator);
+        vm.compiler_message_notes.deinit(vm.allocator);
+        for (vm.workspace_sources.items) |source| {
+            vm.allocator.free(source.path);
+            vm.allocator.free(source.source);
+        }
+        vm.workspace_sources.deinit(vm.allocator);
     }
 
     pub fn runProc(vm: *VM, proc_index: u32, diag: Diagnostic) !Value {
@@ -349,12 +394,7 @@ pub const VM = struct {
                 },
                 .int_to_bool_cast => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM int_to_bool_cast register out of range", .{});
-                    regs[inst.dest] = .{ .bool = switch (regs[inst.arg1]) {
-                        .int => |v| v != 0,
-                        .float => |v| v != 0,
-                        .bool => |v| v,
-                        else => return diag.failAt(0, "VM int_to_bool_cast requires numeric or bool operand", .{}),
-                    } };
+                    regs[inst.dest] = .{ .bool = try registerTruthy(regs[inst.arg1], diag, "bool cast") };
                 },
                 .float_cast => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM float_cast register out of range", .{});
@@ -695,6 +735,10 @@ pub const VM = struct {
                             if (index >= nodes.len) return diag.failAt(0, "VM Code_Node array index out of bounds", .{});
                             regs[inst.dest] = .{ .code_node = nodes[@intCast(index)] };
                         },
+                        .code_notes => |notes| {
+                            if (index >= notes.len) return diag.failAt(0, "VM Code_Note array index out of bounds", .{});
+                            regs[inst.dest] = .{ .code_note = notes[@intCast(index)] };
+                        },
                         .code_args => |code_arguments| {
                             if (index >= code_arguments.len) return diag.failAt(0, "VM Code_Argument array index out of bounds", .{});
                             regs[inst.dest] = .{ .code_arg = code_arguments[@intCast(index)] };
@@ -729,6 +773,39 @@ pub const VM = struct {
                         else => return diag.failAt(0, "VM Code_Node.node_flags requires a Code_Node value", .{}),
                     };
                     regs[inst.dest] = .{ .string = node.flags };
+                },
+                .code_node_field_expression => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Declaration.expression register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Declaration.expression requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .code_node = node };
+                },
+                .code_node_field_name => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.name register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Node.name requires a Code_Node value", .{}),
+                    };
+                    regs[inst.dest] = .{ .string = if (node.name.len != 0) node.name else node.text };
+                },
+                .code_node_field_notes => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Node.notes register out of range", .{});
+                    const node = switch (regs[inst.arg1]) {
+                        .code_node => |v| v,
+                        else => return diag.failAt(0, "VM Code_Node.notes requires a Code_Node value", .{}),
+                    };
+                    if (node.note_start > vm.compiler_message_notes.items.len or node.note_count > vm.compiler_message_notes.items.len - node.note_start) return diag.failAt(0, "VM Code_Node.notes slice out of range", .{});
+                    regs[inst.dest] = .{ .code_notes = vm.compiler_message_notes.items[node.note_start .. node.note_start + node.note_count] };
+                },
+                .code_note_field_text => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Note.text register out of range", .{});
+                    const note = switch (regs[inst.arg1]) {
+                        .code_note => |v| v,
+                        else => return diag.failAt(0, "VM Code_Note.text requires a Code_Note value", .{}),
+                    };
+                    regs[inst.dest] = .{ .string = note.text };
                 },
                 .code_proc_call_arguments => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM Code_Procedure_Call.arguments_unsorted register out of range", .{});
@@ -873,6 +950,15 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .bool = try vm.hostAddBuildString(source, workspace, diag) };
                 },
+                .host_add_build_file => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM add_build_file register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "add_build_file path");
+                    const workspace = switch (regs[inst.arg2]) {
+                        .int => |value| value,
+                        else => return diag.failAt(0, "add_build_file workspace argument must be an integer workspace handle", .{}),
+                    };
+                    regs[inst.dest] = .{ .bool = try vm.hostAddBuildFile(path, workspace, diag) };
+                },
                 .host_compiler_create_workspace => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM compiler_create_workspace register out of range", .{});
                     regs[inst.dest] = .{ .int = try vm.hostCompilerCreateWorkspace(diag) };
@@ -880,6 +966,26 @@ pub const VM = struct {
                 .host_get_current_workspace => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM get_current_workspace register out of range", .{});
                     regs[inst.dest] = .{ .int = vm.hostGetCurrentWorkspace() };
+                },
+                .host_compiler_begin_intercept => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_begin_intercept register out of range", .{});
+                    const workspace = try registerInt(regs[inst.arg1], diag, "compiler_begin_intercept workspace");
+                    try vm.hostCompilerBeginIntercept(workspace, diag);
+                    regs[inst.dest] = .{ .bool = true };
+                },
+                .host_compiler_end_intercept => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_end_intercept register out of range", .{});
+                    _ = try registerInt(regs[inst.arg1], diag, "compiler_end_intercept workspace");
+                    vm.intercepted_workspace = 0;
+                    vm.compiler_message_queue.clearRetainingCapacity();
+                    regs[inst.dest] = .{ .bool = true };
+                },
+                .host_compiler_wait_for_message => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM compiler_wait_for_message register out of range", .{});
+                    regs[inst.dest] = if (vm.hostCompilerWaitForMessage()) |message_index|
+                        .{ .message = message_index }
+                    else
+                        .empty;
                 },
                 .load_build_options => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM get_build_options register out of range", .{});
@@ -903,6 +1009,14 @@ pub const VM = struct {
                         .build_llvm_options => try vm.buildOptionsLlvmGetField(index, vm.program.strings.items[inst.arg2], diag),
                         else => unreachable,
                     };
+                },
+                .message_get_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Message field access out of range", .{});
+                    const index = switch (regs[inst.arg1]) {
+                        .message => |value| value,
+                        else => return diag.failAt(0, "VM Message field access requires a Message value", .{}),
+                    };
+                    regs[inst.dest] = try vm.compilerMessageGetField(index, vm.program.strings.items[inst.arg2], diag);
                 },
                 .type_info_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Type_Info field access out of range", .{});
@@ -978,6 +1092,14 @@ pub const VM = struct {
                 .string_builder_length => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_length register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast((try vm.builderString(try registerPointer(regs[inst.arg1], diag, "string_builder_length slot"))).len) };
+                },
+                .string_copy => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_copy register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "copy_string source");
+                    const owned = try vm.allocator.dupe(u8, text);
+                    errdefer vm.allocator.free(owned);
+                    try vm.rendered_code_strings.append(vm.allocator, owned);
+                    regs[inst.dest] = .{ .string = owned };
                 },
                 .store_ptr => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr register out of range", .{});
@@ -1079,7 +1201,8 @@ pub const VM = struct {
             },
             .type_text => return diag.failAt(0, "VM cannot materialize Type values as raw bytes", .{}),
             .type_info_member => return diag.failAt(0, "VM cannot materialize Type_Info member values as raw bytes", .{}),
-            .code_node, .code_nodes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
+            .message => return diag.failAt(0, "VM cannot materialize compiler Message values as raw bytes", .{}),
             .source_location => return diag.failAt(0, "VM cannot materialize Source_Code_Location as raw bytes; access its fields instead", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot materialize Build_Options as raw bytes; access its fields instead", .{}),
             .empty => return diag.failAt(0, "VM cannot take address of an uninitialized register", .{}),
@@ -1262,6 +1385,11 @@ pub const VM = struct {
     }
 
     fn hostAddBuildString(vm: *VM, source: []const u8, workspace: i64, diag: Diagnostic) !bool {
+        if (workspace == vm.intercepted_workspace) {
+            try vm.addWorkspaceSource(workspace, "<add_build_string>", source);
+            try vm.rebuildInterceptMessages(workspace, diag);
+            return true;
+        }
         if (workspace != -1 and workspace != 1) {
             // Target-workspace scheduling is handled outside the current
             // workspace source reparse loop.
@@ -1274,6 +1402,31 @@ pub const VM = struct {
         return true;
     }
 
+    fn hostAddBuildFile(vm: *VM, path: []const u8, workspace: i64, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "add_build_file");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        const source = std.Io.Dir.cwd().readFileAlloc(io, full, vm.allocator, .limited(64 * 1024 * 1024)) catch |err| {
+            return diag.failAt(0, "VM add_build_file failed reading '{s}': {s}", .{ full, @errorName(err) });
+        };
+        defer vm.allocator.free(source);
+        try vm.addWorkspaceSource(workspace, path, source);
+        if (workspace == vm.intercepted_workspace) try vm.rebuildInterceptMessages(workspace, diag);
+        return true;
+    }
+
+    fn addWorkspaceSource(vm: *VM, workspace: i64, path: []const u8, source: []const u8) !void {
+        const owned_path = try vm.allocator.dupe(u8, path);
+        errdefer vm.allocator.free(owned_path);
+        const owned_source = try vm.allocator.dupe(u8, source);
+        errdefer vm.allocator.free(owned_source);
+        try vm.workspace_sources.append(vm.allocator, .{
+            .workspace = workspace,
+            .path = owned_path,
+            .source = owned_source,
+        });
+    }
+
     fn hostCompilerCreateWorkspace(vm: *VM, diag: Diagnostic) !i64 {
         const next = vm.next_workspace_id orelse return diag.failAt(0, "compiler_create_workspace requires an active compiler workspace manager", .{});
         const id = next.*;
@@ -1284,6 +1437,103 @@ pub const VM = struct {
     fn hostGetCurrentWorkspace(vm: *VM) i64 {
         if (vm.next_workspace_id == null) return 0;
         return vm.current_workspace_id;
+    }
+
+    fn appendCompilerMessage(vm: *VM, message: CompilerMessage) !void {
+        const index = vm.compiler_messages.items.len;
+        try vm.compiler_messages.append(vm.allocator, message);
+        try vm.compiler_message_queue.append(vm.allocator, index);
+    }
+
+    fn hostCompilerBeginIntercept(vm: *VM, workspace: i64, diag: Diagnostic) !void {
+        vm.intercepted_workspace = workspace;
+        try vm.rebuildInterceptMessages(workspace, diag);
+    }
+
+    fn rebuildInterceptMessages(vm: *VM, workspace: i64, diag: Diagnostic) !void {
+        vm.compiler_message_queue.clearRetainingCapacity();
+        vm.compiler_message_nodes.clearRetainingCapacity();
+        vm.compiler_message_notes.clearRetainingCapacity();
+        vm.compiler_messages.clearRetainingCapacity();
+        const typechecked_start = vm.compiler_message_nodes.items.len;
+        var found_source = false;
+        for (vm.workspace_sources.items) |source| {
+            if (source.workspace != workspace) continue;
+            found_source = true;
+            try vm.appendWorkspaceDeclarations(source.path, source.source, diag);
+        }
+        if (!found_source) {
+            try vm.compiler_message_nodes.append(vm.allocator, .{ .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = "main", .name = "main", .start = 0, .end = 4 });
+        }
+        const typechecked_count = vm.compiler_message_nodes.items.len - typechecked_start;
+        try vm.appendCompilerMessage(.{ .kind = "IMPORT", .workspace = workspace });
+        try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
+        try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
+        try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = 0 });
+    }
+
+    fn appendWorkspaceDeclarations(vm: *VM, path: []const u8, source: []const u8, parent_diag: Diagnostic) !void {
+        const diag = Diagnostic.init(vm.allocator, path, source);
+        var tokens = try lexer.tokenize(vm.allocator, source, diag);
+        defer tokens.deinit(vm.allocator);
+        var ast = try parser.parse(
+            vm.allocator,
+            source,
+            tokens.items(.tag),
+            tokens.items(.start),
+            tokens.items(.end),
+            diag,
+        );
+        defer ast.deinit();
+        defer vm.allocator.free(ast.tokens);
+        if (ast.root == @import("Ast.zig").null_node) return;
+        const decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (decls) |decl_idx| {
+            const decl: @import("Ast.zig").NodeIndex = @intCast(decl_idx);
+            if (decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
+            const note_start = vm.compiler_message_notes.items.len;
+            for (ast.noteTokens(decl)) |note_tok| {
+                const text = ast.tokenSlice(@intCast(note_tok));
+                try vm.compiler_message_notes.append(vm.allocator, .{ .text = text });
+            }
+            const name = ast.tokenSlice(ast.mainToken(decl));
+            try vm.compiler_message_nodes.append(vm.allocator, .{
+                .kind = "DECLARATION",
+                .flags = "ALLOWED_BY_CONTEXT",
+                .text = name,
+                .name = name,
+                .start = ast.tokens[ast.mainToken(decl)].start,
+                .end = ast.tokens[ast.mainToken(decl)].end,
+                .note_start = note_start,
+                .note_count = vm.compiler_message_notes.items.len - note_start,
+            });
+        }
+        _ = parent_diag;
+    }
+
+    fn hostCompilerWaitForMessage(vm: *VM) ?usize {
+        if (vm.compiler_message_queue.items.len == 0) return null;
+        return vm.compiler_message_queue.orderedRemove(0);
+    }
+
+    fn compilerMessageGetField(vm: *VM, index: usize, field_name: []const u8, diag: Diagnostic) !RegisterValue {
+        if (index >= vm.compiler_messages.items.len) return diag.failAt(0, "VM Message handle out of range", .{});
+        const message = vm.compiler_messages.items[index];
+        if (std.mem.eql(u8, field_name, "kind")) return .{ .string = message.kind };
+        if (std.mem.eql(u8, field_name, "workspace")) return .{ .int = message.workspace };
+        if (std.mem.eql(u8, field_name, "phase")) return .{ .string = message.phase };
+        if (std.mem.eql(u8, field_name, "executable_name")) return .{ .string = message.executable_name };
+        if (std.mem.eql(u8, field_name, "executable_write_failed")) return .{ .bool = message.executable_write_failed };
+        if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
+        if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = 0 };
+        if (std.mem.eql(u8, field_name, "all") or std.mem.eql(u8, field_name, "declarations")) {
+            if (message.all_start > vm.compiler_message_nodes.items.len or message.all_count > vm.compiler_message_nodes.items.len - message.all_start) return diag.failAt(0, "VM Message_Typechecked node slice out of range", .{});
+            return .{ .code_nodes = vm.compiler_message_nodes.items[message.all_start .. message.all_start + message.all_count] };
+        }
+        if (std.mem.eql(u8, field_name, "dump_text")) return .{ .string = message.dump_text };
+        return diag.failAt(0, "VM Message has no implemented field '{s}'", .{field_name});
     }
 
     fn buildOptionsForWorkspace(vm: *VM, workspace: i64, diag: Diagnostic) !usize {
@@ -1481,7 +1731,8 @@ pub const VM = struct {
                 if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
             },
             .string => |text| if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text),
-            .code_node, .code_nodes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
+            .message => return diag.failAt(0, "VM cannot store compiler Message values into raw memory", .{}),
             .source_location => return diag.failAt(0, "VM cannot store Source_Code_Location into raw memory; use field assignment", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot store Build_Options into raw memory; use field assignment", .{}),
             .empty => return diag.failAt(0, "VM cannot store an uninitialized register", .{}),
@@ -1511,6 +1762,7 @@ pub const VM = struct {
             else
                 (try vm.readRemainingBytes(ptr, diag)).len,
             .code_nodes => |nodes| nodes.len,
+            .code_notes => |notes| notes.len,
             .code_args => |args| args.len,
             else => diag.failAt(0, "VM array_count requires array-compatible value", .{}),
         };
@@ -1606,7 +1858,8 @@ pub const VM = struct {
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
                 .{ .int = @bitCast(try vm.loadU64(try vm.dynamicArrayItemPointer(array_index, index, diag), diag)) },
-            .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
+            .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
+            .message => diag.failAt(0, "VM dynamic arrays cannot index compiler Message values as runtime data", .{}),
         };
     }
 
@@ -1711,6 +1964,15 @@ pub const VM = struct {
                 }
                 std.debug.print("]", .{});
             },
+            .code_note => |note| std.debug.print("@{s}", .{note.text}),
+            .code_notes => |notes| {
+                std.debug.print("[", .{});
+                for (notes, 0..) |note, i| {
+                    if (i != 0) std.debug.print(", ", .{});
+                    std.debug.print("@{s}", .{note.text});
+                }
+                std.debug.print("]", .{});
+            },
             .code_arg => |arg| std.debug.print("Code_Argument(tree={d}, expression={d})", .{ arg.tree, arg.expression_index }),
             .code_args => |args| {
                 std.debug.print("[", .{});
@@ -1719,6 +1981,11 @@ pub const VM = struct {
                     std.debug.print("Code_Argument(tree={d}, expression={d})", .{ arg.tree, arg.expression_index });
                 }
                 std.debug.print("]", .{});
+            },
+            .message => |index| {
+                if (index >= vm.compiler_messages.items.len) return diag.failAt(0, "VM Message handle out of range", .{});
+                const message = vm.compiler_messages.items[index];
+                std.debug.print("{{{s}, {d}}}", .{ message.kind, message.workspace });
             },
             .source_location => |loc| std.debug.print("{s}:{d}", .{ loc.fully_pathed_filename, loc.line_number }),
             .build_options, .build_llvm_options => |index| try vm.printBuildOptions(index, diag),
@@ -2030,8 +2297,16 @@ pub const VM = struct {
             .string => |text| try builder.appendSlice(vm.allocator, text),
             .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
             .code_node => |node| try vm.builderAppendCodeText(builder, try vm.renderCodeNode(node, diag)),
-            .code_nodes, .code_args => return diag.failAt(0, "VM cannot append a compiler meta array to a String_Builder without indexing it", .{}),
+            .code_note => |note| try builder.appendSlice(vm.allocator, note.text),
+            .code_nodes, .code_notes, .code_args => return diag.failAt(0, "VM cannot append a compiler meta array to a String_Builder without indexing it", .{}),
             .code_arg => return diag.failAt(0, "VM cannot append a Code_Argument directly; append its expression", .{}),
+            .message => |index| {
+                if (index >= vm.compiler_messages.items.len) return diag.failAt(0, "VM Message handle out of range", .{});
+                const message = vm.compiler_messages.items[index];
+                const text = try std.fmt.allocPrint(vm.allocator, "{{{s}, {d}}}", .{ message.kind, message.workspace });
+                defer vm.allocator.free(text);
+                try builder.appendSlice(vm.allocator, text);
+            },
             .source_location => |loc| {
                 const text = try std.fmt.allocPrint(vm.allocator, "{s}:{d}", .{ loc.fully_pathed_filename, loc.line_number });
                 defer vm.allocator.free(text);
@@ -2226,7 +2501,7 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .type_text => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
         .type_info_member => diag.failAt(0, "VM {s} cannot treat Type_Info member values as numbers", .{context}),
-        .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
+        .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
         .source_location => diag.failAt(0, "VM {s} cannot treat Source_Code_Location values as numbers", .{context}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM {s} cannot treat Build_Options values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
@@ -2253,6 +2528,8 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .bytes => |v| v.len != 0,
         .code_node => true,
         .code_nodes => |v| v.len != 0,
+        .code_note => true,
+        .code_notes => |v| v.len != 0,
         .code_arg => true,
         .code_args => |v| v.len != 0,
         .type_text => |v| v.len != 0,
@@ -2260,6 +2537,7 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .source_location => true,
         .build_options => true,
         .build_llvm_options => true,
+        .message => true,
         .type_id => true,
         .ptr => true,
         .empty => false,
@@ -2308,7 +2586,8 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .type_id => |v| .{ .type_text = typeName(v) },
         .type_text => |v| .{ .type_text = v },
         .type_info_member => diag.failAt(0, "VM cannot pass Type_Info member values across procedure calls yet", .{}),
-        .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => diag.failAt(0, "VM cannot pass Source_Code_Location across non-inlined procedure calls yet", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
@@ -2364,6 +2643,14 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
             .code_nodes => |r| l.ptr == r.ptr and l.len == r.len,
             else => false,
         },
+        .code_note => |l| switch (rhs) {
+            .code_note => |r| std.mem.eql(u8, l.text, r.text),
+            else => false,
+        },
+        .code_notes => |l| switch (rhs) {
+            .code_notes => |r| l.ptr == r.ptr and l.len == r.len,
+            else => false,
+        },
         .code_arg => |l| switch (rhs) {
             .code_arg => |r| l.tree == r.tree and l.expression_index == r.expression_index,
             else => false,
@@ -2378,6 +2665,10 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .build_options => |l| switch (rhs) {
             .build_options => |r| l == r,
+            else => false,
+        },
+        .message => |l| switch (rhs) {
+            .message => |r| l == r,
             else => false,
         },
         .build_llvm_options => |l| switch (rhs) {

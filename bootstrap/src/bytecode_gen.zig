@@ -99,7 +99,7 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
         if (ast.tag(decl) != .proc_decl) continue;
         if (!reachable.contains(decl)) continue;
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
-        if (procHasExpandModifier(ast, decl, next_decl) and decl != proc_node) continue;
+        if (procHasExpandModifier(ast, decl, next_decl) and decl != proc_node and !procHasReturnValue(ast, decl)) continue;
         if (typed) |t| if (t.main_proc != null and decl == t.main_proc.?) continue;
 
         var proc = Bytecode.ProcBytecode{ .name = ast.tokenSlice(ast.mainToken(decl)) };
@@ -390,7 +390,7 @@ const GenContext = struct {
     fn tryEmitDirectProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         if (!ctx.allow_root_proc_calls) return null;
         const ast = ctx.ast;
-        if (procHasExpandModifierLocal(ast, proc_node)) return null;
+        if (procHasExpandModifierLocal(ast, proc_node) and !procHasReturnValue(ast, proc_node)) return null;
         const sig = procSignature(ast, proc_node) orelse return null;
         const params = ast.extraSlice(sig.params_extra);
         if (args.len != params.len) return null;
@@ -649,7 +649,7 @@ const GenContext = struct {
 
     fn tryInlineProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         const ast = ctx.ast;
-        if (procHasExpandModifierLocal(ast, proc_node)) return null;
+        if (procHasExpandModifierLocal(ast, proc_node) and !procHasReturnValue(ast, proc_node)) return null;
         for (ctx.inline_stack.items) |active_proc| if (active_proc == proc_node) return null;
         try ctx.inline_stack.append(ctx.program.allocator, proc_node);
         defer _ = ctx.inline_stack.pop();
@@ -1541,7 +1541,7 @@ const GenContext = struct {
         for (decls) |decl_idx| {
             const decl: NodeIndex = @intCast(decl_idx);
             if (decl == ctx.current_proc_node or decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
-            if (procHasExpandModifierLocal(ast, decl) or procContainsCompileTimeOnlyCompilerApi(ast, decl)) continue;
+            if ((procHasExpandModifierLocal(ast, decl) and !procHasReturnValue(ast, decl)) or procContainsCompileTimeOnlyCompilerApi(ast, decl)) continue;
             try out.appendSlice(ctx.program.allocator, topLevelDeclSourceText(ast, decl));
             try out.appendSlice(ctx.program.allocator, "\n");
         }
@@ -2126,6 +2126,7 @@ const GenContext = struct {
                     const init_type_text = typeTextForExpr(ctx, init, diag);
                     const init_first_word = if (init_type_text) |text| firstTypeWord(text) else "";
                     const init_is_code_node = if (init_type_text) |text| isCodeNodeTypeText(text) else false;
+                    const init_is_compiler_message = if (init_type_text) |text| isCompilerMessageTypeText(text) else false;
                     const init_is_type_info_handle = if (init_type_text) |text| blk: {
                         const handle_name = firstTypeWord(stripPointerText(text));
                         break :blk std.mem.eql(u8, handle_name, "Type_Info_Struct") or std.mem.eql(u8, handle_name, "Type_Info_Struct_Member");
@@ -2133,7 +2134,7 @@ const GenContext = struct {
                     const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
                     var bind_reg = reg;
-                    if (!init_is_code_node and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar)) {
+                    if (!init_is_code_node and !init_is_compiler_message and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar)) {
                         bind_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
@@ -2747,8 +2748,9 @@ const GenContext = struct {
                 const token_tag = ast.tokens[ast.mainToken(expr)].tag;
                 if (token_tag == .directive_file) return try ctx.emitString(expr, std.fs.path.basename(diag.file_path));
                 if (token_tag == .directive_filepath) {
-                    const path = try canonicalSourcePath(program.allocator, diag.file_path);
-                    defer program.allocator.free(path);
+                    const source_path = try canonicalSourcePath(program.allocator, diag.file_path);
+                    defer program.allocator.free(source_path);
+                    const path = std.fs.path.dirname(source_path) orelse ".";
                     return try ctx.emitString(expr, path);
                 }
                 const decoded = try decodeString(program.allocator, ast.stringTokenContents(ast.mainToken(expr)), diag, ast.tokens[ast.mainToken(expr)].start);
@@ -2916,6 +2918,9 @@ const GenContext = struct {
                     }
                 }
                 if (op == .shift_left or op == .dot_star) {
+                    if (typeTextForExpr(ctx, operand, diag)) |operand_ty| {
+                        if (isCompilerMessageTypeText(operand_ty)) return operand_reg;
+                    }
                     const operand_source_is_pointer = if (typeTextForExpr(ctx, operand, diag)) |operand_ty|
                         std.mem.startsWith(u8, std.mem.trim(u8, operand_ty, " \t\r\n"), "*")
                     else
@@ -3247,6 +3252,9 @@ const GenContext = struct {
                     if (isOsEnumName(field_name)) {
                         return try ctx.emitString(expr, field_name);
                     }
+                    if (isCompilerMessageEnumName(field_name) or isCompilerPhaseEnumName(field_name)) {
+                        return try ctx.emitString(expr, field_name);
+                    }
                     if (codeLiteralValueTypeByName(field_name)) |value_type| {
                         return try ctx.emitInt(expr, value_type);
                     }
@@ -3303,7 +3311,7 @@ const GenContext = struct {
                         return reg;
                     }
                 }
-                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64") or std.mem.eql(u8, field_name, "_string")) {
+                if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags") or std.mem.eql(u8, field_name, "expression") or std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "notes") or std.mem.eql(u8, field_name, "arguments_unsorted") or std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64") or std.mem.eql(u8, field_name, "_string")) {
                     if (isCodeNodeExpression(ctx, ast.data(expr).lhs, diag)) {
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -3311,6 +3319,12 @@ const GenContext = struct {
                             .code_node_field_kind
                         else if (std.mem.eql(u8, field_name, "node_flags"))
                             .code_node_field_flags
+                        else if (std.mem.eql(u8, field_name, "expression"))
+                            .code_node_field_expression
+                        else if (std.mem.eql(u8, field_name, "name"))
+                            .code_node_field_name
+                        else if (std.mem.eql(u8, field_name, "notes"))
+                            .code_node_field_notes
                         else if (std.mem.eql(u8, field_name, "arguments_unsorted"))
                             .code_proc_call_arguments
                         else if (std.mem.eql(u8, field_name, "value_type"))
@@ -3321,6 +3335,19 @@ const GenContext = struct {
                             .code_literal_field_string;
                         try proc.instructions.append(program.allocator, .{
                             .opcode = opcode,
+                            .dest = reg,
+                            .arg1 = base_reg,
+                            .source_node = expr,
+                        });
+                        return reg;
+                    }
+                }
+                if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text_for_note| {
+                    if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_text_for_note)), "Code_Note") and std.mem.eql(u8, field_name, "text")) {
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{
+                            .opcode = .code_note_field_text,
                             .dest = reg,
                             .arg1 = base_reg,
                             .source_node = expr,
@@ -3412,6 +3439,13 @@ const GenContext = struct {
                         proc.num_registers += 1;
                         const field_index = try program.addString(field_name);
                         try proc.instructions.append(program.allocator, .{ .opcode = .build_options_get_field, .dest = reg, .arg1 = base_reg, .arg2 = field_index, .source_node = expr });
+                        return reg;
+                    }
+                    if (isCompilerMessageTypeText(base_text)) {
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        const field_index = try program.addString(field_name);
+                        try proc.instructions.append(program.allocator, .{ .opcode = .message_get_field, .dest = reg, .arg1 = base_reg, .arg2 = field_index, .source_node = expr });
                         return reg;
                     }
                     if (try fieldInfoFromTypeText(ctx, base_text, field_name, diag)) |info| {
@@ -4435,7 +4469,11 @@ const GenContext = struct {
         }
         if (std.mem.eql(u8, name, "compiler_wait_for_message")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.emitInt(expr, 0);
+            if (!ctx.compile_time_host) return try ctx.emitInt(expr, 0);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_compiler_wait_for_message, .dest = reg, .source_node = expr });
+            return reg;
         }
         if (std.mem.eql(u8, name, "run_command")) {
             if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "run_command expects one command string", .{});
@@ -4488,6 +4526,18 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_add_build_string, .dest = reg, .arg1 = source, .arg2 = workspace, .source_node = expr });
             return reg;
         }
+        if (std.mem.eql(u8, name, "add_build_file")) {
+            if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "add_build_file expects a path and an optional workspace", .{});
+            const path = try genCallArg(ctx, @intCast(args[0]), diag);
+            const workspace = if (args.len >= 2)
+                try genCallArg(ctx, @intCast(args[1]), diag)
+            else
+                try ctx.emitInt(expr, -1);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_add_build_file, .dest = reg, .arg1 = path, .arg2 = workspace, .source_node = expr });
+            return reg;
+        }
         if (std.mem.eql(u8, name, "add_global_data")) {
             if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "add_global_data expects at least one data argument", .{});
             const data = try genCallArg(ctx, @intCast(args[0]), diag);
@@ -4536,14 +4586,25 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .string_builder_append_string, .arg1 = slot, .arg2 = node, .source_node = expr });
             return slot;
         }
+        if (std.mem.eql(u8, name, "compiler_begin_intercept") or std.mem.eql(u8, name, "compiler_end_intercept")) {
+            if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one workspace argument", .{name});
+            const workspace = try ctx.genExpr(@intCast(args[0]), diag);
+            if (!ctx.compile_time_host) return try ctx.emitBool(expr, false);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{
+                .opcode = if (std.mem.eql(u8, name, "compiler_begin_intercept")) .host_compiler_begin_intercept else .host_compiler_end_intercept,
+                .dest = reg,
+                .arg1 = workspace,
+                .source_node = expr,
+            });
+            return reg;
+        }
         if (std.mem.eql(u8, name, "set_build_options") or
             std.mem.eql(u8, name, "set_build_options_dc") or
             std.mem.eql(u8, name, "set_optimization") or
-            std.mem.eql(u8, name, "compiler_begin_intercept") or
-            std.mem.eql(u8, name, "compiler_end_intercept") or
             std.mem.eql(u8, name, "compiler_set_workspace_status") or
-            std.mem.eql(u8, name, "compiler_report") or
-            std.mem.eql(u8, name, "add_build_file"))
+            std.mem.eql(u8, name, "compiler_report"))
         {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
             return try ctx.emitInt(expr, 0);
@@ -5218,7 +5279,15 @@ const GenContext = struct {
             const reg = ctx.proc.num_registers;
             ctx.proc.num_registers += 1;
             if (ast.data(type_expr).lhs == @import("Ast.zig").null_node) {
-                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = 8, .source_node = source_node });
+                const elem_size = try typeTextSize(ctx, ctx.nodeSource(ast.data(type_expr).rhs), diag);
+                try ctx.proc.instructions.append(ctx.program.allocator, .{
+                    .opcode = .new_array,
+                    .dest = reg,
+                    .arg1 = 0,
+                    .arg2 = @intCast(@max(elem_size, 1)),
+                    .arg3 = 8,
+                    .source_node = source_node,
+                });
             } else {
                 const count = try evalIntegerConstExpr(ctx, ast.data(type_expr).lhs, diag);
                 const elem_size = try typeTextSize(ctx, ctx.nodeSource(ast.data(type_expr).rhs), diag);
@@ -5280,7 +5349,16 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
             try ctx.emitContainerGeneratedInitializers(reg, type_text, source_node, diag);
         } else if (isDynamicArrayTypeText(type_text)) {
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = 8, .source_node = source_node });
+            const elem_type = dynamicArrayElementText(type_text) orelse "u8";
+            const elem_size = try typeTextSize(ctx, elem_type, diag);
+            try ctx.proc.instructions.append(ctx.program.allocator, .{
+                .opcode = .new_array,
+                .dest = reg,
+                .arg1 = 0,
+                .arg2 = @intCast(@max(elem_size, 1)),
+                .arg3 = 8,
+                .source_node = source_node,
+            });
         } else if (isStaticArrayTypeText(type_text)) {
             const size = try typeTextSize(ctx, type_text, diag);
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
@@ -5837,9 +5915,15 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             }
             if (isCodeNodeTypeText(base_ty)) {
                 if (std.mem.eql(u8, field_name, "kind") or std.mem.eql(u8, field_name, "node_flags")) return "string";
+                if (std.mem.eql(u8, field_name, "expression")) return "*Code_Node";
+                if (std.mem.eql(u8, field_name, "name")) return "string";
+                if (std.mem.eql(u8, field_name, "notes")) return "[] Code_Note";
                 if (std.mem.eql(u8, field_name, "arguments_unsorted")) return "[] Code_Argument";
                 if (std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64")) return "int";
                 if (std.mem.eql(u8, field_name, "_string")) return "string";
+            }
+            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Code_Note")) {
+                if (std.mem.eql(u8, field_name, "text")) return "string";
             }
             if (isCodeArgumentTypeText(base_ty)) {
                 if (std.mem.eql(u8, field_name, "expression")) return "*Code_Node";
@@ -5867,6 +5951,17 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             }
             if (std.mem.eql(u8, firstTypeWord(base_ty), "Build_Options_LLVM_Options")) {
                 if (buildOptionsLlvmFieldType(field_name)) |field_ty| return field_ty;
+            }
+            if (isCompilerMessageTypeText(base_ty)) {
+                if (std.mem.eql(u8, field_name, "kind")) return "string";
+                if (std.mem.eql(u8, field_name, "workspace")) return "Workspace";
+                if (std.mem.eql(u8, field_name, "phase")) return "string";
+                if (std.mem.eql(u8, field_name, "executable_name")) return "string";
+                if (std.mem.eql(u8, field_name, "executable_write_failed")) return "bool";
+                if (std.mem.eql(u8, field_name, "linker_exit_code")) return "int";
+                if (std.mem.eql(u8, field_name, "error_code")) return "int";
+                if (std.mem.eql(u8, field_name, "all") or std.mem.eql(u8, field_name, "declarations")) return "[] Code_Node";
+                if (std.mem.eql(u8, field_name, "dump_text")) return "string";
             }
             if (staticArrayElementText(base_ty) != null) {
                 if (std.mem.eql(u8, field_name, "count")) return "int";
@@ -5983,6 +6078,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, name, "make_vector3")) return "Vector3";
                 if (std.mem.eql(u8, name, "compiler_get_nodes")) return "*Code_Node";
                 if (std.mem.eql(u8, name, "compiler_get_code")) return "Code";
+                if (std.mem.eql(u8, name, "compiler_wait_for_message")) return "*Message";
                 if (std.mem.eql(u8, name, "get_build_options")) return "Build_Options";
                 if (std.mem.eql(u8, name, "make_location")) return "Source_Code_Location";
                 if (std.mem.eql(u8, name, "split")) return "[..] string";
@@ -6207,6 +6303,33 @@ fn buildOptionsLlvmFieldType(name: []const u8) ?[]const u8 {
 fn isBuildOptionsValueType(type_text: []const u8) bool {
     const first = firstTypeWord(type_text);
     return std.mem.eql(u8, first, "Build_Options") or std.mem.eql(u8, first, "Build_Options_LLVM_Options");
+}
+
+fn isCompilerMessageTypeText(raw: []const u8) bool {
+    const first = firstTypeWord(stripPointerText(raw));
+    return std.mem.eql(u8, first, "Message") or
+        std.mem.eql(u8, first, "Message_File") or
+        std.mem.eql(u8, first, "Message_Import") or
+        std.mem.eql(u8, first, "Message_Phase") or
+        std.mem.eql(u8, first, "Message_Typechecked") or
+        std.mem.eql(u8, first, "Message_Debug_Dump") or
+        std.mem.eql(u8, first, "Message_Complete");
+}
+
+fn isCompilerMessageEnumName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "FILE") or
+        std.mem.eql(u8, name, "IMPORT") or
+        std.mem.eql(u8, name, "PHASE") or
+        std.mem.eql(u8, name, "TYPECHECKED") or
+        std.mem.eql(u8, name, "DEBUG_DUMP") or
+        std.mem.eql(u8, name, "ERROR") or
+        std.mem.eql(u8, name, "COMPLETE");
+}
+
+fn isCompilerPhaseEnumName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "TYPECHECKED_ALL_WE_CAN") or
+        std.mem.eql(u8, name, "PRE_WRITE_EXECUTABLE") or
+        std.mem.eql(u8, name, "POST_WRITE_EXECUTABLE");
 }
 
 fn isBindingOptionField(name: []const u8) bool {
@@ -6843,6 +6966,11 @@ fn procHasExpandModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     const start = token_start - @min(token_start, 200);
     if (body_start <= start or body_start > ast.source.len) return false;
     return std.mem.indexOf(u8, ast.source[start..body_start], "#expand") != null;
+}
+
+fn procHasReturnValue(ast: *const Ast, proc: NodeIndex) bool {
+    const sig = procSignature(ast, proc) orelse return false;
+    return sig.return_type != @import("Ast.zig").null_node;
 }
 
 fn procContainsCompileTimeOnlyCompilerApi(ast: *const Ast, proc: NodeIndex) bool {

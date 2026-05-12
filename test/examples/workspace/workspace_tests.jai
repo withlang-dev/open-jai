@@ -9,3 +9,7 @@ build_options_are_real_comptime_values :: () {
 global_data_handles_embed_bytes :: () {
     expect_program_output("examples/30/30.15_global_data.jai", "43\n43\n");
 } @TestProcedure
+
+compiler_intercept_messages_are_real_values :: () {
+    expect_compile_output("test/examples/workspace/message_loop_value.jai", "IMPORT:3\nFILE:3\nPHASE:3\nphase:TYPECHECKED_ALL_WE_CAN\nTYPECHECKED:3\nchecked:1\nPHASE:3\nphase:POST_WRITE_EXECUTABLE\nCOMPLETE:3\n");
+} @TestProcedure

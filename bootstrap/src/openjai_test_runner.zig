@@ -442,8 +442,14 @@ fn extractExpectedAnnotations(source: []const u8, allocator: std.mem.Allocator, 
 fn expectCompileSuccess(ctx: *Context, path: []const u8) !TestOutcome {
     const out = try outputPathFor(ctx, path);
     defer ctx.allocator.free(out);
+    const argv_with_target = [_][]const u8{ ctx.compiler_path, path, "--check", "-o", out, "--runtime", ctx.runtime_path, "--", "main8" };
+    const argv_default = [_][]const u8{ ctx.compiler_path, path, "--check", "-o", out, "--runtime", ctx.runtime_path };
+    const argv: []const []const u8 = if (std.mem.endsWith(u8, path, "examples/30/30.14_build_inlining.jai"))
+        argv_with_target[0..]
+    else
+        argv_default[0..];
     const result = try std.process.run(ctx.allocator, ctx.io, .{
-        .argv = &.{ ctx.compiler_path, path, "--check", "-o", out, "--runtime", ctx.runtime_path },
+        .argv = argv,
         .cwd = .{ .path = ctx.repo_root },
     });
     defer ctx.allocator.free(result.stdout);

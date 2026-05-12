@@ -171,9 +171,13 @@ __examples: __bootstrap | $(EXAMPLES_OUT_DIR)
 	for src in $(EXAMPLES); do \
 		rel="$${src#examples/}"; \
 		out="$(EXAMPLES_OUT_DIR)/$${rel%.jai}"; \
+		extra_args=; \
+		case "$$src" in \
+			examples/30/30.14_build_inlining.jai) extra_args="-- main8" ;; \
+		esac; \
 		mkdir -p "$$(dirname "$$out")"; \
 		echo "openjai $$src -> $$out"; \
-		if ! "$(BOOTSTRAP_COMPILER)" "$$src" --check -o "$$out" --runtime "$(BOOTSTRAP_RUNTIME)"; then \
+		if ! "$(BOOTSTRAP_COMPILER)" "$$src" --check -o "$$out" --runtime "$(BOOTSTRAP_RUNTIME)" $$extra_args; then \
 			fail=1; \
 		fi; \
 		count=$$((count + 1)); \
