@@ -13,6 +13,7 @@ pub const Opcode = enum(u8) {
     load_null_ptr,
     load_type,
     load_type_text,
+    type_to_string,
     load_undef,
     global_addr,
     load_const_ref,

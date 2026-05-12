@@ -579,6 +579,14 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend type-text load out of range", .{});
                 registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
             },
+            .type_to_string => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend type_to_string register out of range", .{});
+                registers[inst.dest] = switch (registers[inst.arg1].kind) {
+                    .string, .runtime_string, .string_addr => registers[inst.arg1],
+                    .type_id => return diag.failAt(inst.source_node, "runtime type_to_string for dynamic Type ids is not implemented", .{}),
+                    else => return diag.failAt(inst.source_node, "type_to_string expects a Type value", .{}),
+                };
+            },
             .load_undef => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend undefined load destination register out of range", .{});
                 registers[inst.dest] = switch (inst.arg1) {

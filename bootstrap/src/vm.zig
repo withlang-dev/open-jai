@@ -263,6 +263,14 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_type_text register/string index out of range", .{});
                     regs[inst.dest] = .{ .type_text = vm.program.strings.items[inst.arg1] };
                 },
+                .type_to_string => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM type_to_string register out of range", .{});
+                    regs[inst.dest] = switch (regs[inst.arg1]) {
+                        .type_id => |type_id| .{ .string = typeName(type_id) },
+                        .type_text => |type_text| .{ .string = type_text },
+                        else => return diag.failAt(0, "VM type_to_string requires a Type value", .{}),
+                    };
+                },
                 .load_null_ptr, .load_const_ref => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM placeholder/reference load register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast(inst.arg1) };
