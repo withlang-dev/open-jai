@@ -19,3 +19,7 @@ code_type_reflects_captured_expression_type :: () {
 code_node_type_reflects_expression_types :: () {
     expect_compile_output("test/examples/meta/code_node_type_value.jai", "expression count: 10\nformat type: string\nvalue type: int\nlhs type: int\nrhs type: int\ncomparison type: bool\nlogical type: bool\n");
 } @TestProcedure
+
+code_declaration_nodes_expose_name_and_type :: () {
+    expect_compile_output("test/examples/meta/code_declaration_type_value.jai", "explicit root kind: ROOT\nexplicit decl name: answer\nexplicit decl type: int\ninferred root kind: ROOT\ninferred decl name: greeting\ninferred decl type: string\n");
+} @TestProcedure

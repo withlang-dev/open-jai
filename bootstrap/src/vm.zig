@@ -2342,6 +2342,7 @@ pub const VM = struct {
         var arguments = std.ArrayList(CodeArgument).empty;
         errdefer arguments.deinit(vm.allocator);
         var root = CodeNode{ .tree = tree_index, .kind = "ROOT", .flags = "0", .text = code, .start = 0, .end = code.len };
+        const declaration = try vm.parseCodeDeclarationInfo(code);
 
         if (try vm.tryBuildProcedureCallCodeTree(tree_index, code, &nodes, &arguments)) |call_root| {
             root = call_root;
@@ -2353,7 +2354,6 @@ pub const VM = struct {
         }
 
         var i: usize = 0;
-        var saw_decl = false;
         while (i < code.len) {
             const ch = code[i];
             if (std.ascii.isWhitespace(ch) or ch == ',' or ch == ';' or ch == '(' or ch == ')' or ch == '{' or ch == '}') {
@@ -2361,7 +2361,6 @@ pub const VM = struct {
                 continue;
             }
             if (ch == ':' and i + 1 < code.len and (code[i + 1] == '=' or code[i + 1] == ':')) {
-                saw_decl = true;
                 i += 2;
                 continue;
             }
@@ -2408,13 +2407,93 @@ pub const VM = struct {
             }
             i += 1;
         }
-        if (saw_decl) try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = code, .start = 0, .end = code.len });
+        if (declaration) |decl| try nodes.append(vm.allocator, .{
+            .tree = tree_index,
+            .index = @intCast(nodes.items.len),
+            .kind = "DECLARATION",
+            .flags = "ALLOWED_BY_CONTEXT",
+            .text = decl.text,
+            .name = decl.name,
+            .type_text = decl.type_text,
+            .start = decl.start,
+            .end = decl.end,
+        });
 
         return .{
             .root = root,
             .nodes = try nodes.toOwnedSlice(vm.allocator),
             .arguments = try arguments.toOwnedSlice(vm.allocator),
         };
+    }
+
+    const ParsedCodeDeclaration = struct {
+        text: []const u8,
+        name: []const u8,
+        type_text: []const u8,
+        start: usize,
+        end: usize,
+    };
+
+    fn parseCodeDeclarationInfo(vm: *VM, code: []const u8) !?ParsedCodeDeclaration {
+        const trimmed = std.mem.trim(u8, code, " \t\r\n;");
+        if (trimmed.len == 0) return null;
+        const base_offset = std.mem.indexOf(u8, code, trimmed) orelse 0;
+        if (!isIdentStart(trimmed[0])) return null;
+
+        var name_end: usize = 1;
+        while (name_end < trimmed.len and isIdentContinue(trimmed[name_end])) name_end += 1;
+        const name = trimmed[0..name_end];
+
+        var cursor = name_end;
+        while (cursor < trimmed.len and std.ascii.isWhitespace(trimmed[cursor])) cursor += 1;
+        if (cursor >= trimmed.len or trimmed[cursor] != ':') return null;
+        cursor += 1;
+
+        if (cursor < trimmed.len and trimmed[cursor] == ':') {
+            cursor += 1;
+            const rhs = std.mem.trim(u8, trimmed[cursor..], " \t\r\n");
+            const type_text = try vm.inferCodeExpressionTypeText(rhs);
+            return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+        }
+
+        if (cursor < trimmed.len and trimmed[cursor] == '=') {
+            cursor += 1;
+            const rhs = std.mem.trim(u8, trimmed[cursor..], " \t\r\n");
+            const type_text = try vm.inferCodeExpressionTypeText(rhs);
+            return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+        }
+
+        while (cursor < trimmed.len and std.ascii.isWhitespace(trimmed[cursor])) cursor += 1;
+        const type_start = cursor;
+        while (cursor < trimmed.len and trimmed[cursor] != '=') cursor += 1;
+        const type_text = std.mem.trim(u8, trimmed[type_start..cursor], " \t\r\n");
+        if (type_text.len == 0) return null;
+        return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+    }
+
+    fn inferCodeExpressionTypeText(vm: *VM, expression: []const u8) ![]const u8 {
+        const text = std.mem.trim(u8, expression, " \t\r\n;");
+        if (text.len == 0) return "";
+        if (std.fmt.parseInt(i64, text, 10)) |_| return "int" else |_| {}
+        if (isFloatLiteralText(text)) return "float64";
+        if (text.len >= 2 and ((text[0] == '"' and text[text.len - 1] == '"') or (text[0] == '\'' and text[text.len - 1] == '\''))) return "string";
+        if (identifierLiteralTypeText(text).len != 0) return identifierLiteralTypeText(text);
+        if (std.mem.indexOf(u8, text, ".{")) |dot_brace| {
+            const type_text = std.mem.trim(u8, text[0..dot_brace], " \t\r\n");
+            if (type_text.len != 0) return type_text;
+        }
+        if (std.mem.indexOfScalar(u8, text, '(')) |open_paren| {
+            const callee = std.mem.trim(u8, text[0..open_paren], " \t\r\n");
+            if (isSimpleIdentifier(callee)) return procedureCallTypeText(callee);
+        }
+        if (findTopLevelBinaryOperator(text)) |split| {
+            const lhs = std.mem.trim(u8, text[0..split.index], " \t\r\n");
+            const rhs = std.mem.trim(u8, text[split.index + split.width ..], " \t\r\n");
+            const lhs_type = try vm.inferCodeExpressionTypeText(lhs);
+            const rhs_type = try vm.inferCodeExpressionTypeText(rhs);
+            return binaryExpressionTypeText(text[split.index .. split.index + split.width], lhs_type, rhs_type);
+        }
+        return "";
     }
 
     fn tryBuildProcedureCallCodeTree(vm: *VM, tree_index: u32, code: []const u8, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !?CodeNode {
