@@ -1940,11 +1940,14 @@ pub const VM = struct {
     fn renderCodeNode(vm: *VM, node: CodeNode, diag: Diagnostic) ![]const u8 {
         if (node.tree >= vm.code_trees.items.len) return node.text;
         const tree = vm.code_trees.items[node.tree];
+        const render_start = if (node.start <= node.end and node.end <= tree.source.len) node.start else 0;
+        const render_end = if (node.start <= node.end and node.end <= tree.source.len) node.end else tree.source.len;
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(vm.allocator);
-        var cursor: usize = 0;
+        var cursor: usize = render_start;
         for (tree.nodes) |literal| {
             if (!std.mem.eql(u8, literal.kind, "LITERAL") or (literal.s64 == null and literal.string_value == null)) continue;
+            if (literal.start < render_start or literal.end > render_end) continue;
             if (literal.start < cursor or literal.end > tree.source.len) continue;
             try out.appendSlice(vm.allocator, tree.source[cursor..literal.start]);
             if (literal.s64) |int_value| {
@@ -1956,7 +1959,7 @@ pub const VM = struct {
             }
             cursor = literal.end;
         }
-        try out.appendSlice(vm.allocator, tree.source[cursor..]);
+        try out.appendSlice(vm.allocator, tree.source[cursor..render_end]);
         _ = diag;
         const rendered = try out.toOwnedSlice(vm.allocator);
         errdefer vm.allocator.free(rendered);
@@ -2026,7 +2029,7 @@ pub const VM = struct {
         switch (value) {
             .string => |text| try builder.appendSlice(vm.allocator, text),
             .bytes => |bytes| try builder.appendSlice(vm.allocator, bytes),
-            .code_node => |node| try vm.builderAppendCodeText(builder, node.text),
+            .code_node => |node| try vm.builderAppendCodeText(builder, try vm.renderCodeNode(node, diag)),
             .code_nodes, .code_args => return diag.failAt(0, "VM cannot append a compiler meta array to a String_Builder without indexing it", .{}),
             .code_arg => return diag.failAt(0, "VM cannot append a Code_Argument directly; append its expression", .{}),
             .source_location => |loc| {
