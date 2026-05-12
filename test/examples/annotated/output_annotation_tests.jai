@@ -96,6 +96,14 @@ abstracting_loop_output :: () {
     expect_program_output("examples/26/26.34_abstracting_loop.jai", "Player no 0 is {\"Jane\", 82}\nPlayer no 1 is {\"John\", 75}\nPlayer is {\"Jane\", 82}\nPlayer is {\"John\", 75}\ninside macro! \nPlayer is {\"Jane\", 82}\ninside macro! \nPlayer is {\"John\", 75}\ninside macro player_loop! \nPlayer 0 is {\"Jane\", 82}\ninside macro player_loop! \nPlayer 1 is {\"John\", 75}\n");
 } @TestProcedure
 
+code_struct_member_output :: () {
+    expect_program_output("examples/26/26.29_code_struct_member.jai", "The result of serializing is: '7-75-'.\n");
+} @TestProcedure
+
+insert_string_from_proc_output :: () {
+    expect_program_output("examples/26/26.35_insert_string_from_proc.jai", "9\n27\n162\n");
+} @TestProcedure
+
 changing_ast_output :: () {
     expect_program_output("examples/26/26.36_changing_ast.jai", "314928\n");
 } @TestProcedure

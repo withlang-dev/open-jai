@@ -12,6 +12,7 @@ pub const Opcode = enum(u8) {
     load_bool,
     load_null_ptr,
     load_type,
+    load_type_text,
     load_undef,
     global_addr,
     load_const_ref,
@@ -124,6 +125,8 @@ pub const Opcode = enum(u8) {
     load_build_options,
     build_options_get_field,
     build_options_set_field,
+    type_info_field,
+    type_info_member_field,
     source_location_get_field,
     file_open,
     file_close,
@@ -137,6 +140,7 @@ pub const Opcode = enum(u8) {
     string_builder_append_string,
     string_builder_append_int,
     string_builder_append_float,
+    string_builder_append_format,
     string_builder_to_string,
     string_builder_length,
     string_copy,
@@ -192,6 +196,18 @@ pub const Instruction = struct {
     source_node: u32 = 0,
 };
 
+pub const TypeInfoMember = struct {
+    name: []const u8,
+    type_name: []const u8,
+    flags: u32 = 0,
+};
+
+pub const TypeInfo = struct {
+    name: []const u8,
+    tag: u32,
+    members: []TypeInfoMember,
+};
+
 pub const ProcBytecode = struct {
     name: []const u8,
     instructions: std.ArrayList(Instruction) = .empty,
@@ -219,6 +235,7 @@ pub const Program = struct {
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
     proc_nodes: std.ArrayList(u32) = .empty,
+    type_infos: std.ArrayList(TypeInfo) = .empty,
     call_args: std.ArrayList(Register) = .empty,
     main_proc: ?u32 = null,
 
@@ -230,12 +247,21 @@ pub const Program = struct {
         for (p.strings.items) |s| p.allocator.free(s);
         for (p.byte_arrays.items) |b| p.allocator.free(b);
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
+        for (p.type_infos.items) |info| {
+            p.allocator.free(info.name);
+            for (info.members) |member| {
+                p.allocator.free(member.name);
+                p.allocator.free(member.type_name);
+            }
+            p.allocator.free(info.members);
+        }
         p.call_args.deinit(p.allocator);
         p.strings.deinit(p.allocator);
         p.byte_arrays.deinit(p.allocator);
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
         p.proc_nodes.deinit(p.allocator);
+        p.type_infos.deinit(p.allocator);
     }
 
     pub fn addProc(p: *Program, proc: ProcBytecode, source_node: u32) !u32 {
@@ -259,6 +285,39 @@ pub const Program = struct {
         errdefer p.allocator.free(owned);
         const idx: u32 = @intCast(p.byte_arrays.items.len);
         try p.byte_arrays.append(p.allocator, owned);
+        return idx;
+    }
+
+    pub fn typeInfoIndexByName(p: *const Program, name: []const u8) ?u32 {
+        for (p.type_infos.items, 0..) |info, i| {
+            if (std.mem.eql(u8, info.name, name)) return @intCast(i);
+        }
+        return null;
+    }
+
+    pub fn addTypeInfo(p: *Program, name: []const u8, tag: u32, members: []const TypeInfoMember) !u32 {
+        if (p.typeInfoIndexByName(name)) |existing| return existing;
+        const owned_name = try p.allocator.dupe(u8, name);
+        errdefer p.allocator.free(owned_name);
+        const owned_members = try p.allocator.alloc(TypeInfoMember, members.len);
+        errdefer p.allocator.free(owned_members);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned_members[0..initialized]) |member| {
+                p.allocator.free(member.name);
+                p.allocator.free(member.type_name);
+            }
+        }
+        for (members, 0..) |member, i| {
+            owned_members[i] = .{
+                .name = try p.allocator.dupe(u8, member.name),
+                .type_name = try p.allocator.dupe(u8, member.type_name),
+                .flags = member.flags,
+            };
+            initialized += 1;
+        }
+        const idx: u32 = @intCast(p.type_infos.items.len);
+        try p.type_infos.append(p.allocator, .{ .name = owned_name, .tag = tag, .members = owned_members });
         return idx;
     }
 

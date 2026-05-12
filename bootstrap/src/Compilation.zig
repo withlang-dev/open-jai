@@ -209,6 +209,7 @@ pub const Compilation = struct {
                 try typed.putComptimeBytes(value_node, bytes_value);
                 try typed.putComptimeBytes(decl_node, bytes_value);
             },
+            .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
     }
@@ -324,6 +325,7 @@ pub const Compilation = struct {
                     .bool => |bool_value| try typed.comptime_ints.put(comp.allocator, node, if (bool_value) 1 else 0),
                     .string => |string_value| try typed.putComptimeString(node, string_value),
                     .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
+                    .type_text => {},
                     .void => {},
                 }
             },
@@ -682,6 +684,7 @@ pub const Compilation = struct {
             .bool => |v| std.debug.print("{s}", .{if (v) "true" else "false"}),
             .string => |v| std.debug.print("{s}", .{v}),
             .bytes => |v| std.debug.print("{s}", .{v}),
+            .type_text => |v| std.debug.print("{s}", .{v}),
         }
     }
 

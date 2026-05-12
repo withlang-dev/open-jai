@@ -9,6 +9,7 @@ pub const Value = union(enum) {
     bool: bool,
     string: []const u8,
     bytes: []const u8,
+    type_text: []const u8,
 };
 
 const Pointer = struct {
@@ -58,6 +59,8 @@ const RegisterValue = union(enum) {
     build_options: usize,
     build_llvm_options: usize,
     type_id: u32,
+    type_text: []const u8,
+    type_info_member: Bytecode.TypeInfoMember,
     ptr: Pointer,
     int: i64,
     float: f64,
@@ -160,6 +163,7 @@ pub const VM = struct {
                 .bool => |v| .{ .bool = v },
                 .string => |v| .{ .string = v },
                 .bytes => |v| .{ .bytes = v },
+                .type_text => |v| .{ .type_text = v },
                 .void => return diag.failAt(0, "VM #run arguments cannot be void", .{}),
             };
         }
@@ -199,6 +203,10 @@ pub const VM = struct {
                 .load_type => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM load_type register out of range", .{});
                     regs[inst.dest] = .{ .type_id = inst.arg1 };
+                },
+                .load_type_text => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_type_text register/string index out of range", .{});
+                    regs[inst.dest] = .{ .type_text = vm.program.strings.items[inst.arg1] };
                 },
                 .load_null_ptr, .load_const_ref => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM placeholder/reference load register out of range", .{});
@@ -884,6 +892,14 @@ pub const VM = struct {
                         else => unreachable,
                     };
                 },
+                .type_info_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Type_Info field access out of range", .{});
+                    regs[inst.dest] = try vm.typeInfoField(regs[inst.arg1], vm.program.strings.items[inst.arg2], diag);
+                },
+                .type_info_member_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Type_Info member field access out of range", .{});
+                    regs[inst.dest] = try vm.typeInfoMemberField(regs[inst.arg1], vm.program.strings.items[inst.arg2], diag);
+                },
                 .source_location_get_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Source_Code_Location field access out of range", .{});
                     const loc = switch (regs[inst.arg1]) {
@@ -931,6 +947,17 @@ pub const VM = struct {
                 .string_builder_append_string, .string_builder_append_int, .string_builder_append_float => {
                     if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_builder_append register out of range", .{});
                     try vm.builderAppendValue(try registerPointer(regs[inst.arg1], diag, "string_builder_append slot"), regs[inst.arg2], diag);
+                },
+                .string_builder_append_format => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_builder_append_format register out of range", .{});
+                    if (inst.arg3 + inst.arg4 > vm.program.call_args.items.len) return diag.failAt(0, "VM string_builder_append_format call-argument range out of bounds", .{});
+                    try vm.builderAppendFormat(
+                        try registerPointer(regs[inst.arg1], diag, "string_builder_append_format slot"),
+                        try registerText(vm, regs[inst.arg2], diag, "string_builder_append_format format"),
+                        regs,
+                        vm.program.call_args.items[inst.arg3 .. inst.arg3 + inst.arg4],
+                        diag,
+                    );
                 },
                 .string_builder_to_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_to_string register out of range", .{});
@@ -1038,6 +1065,8 @@ pub const VM = struct {
                 std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little);
                 return ptr;
             },
+            .type_text => return diag.failAt(0, "VM cannot materialize Type values as raw bytes", .{}),
+            .type_info_member => return diag.failAt(0, "VM cannot materialize Type_Info member values as raw bytes", .{}),
             .code_node, .code_nodes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
             .source_location => return diag.failAt(0, "VM cannot materialize Source_Code_Location as raw bytes; access its fields instead", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot materialize Build_Options as raw bytes; access its fields instead", .{}),
@@ -1276,6 +1305,39 @@ pub const VM = struct {
         return diag.failAt(0, "VM Build_Options has no implemented field '{s}'", .{field_name});
     }
 
+    fn typeInfoField(vm: *VM, value: RegisterValue, field_name: []const u8, diag: Diagnostic) !RegisterValue {
+        const type_name = switch (value) {
+            .type_text => |text| text,
+            .type_id => |type_id| typeName(type_id),
+            else => return diag.failAt(0, "VM Type_Info field access requires a Type value", .{}),
+        };
+        const info_index = vm.program.typeInfoIndexByName(type_name) orelse return diag.failAt(0, "VM has no Type_Info metadata for '{s}'", .{type_name});
+        const info = vm.program.type_infos.items[info_index];
+        if (std.mem.eql(u8, field_name, "type")) return .{ .int = info.tag };
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = info.name };
+        if (std.mem.eql(u8, field_name, "members")) {
+            const header = try vm.newDynamicArray(0, 8, diag);
+            const array_index = vm.dynamicArrayIndexForPointer(header) orelse return diag.failAt(0, "VM Type_Info members allocation failed", .{});
+            for (info.members) |member| try vm.dynamic_arrays.items[array_index].elems.append(vm.allocator, .{ .type_info_member = member });
+            try vm.writeDynamicArrayHeader(array_index, diag);
+            return .{ .ptr = header };
+        }
+        return diag.failAt(0, "VM Type_Info has no implemented field '{s}'", .{field_name});
+    }
+
+    fn typeInfoMemberField(vm: *VM, value: RegisterValue, field_name: []const u8, diag: Diagnostic) !RegisterValue {
+        _ = vm;
+        const member = switch (value) {
+            .type_info_member => |member| member,
+            else => return diag.failAt(0, "VM Type_Info member field access requires a Type_Info member value", .{}),
+        };
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = member.name };
+        if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = member.type_name };
+        if (std.mem.eql(u8, field_name, "flags")) return .{ .int = member.flags };
+        if (std.mem.eql(u8, field_name, "offset_in_bytes")) return .{ .int = 0 };
+        return diag.failAt(0, "VM Type_Info member has no implemented field '{s}'", .{field_name});
+    }
+
     fn buildOptionsLlvmGetField(vm: *VM, index: usize, field_name: []const u8, diag: Diagnostic) !RegisterValue {
         if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options.llvm_options handle out of range", .{});
         const options = vm.build_options.items[index];
@@ -1400,6 +1462,8 @@ pub const VM = struct {
             .bool => |bool_value| try vm.storeByte(ptr, if (bool_value) 1 else 0, diag),
             .bytes => |bytes| if (bytes.len != 0) @memcpy(try vm.blockSlice(ptr, bytes.len, diag), bytes),
             .type_id => |type_id| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little),
+            .type_text => return diag.failAt(0, "VM cannot store Type values into raw memory", .{}),
+            .type_info_member => return diag.failAt(0, "VM cannot store Type_Info member values into raw memory", .{}),
             .ptr => |source_ptr| {
                 const source = try vm.readRemainingBytes(source_ptr, diag);
                 if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
@@ -1511,6 +1575,12 @@ pub const VM = struct {
         if (index >= array.elems.items.len) return diag.failAt(0, "VM dynamic array index out of bounds", .{});
         if (elem_kind == 1) return .{ .ptr = try vm.dynamicArrayItemPointer(array_index, index, diag) };
         const value = array.elems.items[index];
+        if (elem_kind == 3) {
+            return switch (value) {
+                .type_info_member => |member| .{ .type_info_member = member },
+                else => diag.failAt(0, "VM dynamic array Type_Info member index found {s} element", .{@tagName(value)}),
+            };
+        }
         if (elem_kind == 2) {
             return switch (value) {
                 .string => |text| .{ .string = text },
@@ -1519,7 +1589,7 @@ pub const VM = struct {
             };
         }
         return switch (value) {
-            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .source_location, .build_options, .build_llvm_options => value,
+            .int, .float, .bool, .string, .bytes, .ptr, .type_id, .type_text, .type_info_member, .source_location, .build_options, .build_llvm_options => value,
             .empty => if (elem_size == 1)
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
@@ -1611,6 +1681,8 @@ pub const VM = struct {
             .float => |float_value| std.debug.print("{d}", .{float_value}),
             .bool => |bool_value| std.debug.print("{s}", .{if (bool_value) "true" else "false"}),
             .type_id => |type_id| std.debug.print("{s}", .{typeName(type_id)}),
+            .type_text => |type_text| std.debug.print("{s}", .{type_text}),
+            .type_info_member => |member| std.debug.print("Type_Info_Struct_Member {{ name = \"{s}\"; }}", .{member.name}),
             .ptr => |ptr| {
                 if (vm.dynamicArrayIndexForPointer(ptr)) |array_index| {
                     try vm.printDynamicArray(array_index, diag);
@@ -1916,13 +1988,58 @@ pub const VM = struct {
             },
             .bool => |bool_value| try builder.appendSlice(vm.allocator, if (bool_value) "true" else "false"),
             .type_id => |type_id| try builder.appendSlice(vm.allocator, typeName(type_id)),
+            .type_text => |type_text| try builder.appendSlice(vm.allocator, type_text),
+            .type_info_member => |member| try builder.appendSlice(vm.allocator, member.name),
             .empty => return diag.failAt(0, "VM cannot append an uninitialized value to a String_Builder", .{}),
         }
     }
 
+    fn builderAppendFormat(vm: *VM, slot: Pointer, fmt: []const u8, regs: []const RegisterValue, arg_regs: []const Bytecode.Register, diag: Diagnostic) !void {
+        var start: usize = 0;
+        var arg_index: usize = 0;
+        var i: usize = 0;
+        while (i < fmt.len) : (i += 1) {
+            if (fmt[i] != '%') continue;
+            if (i > 0 and fmt[i - 1] == '\\') {
+                if (start < i - 1) try (try vm.ensureBuilder(slot)).appendSlice(vm.allocator, fmt[start .. i - 1]);
+                try (try vm.ensureBuilder(slot)).append(vm.allocator, '%');
+                start = i + 1;
+                continue;
+            }
+            if (i + 1 < fmt.len and fmt[i + 1] == '%') {
+                try (try vm.ensureBuilder(slot)).appendSlice(vm.allocator, fmt[start .. i + 1]);
+                i += 1;
+                start = i + 1;
+                continue;
+            }
+            if (start < i) try (try vm.ensureBuilder(slot)).appendSlice(vm.allocator, fmt[start..i]);
+            var selected_arg_index = arg_index;
+            var next_start = i + 1;
+            if (i + 1 < fmt.len and fmt[i + 1] >= '1' and fmt[i + 1] <= '9') {
+                selected_arg_index = fmt[i + 1] - '1';
+                next_start = i + 2;
+            } else {
+                arg_index += 1;
+            }
+            if (selected_arg_index >= arg_regs.len) return diag.failAt(0, "VM string_builder_append_format argument index out of range", .{});
+            const reg = arg_regs[selected_arg_index];
+            if (reg >= regs.len) return diag.failAt(0, "VM string_builder_append_format argument register out of range", .{});
+            try vm.builderAppendValue(slot, regs[reg], diag);
+            if (next_start + 1 < fmt.len and fmt[next_start] == ' ' and fmt[next_start + 1] == '\n') {
+                start = next_start + 1;
+            } else {
+                start = next_start;
+            }
+        }
+        if (start < fmt.len) try (try vm.ensureBuilder(slot)).appendSlice(vm.allocator, fmt[start..]);
+    }
+
     fn builderString(vm: *VM, slot: Pointer) ![]const u8 {
         const builder = try vm.ensureBuilder(slot);
-        return builder.items;
+        const owned = try vm.allocator.dupe(u8, builder.items);
+        errdefer vm.allocator.free(owned);
+        try vm.rendered_code_strings.append(vm.allocator, owned);
+        return owned;
     }
 
     fn builderAppendCodeText(vm: *VM, builder: *std.ArrayList(u8), text: []const u8) !void {
@@ -2027,6 +2144,8 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .ptr => 1,
         .bytes => |v| if (v.len == 0) 0 else 1,
         .type_id => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
+        .type_text => diag.failAt(0, "VM {s} cannot treat Type values as numbers", .{context}),
+        .type_info_member => diag.failAt(0, "VM {s} cannot treat Type_Info member values as numbers", .{context}),
         .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
         .source_location => diag.failAt(0, "VM {s} cannot treat Source_Code_Location values as numbers", .{context}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM {s} cannot treat Build_Options values as numbers", .{context}),
@@ -2056,6 +2175,8 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .code_nodes => |v| v.len != 0,
         .code_arg => true,
         .code_args => |v| v.len != 0,
+        .type_text => |v| v.len != 0,
+        .type_info_member => true,
         .source_location => true,
         .build_options => true,
         .build_llvm_options => true,
@@ -2104,7 +2225,9 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
-        .type_id => diag.failAt(0, "VM cannot pass Type values across procedure calls yet", .{}),
+        .type_id => |v| .{ .type_text = typeName(v) },
+        .type_text => |v| .{ .type_text = v },
+        .type_info_member => diag.failAt(0, "VM cannot pass Type_Info member values across procedure calls yet", .{}),
         .code_node, .code_nodes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
         .source_location => diag.failAt(0, "VM cannot pass Source_Code_Location across non-inlined procedure calls yet", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
@@ -2120,6 +2243,7 @@ fn registerValueFromValue(value: Value) RegisterValue {
         .bool => |v| .{ .bool = v },
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
+        .type_text => |v| .{ .type_text = v },
         .void => .empty,
     };
 }
@@ -2141,6 +2265,15 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .type_id => |l| switch (rhs) {
             .type_id => |r| l == r,
+            else => false,
+        },
+        .type_text => |l| switch (rhs) {
+            .type_text => |r| std.mem.eql(u8, l, r),
+            .type_id => |r| std.mem.eql(u8, l, typeName(r)),
+            else => false,
+        },
+        .type_info_member => |l| switch (rhs) {
+            .type_info_member => |r| std.mem.eql(u8, l.name, r.name) and std.mem.eql(u8, l.type_name, r.type_name) and l.flags == r.flags,
             else => false,
         },
         .code_node => |l| switch (rhs) {

@@ -575,6 +575,10 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend type load destination register out of range", .{});
                 registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, inst.arg1, 0), .kind = if (inst.arg1 == 0) .void_value else .type_id };
             },
+            .load_type_text => {
+                if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend type-text load out of range", .{});
+                registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
+            },
             .load_undef => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend undefined load destination register out of range", .{});
                 registers[inst.dest] = switch (inst.arg1) {
