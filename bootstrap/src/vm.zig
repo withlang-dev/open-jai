@@ -46,6 +46,7 @@ const CodeNode = struct {
     note_count: usize = 0,
     subexpression_start: usize = 0,
     subexpression_count: usize = 0,
+    expression_index: ?u32 = null,
 };
 
 const CodeArgument = struct {
@@ -818,6 +819,17 @@ pub const VM = struct {
                         .code_node => |v| v,
                         else => return diag.failAt(0, "VM Code_Declaration.expression requires a Code_Node value", .{}),
                     };
+                    if (node.expression_index) |expression_index| {
+                        if (node.tree < vm.code_trees.items.len) {
+                            const tree = vm.code_trees.items[node.tree];
+                            if (expression_index >= tree.nodes.len) return diag.failAt(0, "VM Code_Declaration.expression index out of range", .{});
+                            regs[inst.dest] = .{ .code_node = tree.nodes[expression_index] };
+                            continue;
+                        }
+                        if (expression_index >= vm.compiler_message_nodes.items.len) return diag.failAt(0, "VM Code_Declaration.expression index out of range", .{});
+                        regs[inst.dest] = .{ .code_node = vm.compiler_message_nodes.items[expression_index] };
+                        continue;
+                    }
                     regs[inst.dest] = .{ .code_node = node };
                 },
                 .code_node_field_name => {
@@ -1640,6 +1652,7 @@ pub const VM = struct {
                 .end = ast.tokens[name_token].end,
                 .note_start = note_start,
                 .note_count = vm.compiler_message_notes.items.len - note_start,
+                .expression_index = @intCast(node_index),
             });
             try proc_decl_nodes.append(vm.allocator, .{ .decl = decl, .node_index = node_index });
         }
@@ -2457,17 +2470,24 @@ pub const VM = struct {
             }
             i += 1;
         }
-        if (declaration) |decl| try nodes.append(vm.allocator, .{
-            .tree = tree_index,
-            .index = @intCast(nodes.items.len),
-            .kind = "DECLARATION",
-            .flags = "ALLOWED_BY_CONTEXT",
-            .text = decl.text,
-            .name = decl.name,
-            .type_text = decl.type_text,
-            .start = decl.start,
-            .end = decl.end,
-        });
+        if (declaration) |decl| {
+            const expression_index = if (decl.expression_start != null and decl.expression_end != null)
+                findCodeExpressionNodeForRange(nodes.items, decl.expression_start.?, decl.expression_end.?)
+            else
+                null;
+            try nodes.append(vm.allocator, .{
+                .tree = tree_index,
+                .index = @intCast(nodes.items.len),
+                .kind = "DECLARATION",
+                .flags = "ALLOWED_BY_CONTEXT",
+                .text = decl.text,
+                .name = decl.name,
+                .type_text = decl.type_text,
+                .start = decl.start,
+                .end = decl.end,
+                .expression_index = expression_index,
+            });
+        }
 
         stampCodeTreeLocations(&root, nodes.items, code, path, base_line);
         return .{
@@ -2490,6 +2510,8 @@ pub const VM = struct {
         text: []const u8,
         name: []const u8,
         type_text: []const u8,
+        expression_start: ?usize = null,
+        expression_end: ?usize = null,
         start: usize,
         end: usize,
     };
@@ -2513,14 +2535,16 @@ pub const VM = struct {
             cursor += 1;
             const rhs = std.mem.trim(u8, trimmed[cursor..], " \t\r\n");
             const type_text = try vm.inferCodeExpressionTypeText(rhs);
-            return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+            const rhs_relative = std.mem.indexOf(u8, trimmed[cursor..], rhs) orelse 0;
+            return .{ .text = trimmed, .name = name, .type_text = type_text, .expression_start = base_offset + cursor + rhs_relative, .expression_end = base_offset + cursor + rhs_relative + rhs.len, .start = base_offset, .end = base_offset + trimmed.len };
         }
 
         if (cursor < trimmed.len and trimmed[cursor] == '=') {
             cursor += 1;
             const rhs = std.mem.trim(u8, trimmed[cursor..], " \t\r\n");
             const type_text = try vm.inferCodeExpressionTypeText(rhs);
-            return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+            const rhs_relative = std.mem.indexOf(u8, trimmed[cursor..], rhs) orelse 0;
+            return .{ .text = trimmed, .name = name, .type_text = type_text, .expression_start = base_offset + cursor + rhs_relative, .expression_end = base_offset + cursor + rhs_relative + rhs.len, .start = base_offset, .end = base_offset + trimmed.len };
         }
 
         while (cursor < trimmed.len and std.ascii.isWhitespace(trimmed[cursor])) cursor += 1;
@@ -2528,7 +2552,17 @@ pub const VM = struct {
         while (cursor < trimmed.len and trimmed[cursor] != '=') cursor += 1;
         const type_text = std.mem.trim(u8, trimmed[type_start..cursor], " \t\r\n");
         if (type_text.len == 0) return null;
-        return .{ .text = trimmed, .name = name, .type_text = type_text, .start = base_offset, .end = base_offset + trimmed.len };
+        var expression_start: ?usize = null;
+        var expression_end: ?usize = null;
+        if (cursor < trimmed.len and trimmed[cursor] == '=') {
+            const rhs = std.mem.trim(u8, trimmed[cursor + 1 ..], " \t\r\n");
+            if (rhs.len != 0) {
+                const rhs_relative = std.mem.indexOf(u8, trimmed[cursor + 1 ..], rhs) orelse 0;
+                expression_start = base_offset + cursor + 1 + rhs_relative;
+                expression_end = expression_start.? + rhs.len;
+            }
+        }
+        return .{ .text = trimmed, .name = name, .type_text = type_text, .expression_start = expression_start, .expression_end = expression_end, .start = base_offset, .end = base_offset + trimmed.len };
     }
 
     fn inferCodeExpressionTypeText(vm: *VM, expression: []const u8) ![]const u8 {
@@ -3320,6 +3354,24 @@ fn findTopLevelChar(text: []const u8, needle: u8) ?usize {
         }
     }
     return null;
+}
+
+fn findCodeExpressionNodeForRange(nodes: []const CodeNode, start: usize, end: usize) ?u32 {
+    var best: ?u32 = null;
+    var best_width: usize = std.math.maxInt(usize);
+    for (nodes, 0..) |node, index| {
+        if (node.start < start or node.end > end or node.end <= node.start) continue;
+        const width = node.end - node.start;
+        const replaces = if (best) |best_index| blk: {
+            const current = nodes[@intCast(best_index)];
+            break :blk node.start < current.start or (node.start == current.start and width < best_width);
+        } else true;
+        if (replaces) {
+            best = @intCast(index);
+            best_width = width;
+        }
+    }
+    return best;
 }
 
 const BinarySplit = struct {

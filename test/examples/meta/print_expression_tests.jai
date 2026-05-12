@@ -21,7 +21,7 @@ code_node_type_reflects_expression_types :: () {
 } @TestProcedure
 
 code_declaration_nodes_expose_name_and_type :: () {
-    expect_compile_output("test/examples/meta/code_declaration_type_value.jai", "explicit root kind: ROOT\nexplicit decl name: answer\nexplicit decl type: int\ninferred root kind: ROOT\ninferred decl name: greeting\ninferred decl type: string\n");
+    expect_compile_output("test/examples/meta/code_declaration_type_value.jai", "explicit root kind: ROOT\nexplicit decl name: answer\nexplicit decl type: int\nexplicit expr kind: LITERAL\nexplicit expr value: 42\ninferred root kind: ROOT\ninferred decl name: greeting\ninferred decl type: string\ninferred expr kind: LITERAL\ninferred expr value: hello\n");
 } @TestProcedure
 
 code_block_nodes_expose_statement_subexpressions :: () {
