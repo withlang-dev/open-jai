@@ -1,0 +1,60 @@
+name: Compatibility bug
+description: Report an OpenJai compiler or runtime compatibility issue.
+title: "[compat]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve OpenJai.
+
+        OpenJai is a clean-room implementation developed only from public Jai information and contributors' own source code. Do not include leaked compiler binaries, leaked documentation, private standard library code, private screenshots, copied diagnostics, or generated artifacts from non-public Jai materials.
+
+  - type: checkboxes
+    id: source-status
+    attributes:
+      label: Source status
+      description: These attestations are required to preserve the project's clean-room firewall.
+      options:
+        - label: This report is based only on public Jai information and/or my own source code.
+          required: true
+        - label: I am not including leaked compiler binaries, leaked docs, private standard library code, private screenshots, copied diagnostics, or generated artifacts from non-public Jai materials.
+          required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro
+      description: Paste a minimal source example here.
+      placeholder: |
+        #import "Basic";
+
+        main :: () {
+            print("hello\n");
+        }
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should happen in plain language. Do not paste official Jai compiler output unless it is from public material.
+    validations:
+      required: true
+
+  - type: textarea
+    id: openjai-behavior
+    attributes:
+      label: OpenJai behavior
+      description: Paste OpenJai output/errors here.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Add links to public sources or any other context. Do not paste output from the official Jai compiler unless it is from public material.
