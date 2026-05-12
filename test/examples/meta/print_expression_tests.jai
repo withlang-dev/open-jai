@@ -23,3 +23,7 @@ code_node_type_reflects_expression_types :: () {
 code_declaration_nodes_expose_name_and_type :: () {
     expect_compile_output("test/examples/meta/code_declaration_type_value.jai", "explicit root kind: ROOT\nexplicit decl name: answer\nexplicit decl type: int\ninferred root kind: ROOT\ninferred decl name: greeting\ninferred decl type: string\n");
 } @TestProcedure
+
+code_block_nodes_expose_statement_subexpressions :: () {
+    expect_compile_output("test/examples/meta/code_block_tree_value.jai", "root kind: BLOCK\nroot subexpressions: 9\nfirst kind: ASSIGNMENT\nfirst subexpressions: 2\nsecond kind: ASSIGNMENT\nsecond subexpressions: 5\nflat count: 9\n");
+} @TestProcedure

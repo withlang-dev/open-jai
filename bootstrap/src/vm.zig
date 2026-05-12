@@ -852,7 +852,7 @@ pub const VM = struct {
                         .code_node => |v| v,
                         else => return diag.failAt(0, "VM Code_Node.subexpressions requires a Code_Node value", .{}),
                     };
-                    if (node.path.len == 0 and node.tree < vm.code_trees.items.len) {
+                    if (node.tree < vm.code_trees.items.len) {
                         const tree = vm.code_trees.items[node.tree];
                         if (node.subexpression_start > tree.nodes.len or node.subexpression_count > tree.nodes.len - node.subexpression_start) return diag.failAt(0, "VM Code_Node.subexpressions slice out of range", .{});
                         regs[inst.dest] = .{ .code_nodes = tree.nodes[node.subexpression_start .. node.subexpression_start + node.subexpression_count] };
@@ -2383,6 +2383,16 @@ pub const VM = struct {
         var root = CodeNode{ .tree = tree_index, .kind = "ROOT", .flags = "0", .text = code, .path = path, .line_number = base_line, .start = 0, .end = code.len };
         const declaration = try vm.parseCodeDeclarationInfo(code);
 
+        if (try vm.tryBuildBlockCodeTree(tree_index, code, &nodes, &arguments)) |block_root| {
+            root = block_root;
+            stampCodeTreeLocations(&root, nodes.items, code, path, base_line);
+            return .{
+                .root = root,
+                .nodes = try nodes.toOwnedSlice(vm.allocator),
+                .arguments = try arguments.toOwnedSlice(vm.allocator),
+            };
+        }
+
         if (try vm.tryBuildProcedureCallCodeTree(tree_index, code, &nodes, &arguments)) |call_root| {
             root = call_root;
             stampCodeTreeLocations(&root, nodes.items, code, path, base_line);
@@ -2544,6 +2554,86 @@ pub const VM = struct {
             return binaryExpressionTypeText(text[split.index .. split.index + split.width], lhs_type, rhs_type);
         }
         return "";
+    }
+
+    fn tryBuildBlockCodeTree(vm: *VM, tree_index: u32, code: []const u8, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !?CodeNode {
+        const trimmed = std.mem.trim(u8, code, " \t\r\n;");
+        if (trimmed.len < 2 or trimmed[0] != '{') return null;
+        const close = matchingCloseBrace(trimmed, 0) orelse return null;
+        if (std.mem.trim(u8, trimmed[close + 1 ..], " \t\r\n;").len != 0) return null;
+        const base_offset = std.mem.indexOf(u8, code, trimmed) orelse 0;
+        const body = trimmed[1..close];
+        const subexpression_start = nodes.items.len;
+        try vm.appendCodeStatements(tree_index, body, base_offset + 1, nodes, arguments);
+        return CodeNode{
+            .tree = tree_index,
+            .kind = "BLOCK",
+            .flags = "0",
+            .text = trimmed,
+            .start = base_offset,
+            .end = base_offset + trimmed.len,
+            .subexpression_start = subexpression_start,
+            .subexpression_count = nodes.items.len - subexpression_start,
+        };
+    }
+
+    fn appendCodeStatements(vm: *VM, tree_index: u32, body: []const u8, body_start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !void {
+        var cursor: usize = 0;
+        var segment_start: usize = 0;
+        var depth: usize = 0;
+        while (cursor <= body.len) : (cursor += 1) {
+            const at_end = cursor == body.len;
+            if (!at_end) {
+                switch (body[cursor]) {
+                    '{', '(', '[' => depth += 1,
+                    '}', ')', ']' => {
+                        if (depth > 0) depth -= 1;
+                    },
+                    else => {},
+                }
+                if (body[cursor] != ';' or depth != 0) continue;
+            }
+            const raw = body[segment_start..cursor];
+            const statement = std.mem.trim(u8, raw, " \t\r\n;");
+            if (statement.len != 0) {
+                const relative = std.mem.indexOf(u8, raw, statement) orelse 0;
+                _ = try vm.appendCodeStatementNode(tree_index, statement, body_start + segment_start + relative, nodes, arguments);
+            }
+            segment_start = cursor + 1;
+        }
+    }
+
+    fn appendCodeStatementNode(vm: *VM, tree_index: u32, text: []const u8, start: usize, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !u32 {
+        const node_index: u32 = @intCast(nodes.items.len);
+        const assignment = findTopLevelAssignmentOperator(text);
+        const subexpression_start: usize = nodes.items.len + 1;
+        try nodes.append(vm.allocator, .{
+            .tree = tree_index,
+            .index = node_index,
+            .kind = if (assignment != null) "ASSIGNMENT" else "STATEMENT",
+            .flags = "0",
+            .text = text,
+            .start = start,
+            .end = start + text.len,
+        });
+        if (assignment) |split| {
+            const lhs_text = std.mem.trim(u8, text[0..split.index], " \t\r\n");
+            if (lhs_text.len != 0) {
+                const lhs_relative = std.mem.indexOf(u8, text[0..split.index], lhs_text) orelse 0;
+                _ = try vm.appendCodeExpressionNode(tree_index, lhs_text, start + lhs_relative, nodes, arguments);
+            }
+            const rhs_raw_start = split.index + split.width;
+            const rhs_text = std.mem.trim(u8, text[rhs_raw_start..], " \t\r\n");
+            if (rhs_text.len != 0) {
+                const rhs_relative = std.mem.indexOf(u8, text[rhs_raw_start..], rhs_text) orelse 0;
+                _ = try vm.appendCodeExpressionNode(tree_index, rhs_text, start + rhs_raw_start + rhs_relative, nodes, arguments);
+            }
+        } else {
+            _ = try vm.appendCodeExpressionNode(tree_index, text, start, nodes, arguments);
+        }
+        nodes.items[node_index].subexpression_start = subexpression_start;
+        nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        return node_index;
     }
 
     fn tryBuildProcedureCallCodeTree(vm: *VM, tree_index: u32, code: []const u8, nodes: *std.ArrayList(CodeNode), arguments: *std.ArrayList(CodeArgument)) !?CodeNode {
@@ -3022,10 +3112,71 @@ fn matchingCloseParen(text: []const u8, open_index: usize) ?usize {
     return null;
 }
 
+fn matchingCloseBrace(text: []const u8, open_index: usize) ?usize {
+    var depth: usize = 0;
+    var i = open_index;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '"' => {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (text[i] == '"') break;
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
 const BinarySplit = struct {
     index: usize,
     width: usize,
 };
+
+fn findTopLevelAssignmentOperator(text: []const u8) ?BinarySplit {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '(', '{', '[' => depth += 1,
+            ')', '}', ']' => {
+                if (depth > 0) depth -= 1;
+            },
+            '"' => {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '\\' and i + 1 < text.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (text[i] == '"') break;
+                }
+            },
+            '=' => if (depth == 0) {
+                if (i > 0) switch (text[i - 1]) {
+                    '=', '!', '<', '>' => continue,
+                    '+', '-', '*', '/', '%', '&', '|', '^' => return .{ .index = i - 1, .width = 2 },
+                    else => {},
+                };
+                if (i + 1 < text.len and text[i + 1] == '=') continue;
+                return .{ .index = i, .width = 1 };
+            },
+            else => {},
+        }
+    }
+    return null;
+}
 
 fn findTopLevelBinaryOperator(text: []const u8) ?BinarySplit {
     var best: ?BinarySplit = null;
