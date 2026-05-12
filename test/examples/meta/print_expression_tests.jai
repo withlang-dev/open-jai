@@ -15,3 +15,7 @@ code_type_reflects_captured_expression_type :: () {
     expect_compile_output("test/examples/meta/code_type_value.jai", "integer code type: int\nstring code type: string\n");
     expect_program_output("test/examples/meta/code_type_value.jai", "caller type: float32\n");
 } @TestProcedure
+
+code_node_type_reflects_expression_types :: () {
+    expect_compile_output("test/examples/meta/code_node_type_value.jai", "expression count: 10\nformat type: string\nvalue type: int\nlhs type: int\nrhs type: int\ncomparison type: bool\nlogical type: bool\n");
+} @TestProcedure

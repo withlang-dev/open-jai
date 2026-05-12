@@ -822,6 +822,7 @@ pub const VM = struct {
                         .code_node => |v| v,
                         else => return diag.failAt(0, "VM Code_Declaration.type requires a Code_Node value", .{}),
                     };
+                    if (node.type_text.len == 0) return diag.failAt(0, "VM Code_Node.type requested for untyped {s} node '{s}'", .{ node.kind, node.text });
                     regs[inst.dest] = .{ .type_text = node.type_text };
                 },
                 .code_node_field_subexpressions => {
@@ -2371,10 +2372,10 @@ pub const VM = struct {
                 var scan = i;
                 while (scan < code.len and std.ascii.isWhitespace(code[scan])) : (scan += 1) {}
                 if (scan + 1 < code.len and code[scan] == '.' and code[scan + 1] == '{') {
-                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "TYPE_INSTANTIATION", .flags = "0", .text = code[start..i], .start = start, .end = i });
-                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[scan .. scan + 2], .start = scan, .end = scan + 2 });
+                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "TYPE_INSTANTIATION", .flags = "0", .text = code[start..i], .type_text = code[start..i], .start = start, .end = i });
+                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[scan .. scan + 2], .type_text = code[start..i], .start = scan, .end = scan + 2 });
                 } else {
-                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "IDENT", .flags = "0", .text = code[start..i], .start = start, .end = i });
+                    try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "IDENT", .flags = "0", .text = code[start..i], .type_text = identifierLiteralTypeText(code[start..i]), .start = start, .end = i });
                 }
                 continue;
             }
@@ -2383,7 +2384,7 @@ pub const VM = struct {
                 i += 1;
                 while (i < code.len and (std.ascii.isAlphanumeric(code[i]) or code[i] == '.' or code[i] == '_')) : (i += 1) {}
                 const literal_value = std.fmt.parseInt(i64, code[start..i], 10) catch null;
-                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..i], .start = start, .end = i, .s64 = literal_value });
+                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..i], .type_text = numericLiteralTypeText(code[start..i]), .start = start, .end = i, .s64 = literal_value });
                 continue;
             }
             if (ch == '"' or ch == '\'') {
@@ -2402,7 +2403,7 @@ pub const VM = struct {
                 }
                 const end = @min(i, code.len);
                 const payload = try vm.decodeCodeStringLiteralValue(code[start..end]);
-                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..end], .start = start, .end = end, .string_value = payload });
+                try nodes.append(vm.allocator, .{ .tree = tree_index, .index = @intCast(nodes.items.len), .kind = "LITERAL", .flags = "0", .text = code[start..end], .type_text = "string", .start = start, .end = end, .string_value = payload });
                 continue;
             }
             i += 1;
@@ -2462,6 +2463,7 @@ pub const VM = struct {
             .kind = "PROCEDURE_CALL",
             .flags = "0",
             .text = trimmed,
+            .type_text = procedureCallTypeText(callee),
             .start = base_offset,
             .end = base_offset + trimmed.len,
             .arg_start = arg_start_index,
@@ -2497,6 +2499,7 @@ pub const VM = struct {
             .kind = "PROCEDURE_CALL",
             .flags = "0",
             .text = text,
+            .type_text = procedureCallTypeText(callee),
             .start = start,
             .end = start + text.len,
         });
@@ -2550,18 +2553,23 @@ pub const VM = struct {
             .end = start + text.len,
         });
         const lhs_text = std.mem.trim(u8, text[0..split.index], " \t\r\n");
+        var lhs_type: []const u8 = "";
         if (lhs_text.len != 0) {
             const lhs_relative = std.mem.indexOf(u8, text[0..split.index], lhs_text) orelse 0;
-            _ = try vm.appendCodeExpressionNode(tree_index, lhs_text, start + lhs_relative, nodes, arguments);
+            const lhs_index = try vm.appendCodeExpressionNode(tree_index, lhs_text, start + lhs_relative, nodes, arguments);
+            lhs_type = nodes.items[lhs_index].type_text;
         }
         const rhs_raw_start = split.index + split.width;
         const rhs_text = std.mem.trim(u8, text[rhs_raw_start..], " \t\r\n");
+        var rhs_type: []const u8 = "";
         if (rhs_text.len != 0) {
             const rhs_relative = std.mem.indexOf(u8, text[rhs_raw_start..], rhs_text) orelse 0;
-            _ = try vm.appendCodeExpressionNode(tree_index, rhs_text, start + rhs_raw_start + rhs_relative, nodes, arguments);
+            const rhs_index = try vm.appendCodeExpressionNode(tree_index, rhs_text, start + rhs_raw_start + rhs_relative, nodes, arguments);
+            rhs_type = nodes.items[rhs_index].type_text;
         }
         nodes.items[node_index].subexpression_start = subexpression_start;
         nodes.items[node_index].subexpression_count = nodes.items.len - subexpression_start;
+        nodes.items[node_index].type_text = binaryExpressionTypeText(text[split.index .. split.index + split.width], lhs_type, rhs_type);
         return true;
     }
 
@@ -2639,13 +2647,16 @@ pub const VM = struct {
 
     fn codeNodeForText(vm: *VM, tree_index: u32, node_index: u32, text: []const u8, start: usize) !CodeNode {
         if (std.fmt.parseInt(i64, text, 10)) |value| {
-            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .s64 = value };
+            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .type_text = "int", .start = start, .end = start + text.len, .s64 = value };
         } else |_| {}
+        if (isFloatLiteralText(text)) {
+            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .type_text = "float64", .start = start, .end = start + text.len };
+        }
         if (text.len >= 2 and ((text[0] == '"' and text[text.len - 1] == '"') or (text[0] == '\'' and text[text.len - 1] == '\''))) {
-            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .start = start, .end = start + text.len, .string_value = try vm.decodeCodeStringLiteralValue(text) };
+            return .{ .tree = tree_index, .index = node_index, .kind = "LITERAL", .flags = "0", .text = text, .type_text = "string", .start = start, .end = start + text.len, .string_value = try vm.decodeCodeStringLiteralValue(text) };
         }
         if (isSimpleIdentifier(text)) {
-            return .{ .tree = tree_index, .index = node_index, .kind = "IDENT", .flags = "0", .text = text, .start = start, .end = start + text.len };
+            return .{ .tree = tree_index, .index = node_index, .kind = "IDENT", .flags = "0", .text = text, .type_text = identifierLiteralTypeText(text), .start = start, .end = start + text.len };
         }
         return .{ .tree = tree_index, .index = node_index, .kind = "EXPRESSION", .flags = "0", .text = text, .start = start, .end = start + text.len };
     }
@@ -2893,8 +2904,8 @@ fn findTopLevelBinaryOperator(text: []const u8) ?BinarySplit {
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         switch (text[i]) {
-            '(','{','[' => depth += 1,
-            ')','}',']' => {
+            '(', '{', '[' => depth += 1,
+            ')', '}', ']' => {
                 if (depth > 0) depth -= 1;
             },
             '"' => {
@@ -2907,18 +2918,106 @@ fn findTopLevelBinaryOperator(text: []const u8) ?BinarySplit {
                     if (text[i] == '"') break;
                 }
             },
-            '+', '-' => if (depth == 0 and i != 0) {
-                best = .{ .index = i, .width = 1 };
-                best_precedence = 1;
+            '|', '&', '=', '!', '<', '>' => if (depth == 0 and i != 0) {
+                if (i + 1 < text.len) {
+                    const pair = text[i .. i + 2];
+                    if (std.mem.eql(u8, pair, "||")) {
+                        noteBinaryCandidate(&best, &best_precedence, i, 2, 1);
+                        i += 1;
+                    } else if (std.mem.eql(u8, pair, "&&")) {
+                        noteBinaryCandidate(&best, &best_precedence, i, 2, 2);
+                        i += 1;
+                    } else if (std.mem.eql(u8, pair, "==") or std.mem.eql(u8, pair, "!=") or std.mem.eql(u8, pair, "<=") or std.mem.eql(u8, pair, ">=")) {
+                        noteBinaryCandidate(&best, &best_precedence, i, 2, 3);
+                        i += 1;
+                    } else if (text[i] == '<' or text[i] == '>') {
+                        noteBinaryCandidate(&best, &best_precedence, i, 1, 3);
+                    }
+                } else if (text[i] == '<' or text[i] == '>') {
+                    noteBinaryCandidate(&best, &best_precedence, i, 1, 3);
+                }
             },
-            '*', '/', '%' => if (depth == 0 and i != 0 and best_precedence == 0) {
-                best = .{ .index = i, .width = 1 };
-                best_precedence = 2;
-            },
+            '+', '-' => if (depth == 0 and i != 0) noteBinaryCandidate(&best, &best_precedence, i, 1, 4),
+            '*', '/', '%' => if (depth == 0 and i != 0) noteBinaryCandidate(&best, &best_precedence, i, 1, 5),
             else => {},
         }
     }
     return best;
+}
+
+fn noteBinaryCandidate(best: *?BinarySplit, best_precedence: *u8, index: usize, width: usize, precedence: u8) void {
+    if (best.* == null or precedence <= best_precedence.*) {
+        best.* = .{ .index = index, .width = width };
+        best_precedence.* = precedence;
+    }
+}
+
+fn numericLiteralTypeText(text: []const u8) []const u8 {
+    return if (isFloatLiteralText(text)) "float64" else "int";
+}
+
+fn isFloatLiteralText(text: []const u8) bool {
+    if (text.len == 0) return false;
+    var saw_digit = false;
+    var saw_float_marker = false;
+    for (text, 0..) |ch, i| switch (ch) {
+        '0'...'9' => saw_digit = true,
+        '.', 'e', 'E' => saw_float_marker = true,
+        '+', '-' => if (i != 0 and text[i - 1] != 'e' and text[i - 1] != 'E') return false,
+        '_' => {},
+        else => return false,
+    };
+    if (!saw_digit or !saw_float_marker) return false;
+    _ = std.fmt.parseFloat(f64, text) catch return false;
+    return true;
+}
+
+fn identifierLiteralTypeText(text: []const u8) []const u8 {
+    if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "false")) return "bool";
+    if (std.mem.eql(u8, text, "null")) return "*void";
+    return "";
+}
+
+fn procedureCallTypeText(callee: []const u8) []const u8 {
+    if (std.mem.eql(u8, callee, "print")) return "void";
+    if (std.mem.eql(u8, callee, "type_to_string")) return "string";
+    if (std.mem.eql(u8, callee, "builder_to_string")) return "string";
+    if (std.mem.eql(u8, callee, "code_to_string")) return "string";
+    if (std.mem.eql(u8, callee, "compiler_get_code")) return "Code";
+    if (std.mem.eql(u8, callee, "compiler_get_nodes")) return "*Code_Node";
+    return "";
+}
+
+fn binaryExpressionTypeText(op: []const u8, lhs_type: []const u8, rhs_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, op, "==") or
+        std.mem.eql(u8, op, "!=") or
+        std.mem.eql(u8, op, "<") or
+        std.mem.eql(u8, op, "<=") or
+        std.mem.eql(u8, op, ">") or
+        std.mem.eql(u8, op, ">=") or
+        std.mem.eql(u8, op, "&&") or
+        std.mem.eql(u8, op, "||"))
+    {
+        return "bool";
+    }
+    if (std.mem.eql(u8, lhs_type, "float64") or std.mem.eql(u8, rhs_type, "float64")) return "float64";
+    if (std.mem.eql(u8, lhs_type, "float32") or std.mem.eql(u8, rhs_type, "float32")) return "float32";
+    if (std.mem.eql(u8, lhs_type, "string") and std.mem.eql(u8, rhs_type, "string") and std.mem.eql(u8, op, "+")) return "string";
+    if (lhs_type.len != 0 and std.mem.eql(u8, lhs_type, rhs_type)) return lhs_type;
+    if (isIntegerTypeText(lhs_type) and isIntegerTypeText(rhs_type)) return "int";
+    return "";
+}
+
+fn isIntegerTypeText(text: []const u8) bool {
+    return std.mem.eql(u8, text, "int") or
+        std.mem.eql(u8, text, "s64") or
+        std.mem.eql(u8, text, "s32") or
+        std.mem.eql(u8, text, "s16") or
+        std.mem.eql(u8, text, "s8") or
+        std.mem.eql(u8, text, "u64") or
+        std.mem.eql(u8, text, "u32") or
+        std.mem.eql(u8, text, "u16") or
+        std.mem.eql(u8, text, "u8");
 }
 
 fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !f64 {
