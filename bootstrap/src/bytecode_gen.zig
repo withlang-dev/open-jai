@@ -1552,7 +1552,10 @@ const GenContext = struct {
             allocator.free(inserted_ast.tokens);
             inserted_ast.deinit();
         }
-        var inserted_resolved = try resolve_mod.resolve(allocator, &inserted_ast, insert_diag, true);
+        var external_names = std.ArrayList([]const u8).empty;
+        defer external_names.deinit(allocator);
+        try ctx.collectExternalInsertNames(&external_names);
+        var inserted_resolved = try resolve_mod.resolve(allocator, &inserted_ast, insert_diag, true, external_names.items);
         defer inserted_resolved.deinit();
         const main_proc = inserted_resolved.main_proc orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "generated #insert code did not contain a main block", .{});
         var child_ctx = GenContext{
@@ -1579,7 +1582,8 @@ const GenContext = struct {
         const decls = ast.extraSlice(ast.data(ast.root).lhs);
         for (decls) |decl_idx| {
             const decl: NodeIndex = @intCast(decl_idx);
-            if (decl == ctx.current_proc_node or decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
+            if (decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
+            if (decl == ctx.current_proc_node and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(decl)), "main")) continue;
             if ((procHasExpandModifierLocal(ast, decl) and !procHasReturnValue(ast, decl)) or procContainsCompileTimeOnlyCompilerApi(ast, decl)) continue;
             try out.appendSlice(ctx.program.allocator, topLevelDeclSourceText(ast, decl));
             try out.appendSlice(ctx.program.allocator, "\n");
@@ -1620,7 +1624,10 @@ const GenContext = struct {
             allocator.free(inserted_ast.tokens);
             inserted_ast.deinit();
         }
-        var inserted_resolved = try resolve_mod.resolve(allocator, &inserted_ast, insert_diag, false);
+        var external_names = std.ArrayList([]const u8).empty;
+        defer external_names.deinit(allocator);
+        try ctx.collectExternalInsertNames(&external_names);
+        var inserted_resolved = try resolve_mod.resolve(allocator, &inserted_ast, insert_diag, false, external_names.items);
         defer inserted_resolved.deinit();
         const main_proc = inserted_resolved.main_proc orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "generated #insert expression did not contain a main block", .{});
         const block = inserted_ast.data(main_proc).lhs;
@@ -1677,7 +1684,10 @@ const GenContext = struct {
             allocator.free(code_ast.tokens);
             code_ast.deinit();
         }
-        var code_resolved = try resolve_mod.resolve(allocator, &code_ast, type_diag, false);
+        var external_names = std.ArrayList([]const u8).empty;
+        defer external_names.deinit(allocator);
+        try ctx.collectExternalInsertNames(&external_names);
+        var code_resolved = try resolve_mod.resolve(allocator, &code_ast, type_diag, false, external_names.items);
         defer code_resolved.deinit();
         const main_proc = code_resolved.main_proc orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code.type could not wrap captured code as an expression", .{});
         const block = code_ast.data(main_proc).lhs;
@@ -1785,6 +1795,58 @@ const GenContext = struct {
                     if (typeTextForDecl(ctx, param, diag)) |ty| {
                         try child.external_types.put(child.program.allocator, name, ty);
                     }
+                }
+            }
+        }
+    }
+
+    fn collectExternalInsertNames(ctx: *GenContext, out: *std.ArrayList([]const u8)) !void {
+        var inherited_regs = ctx.external_registers.iterator();
+        while (inherited_regs.next()) |entry| try out.append(ctx.program.allocator, entry.key_ptr.*);
+
+        if (ctx.ast.root != @import("Ast.zig").null_node) {
+            for (ctx.ast.extraSlice(ctx.ast.data(ctx.ast.root).lhs)) |decl_idx| {
+                const decl: NodeIndex = @intCast(decl_idx);
+                if (decl >= ctx.ast.node_tags.items.len) continue;
+                switch (ctx.ast.tag(decl)) {
+                    .var_decl, .const_decl, .proc_decl, .placeholder_decl => {
+                        try out.append(ctx.program.allocator, externalNameForSourceName(ctx.ast.tokenSlice(ctx.ast.mainToken(decl))));
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        var it = ctx.decl_registers.iterator();
+        while (it.next()) |entry| {
+            const decl = entry.key_ptr.*;
+            if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
+            switch (ctx.ast.tag(decl)) {
+                .var_decl, .const_decl, .placeholder_decl => {
+                    try out.append(ctx.program.allocator, externalNameForSourceName(ctx.ast.tokenSlice(ctx.ast.mainToken(decl))));
+                },
+                .for_stmt => {
+                    const range = ctx.ast.extraSlice(ctx.ast.data(decl).lhs);
+                    if (forStmtIteratorName(ctx.ast, range)) |iterator_name| {
+                        try out.append(ctx.program.allocator, externalNameForSourceName(iterator_name));
+                        if (ctx.for_expansion_it_alias) |alias| try out.append(ctx.program.allocator, alias);
+                    }
+                    if (forStmtIndexName(ctx.ast, range)) |index_name| {
+                        try out.append(ctx.program.allocator, externalNameForSourceName(index_name));
+                        if (ctx.for_expansion_index_alias) |alias| try out.append(ctx.program.allocator, alias);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        if (ctx.current_proc_node != @import("Ast.zig").null_node and ctx.current_proc_node < ctx.ast.node_tags.items.len) {
+            if (procSignature(ctx.ast, ctx.current_proc_node)) |sig| {
+                const params = ctx.ast.extraSlice(sig.params_extra);
+                for (params) |param_idx| {
+                    const param: NodeIndex = @intCast(param_idx);
+                    if (ctx.decl_registers.get(param) == null) continue;
+                    try out.append(ctx.program.allocator, externalNameForSourceName(ctx.ast.tokenSlice(ctx.ast.mainToken(param))));
                 }
             }
         }
@@ -8532,7 +8594,7 @@ test "Phase 2 xx autocast lowers to integer trunc cast" {
         ast.deinit();
     }
 
-    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     var ip = try InternPool.init(std.testing.allocator);
@@ -8571,7 +8633,7 @@ test "Phase 1 hello sailor lowers to expected bytecode flow" {
         ast.deinit();
     }
 
-    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     var ip = try InternPool.init(std.testing.allocator);
@@ -8614,7 +8676,7 @@ test "compiler_write_file lowers to file write bytecode" {
         ast.deinit();
     }
 
-    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     var ip = try InternPool.init(std.testing.allocator);
@@ -8656,7 +8718,7 @@ test "push_context emits the nested block body" {
         ast.deinit();
     }
 
-    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     var ip = try InternPool.init(std.testing.allocator);

@@ -117,6 +117,7 @@ pub const Resolved = struct {
     using_fallbacks: std.ArrayListUnmanaged(NodeIndex) = .empty,
     owned_names: std.ArrayList([]u8) = .empty,
     proc_overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(NodeIndex)) = .empty,
+    external_names: std.StringHashMapUnmanaged(void) = .empty,
     imports_basic: bool = false,
     main_proc: ?NodeIndex = null,
     require_main: bool = true,
@@ -127,6 +128,7 @@ pub const Resolved = struct {
         r.proc_overloads.deinit(r.allocator);
         r.used_implicit_placeholders.deinit(r.allocator);
         r.implicit_placeholders.deinit(r.allocator);
+        r.external_names.deinit(r.allocator);
         r.symbols.deinit(r.allocator);
         r.local_values.deinit(r.allocator);
         r.loop_value_types.deinit(r.allocator);
@@ -349,9 +351,10 @@ fn putCompilerModuleSymbols(r: *Resolved) !void {
     }
 }
 
-pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool) !Resolved {
+pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool, external_names: []const []const u8) !Resolved {
     var r = Resolved{ .allocator = allocator, .require_main = require_main };
     errdefer r.deinit();
+    for (external_names) |name| try r.external_names.put(allocator, name, {});
     try r.symbols.put(allocator, "print", .builtin_print);
     try r.symbols.put(allocator, "write_string", .builtin_write_string);
     try r.symbols.put(allocator, "write_strings", .builtin_write_strings);
@@ -1231,10 +1234,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             if (ast.tag(ast.data(node).lhs) == .identifier) {
                 const callee_name = ast.tokenSlice(ast.mainToken(ast.data(node).lhs));
                 if (r.lookup(callee_name) == null) {
-                    if (std.mem.indexOfScalar(u8, callee_name, '_') != null) {
-                        // Procedure-value call targets such as p_ptr are resolved in sema
-                        // through local_values after their declaration is in scope.
-                    } else try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
+                    try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
                 } else try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
             } else try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
             for (ast.extraSlice(ast.data(node).rhs)) |arg_idx| {
@@ -1277,8 +1277,10 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
             } else if (isMacroGeneratedIdentifier(name)) {
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
-            } else {
+            } else if (r.external_names.contains(name)) {
                 try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
+            } else {
+                return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unresolved identifier '{s}'", .{name});
             }
         },
         // Bare block: anonymous scope — resolve all statements inside.
@@ -1324,7 +1326,7 @@ test "scope_export restores non-file visibility after #scope_file" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     try std.testing.expect(resolved.lookup("hidden") == null);
@@ -1351,7 +1353,7 @@ test "resolver treats Process shutdown as a real symbol" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     const shutdown = resolved.lookup("shutdown") orelse return error.TestUnexpectedResult;
@@ -1379,7 +1381,7 @@ test "resolver allows explicit placeholder declarations under strict gate" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
@@ -1406,7 +1408,7 @@ test "resolver lets real declarations replace implicit placeholders" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
@@ -1433,7 +1435,7 @@ test "resolver treats OS as a real compiler-provided value" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true);
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
     defer resolved.deinit();
 
     try std.testing.expect(!resolved.implicit_placeholders.contains("OS"));

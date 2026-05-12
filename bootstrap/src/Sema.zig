@@ -595,10 +595,6 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         break :blk Type.init(InternPool.well_known.s64_type);
                     }
                 }
-                if (std.mem.indexOfScalar(u8, name, '_') != null) {
-                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
-                    break :blk Type.init(InternPool.well_known.any_type);
-                }
                 return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "unresolved identifier '{s}'", .{name});
             };
             if (try compilerIntrinsicReturnType(ast, name, diag)) |return_ty| {

@@ -120,7 +120,7 @@ pub const Compilation = struct {
             }
 
             const require_main = !comp.options.check_only and !hasTopLevelExecutableRun(&ast);
-            var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main);
+            var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main, &.{});
             defer resolved.deinit();
             try resolved.failIfImplicitPlaceholders(diag);
 
