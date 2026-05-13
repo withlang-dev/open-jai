@@ -25,3 +25,7 @@ typechecked_subexpressions_drive_compiler_reports :: () {
 workspace_failed_status_reaches_complete_message :: () {
     expect_compile_output("test/examples/workspace/workspace_failed_status_value.jai", "post failed:true linker:1\ncomplete error:1\n");
 } @TestProcedure
+
+custom_link_command_phase_waits_for_completion_signal :: () {
+    expect_compile_output("test/examples/workspace/custom_link_command_value.jai", "ready:custom-app\npost:custom-app\ncomplete:custom-app error:0\n");
+} @TestProcedure

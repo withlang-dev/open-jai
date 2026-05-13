@@ -5094,6 +5094,13 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_set_workspace_status, .dest = reg, .arg1 = status, .source_node = expr });
             return reg;
         }
+        if (std.mem.eql(u8, name, "compiler_custom_link_command_is_complete")) {
+            if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_custom_link_command_is_complete expects no arguments", .{});
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_custom_link_complete, .dest = reg, .source_node = expr });
+            return reg;
+        }
         if (std.mem.eql(u8, name, "compiler_report")) {
             if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_report expects a message and optional Source_Code_Location", .{});
             const message = try ctx.genExpr(@intCast(args[0]), diag);
@@ -6992,7 +6999,8 @@ fn buildOptionsFieldType(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "write_added_strings") or
         std.mem.eql(u8, name, "stack_trace") or
         std.mem.eql(u8, name, "enable_bytecode_inliner") or
-        std.mem.eql(u8, name, "runtime_storageless_type_info"))
+        std.mem.eql(u8, name, "runtime_storageless_type_info") or
+        std.mem.eql(u8, name, "use_custom_link_command"))
     {
         return "bool";
     }
@@ -7043,7 +7051,8 @@ fn isCompilerMessageEnumName(name: []const u8) bool {
 fn isCompilerPhaseEnumName(name: []const u8) bool {
     return std.mem.eql(u8, name, "TYPECHECKED_ALL_WE_CAN") or
         std.mem.eql(u8, name, "PRE_WRITE_EXECUTABLE") or
-        std.mem.eql(u8, name, "POST_WRITE_EXECUTABLE");
+        std.mem.eql(u8, name, "POST_WRITE_EXECUTABLE") or
+        std.mem.eql(u8, name, "READY_FOR_CUSTOM_LINK_COMMAND");
 }
 
 fn isBindingOptionField(name: []const u8) bool {

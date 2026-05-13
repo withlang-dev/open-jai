@@ -141,6 +141,7 @@ const BuildOptions = struct {
     null_pointer_check: []const u8 = "ON",
     enable_bytecode_inliner: bool = false,
     runtime_storageless_type_info: bool = false,
+    use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
     import_path: ?usize = null,
     compile_time_command_line: ?usize = null,
@@ -1238,6 +1239,11 @@ pub const VM = struct {
                     try vm.setWorkspaceStatus(status, diag);
                     regs[inst.dest] = .{ .bool = true };
                 },
+                .host_custom_link_complete => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM compiler_custom_link_command_is_complete register out of range", .{});
+                    try vm.hostCustomLinkCommandComplete(diag);
+                    regs[inst.dest] = .{ .bool = true };
+                },
                 .build_options_get_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Build_Options field access out of range", .{});
                     const index = switch (regs[inst.arg1]) {
@@ -1766,6 +1772,23 @@ pub const VM = struct {
         return vm.workspace_status.get(workspace) orelse 0;
     }
 
+    fn workspaceBuildOptions(vm: *VM, workspace: i64) ?BuildOptions {
+        const index = vm.workspace_build_options.get(workspace) orelse return null;
+        if (index >= vm.build_options.items.len) return null;
+        return vm.build_options.items[index];
+    }
+
+    fn workspaceExecutableName(vm: *VM, workspace: i64) []const u8 {
+        const options = vm.workspaceBuildOptions(workspace) orelse return "program";
+        if (options.output_executable_name.len == 0) return "program";
+        return options.output_executable_name;
+    }
+
+    fn workspaceUsesCustomLinkCommand(vm: *VM, workspace: i64) bool {
+        const options = vm.workspaceBuildOptions(workspace) orelse return false;
+        return options.use_custom_link_command;
+    }
+
     fn appendCompilerMessage(vm: *VM, message: CompilerMessage) !void {
         const index = vm.compiler_messages.items.len;
         try vm.compiler_messages.append(vm.allocator, message);
@@ -1803,10 +1826,25 @@ pub const VM = struct {
         try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
         try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = vm.workspaceErrorCode(workspace) });
+        if (vm.workspaceUsesCustomLinkCommand(workspace)) {
+            try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "READY_FOR_CUSTOM_LINK_COMMAND", .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = vm.workspaceErrorCode(workspace) });
+        } else {
+            try vm.appendWorkspaceCompletionMessages(workspace);
+        }
+    }
+
+    fn appendWorkspaceCompletionMessages(vm: *VM, workspace: i64) !void {
         const error_code = vm.workspaceErrorCode(workspace);
-        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = error_code });
-        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .executable_write_failed = error_code != 0, .linker_exit_code = error_code });
-        try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = error_code, .error_code = error_code });
+        const executable_name = vm.workspaceExecutableName(workspace);
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = executable_name, .executable_write_failed = error_code != 0, .linker_exit_code = error_code });
+        try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = executable_name, .linker_exit_code = error_code, .error_code = error_code });
+    }
+
+    fn hostCustomLinkCommandComplete(vm: *VM, diag: Diagnostic) !void {
+        const workspace = vm.intercepted_workspace;
+        if (workspace <= 0) return diag.failAt(0, "compiler_custom_link_command_is_complete requires an intercepted workspace", .{});
+        try vm.appendWorkspaceCompletionMessages(workspace);
     }
 
     fn appendWorkspaceDeclarations(vm: *VM, path: []const u8, source: []const u8, parent_diag: Diagnostic) !usize {
@@ -2147,6 +2185,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "null_pointer_check")) return .{ .string = options.null_pointer_check };
         if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
+        if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
         if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = index };
         if (std.mem.eql(u8, field_name, "import_path")) return .{ .ptr = try vm.buildOptionsImportPath(index, diag) };
         if (std.mem.eql(u8, field_name, "compile_time_command_line")) return .{ .ptr = try vm.buildOptionsCommandLine(index, diag) };
@@ -2289,6 +2328,10 @@ pub const VM = struct {
         }
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) {
             options.runtime_storageless_type_info = try registerTruthy(value, diag, "Build_Options.runtime_storageless_type_info");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "use_custom_link_command")) {
+            options.use_custom_link_command = try registerTruthy(value, diag, "Build_Options.use_custom_link_command");
             return;
         }
         if (std.mem.eql(u8, field_name, "import_path")) {
@@ -3547,8 +3590,8 @@ pub const VM = struct {
         const options = vm.build_options.items[index];
         const prefix = try std.fmt.allocPrint(
             vm.allocator,
-            "{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; intermediate_path = \"{s}\"; write_added_strings = {s}; stack_trace = {s}; backtrace_on_crash = {s}; array_bounds_check = {s}; cast_bounds_check = {s}; null_pointer_check = {s}; enable_bytecode_inliner = {s}; runtime_storageless_type_info = {s}; import_path = ",
-            .{ options.output_type, options.backend, options.output_executable_name, options.output_path, options.intermediate_path, if (options.write_added_strings) "true" else "false", if (options.stack_trace) "true" else "false", options.backtrace_on_crash, options.array_bounds_check, options.cast_bounds_check, options.null_pointer_check, if (options.enable_bytecode_inliner) "true" else "false", if (options.runtime_storageless_type_info) "true" else "false" },
+            "{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; intermediate_path = \"{s}\"; write_added_strings = {s}; stack_trace = {s}; backtrace_on_crash = {s}; array_bounds_check = {s}; cast_bounds_check = {s}; null_pointer_check = {s}; enable_bytecode_inliner = {s}; runtime_storageless_type_info = {s}; use_custom_link_command = {s}; import_path = ",
+            .{ options.output_type, options.backend, options.output_executable_name, options.output_path, options.intermediate_path, if (options.write_added_strings) "true" else "false", if (options.stack_trace) "true" else "false", options.backtrace_on_crash, options.array_bounds_check, options.cast_bounds_check, options.null_pointer_check, if (options.enable_bytecode_inliner) "true" else "false", if (options.runtime_storageless_type_info) "true" else "false", if (options.use_custom_link_command) "true" else "false" },
         );
         defer vm.allocator.free(prefix);
         try builder.appendSlice(vm.allocator, prefix);

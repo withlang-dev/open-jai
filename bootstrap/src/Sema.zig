@@ -1554,6 +1554,7 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "compiler_begin_intercept") or
         std.mem.eql(u8, name, "compiler_end_intercept") or
         std.mem.eql(u8, name, "compiler_set_workspace_status") or
+        std.mem.eql(u8, name, "compiler_custom_link_command_is_complete") or
         std.mem.eql(u8, name, "compiler_report") or
         std.mem.eql(u8, name, "do_error_checking") or
         std.mem.eql(u8, name, "log_error") or

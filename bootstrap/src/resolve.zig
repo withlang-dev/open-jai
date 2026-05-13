@@ -370,6 +370,7 @@ fn putCompilerModuleSymbols(r: *Resolved) !void {
         "Optimization_Type",
         "Message_Complete",
         "compiler_set_workspace_status",
+        "compiler_custom_link_command_is_complete",
         "compiler_report",
         "make_location",
         "add_global_data",
