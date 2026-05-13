@@ -105,6 +105,10 @@ pointer_to_struct_output :: () {
     expect_program_output_contains("examples/12/12.5_pointer_to_struct.jai", "e's value is: {349825645}\n");
 } @TestProcedure
 
+as_using_output :: () {
+    expect_program_output("examples/12/12.6_#as_using.jai", "{{\"Gates\"}, \"software engineer\"}\n{\"Gates\"}\nnum is {42, 3.1415}\ni is 42\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
