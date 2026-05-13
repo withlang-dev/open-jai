@@ -127,7 +127,10 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
             emitted_target = true;
         }
     }
-    if (!emitted_target) return generateProcInternal(allocator, ast, resolved, typed, proc_node, call_expr, diag, call_args.len);
+    if (!emitted_target) {
+        program.deinit();
+        return generateProcInternal(allocator, ast, resolved, typed, proc_node, call_expr, diag, call_args.len);
+    }
     return program;
 }
 
