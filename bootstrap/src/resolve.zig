@@ -702,7 +702,17 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "load_font",         "draw_text",
                         });
                     } else if (std.mem.eql(u8, module_name, "GL")) {
-                        try putExternalSymbols(&r, &.{ "gl", "gl_load", "glTexParameteri", "glGetString", "GL_VENDOR" });
+                        try putExternalSymbols(&r, &.{
+                            "gl",
+                            "gl_load",
+                            "glTexParameteri",
+                            "glGetString",
+                            "glViewport",
+                            "glClearColor",
+                            "glClear",
+                            "GL_VENDOR",
+                            "GL_COLOR_BUFFER_BIT",
+                        });
                     } else if (std.mem.eql(u8, module_name, "GetRect")) {
                         try putExternalSymbols(&r, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
@@ -1084,6 +1094,18 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 try putCompilerModuleSymbols(r);
             } else if (std.mem.eql(u8, module_name, "Debug")) {
                 try putExternalSymbols(r, &.{ "init", "attach_to_debugger", "breakpoint" });
+            } else if (std.mem.eql(u8, module_name, "GL")) {
+                try putExternalSymbols(r, &.{
+                    "gl",
+                    "gl_load",
+                    "glTexParameteri",
+                    "glGetString",
+                    "glViewport",
+                    "glClearColor",
+                    "glClear",
+                    "GL_VENDOR",
+                    "GL_COLOR_BUFFER_BIT",
+                });
             } else if (std.mem.eql(u8, module_name, "String")) {
                 try r.symbols.put(r.allocator, "to_upper", .builtin_to_upper);
                 try r.symbols.put(r.allocator, "to_lower", .builtin_to_lower);
@@ -1318,7 +1340,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 // e.g. type_of(n) == int. Leave them for Sema/codegen as identifiers.
             } else if (name.len != 0 and std.ascii.isUpper(name[0])) {
                 try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
-            } else if (isMacroGeneratedIdentifier(name)) {
+            } else if (isBacktickedIdentifier(ast, node) or isMacroGeneratedIdentifier(name)) {
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
             } else if (r.external_names.contains(name)) {
                 try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
@@ -1342,6 +1364,13 @@ fn isMacroGeneratedIdentifier(name: []const u8) bool {
         std.mem.eql(u8, name, "a") or
         std.mem.eql(u8, name, "b") or
         std.mem.eql(u8, name, "c");
+}
+
+fn isBacktickedIdentifier(ast: *const Ast, node: NodeIndex) bool {
+    if (ast.tag(node) != .identifier) return false;
+    const tok = ast.mainToken(node);
+    const start = ast.tokens[tok].start;
+    return start > 0 and ast.source[start - 1] == '`';
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
