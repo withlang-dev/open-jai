@@ -4686,11 +4686,7 @@ const GenContext = struct {
                 if (!std.mem.eql(u8, name, "print") and !std.mem.eql(u8, name, "log")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     var is_user_proc_call = false;
-                    if (ctx.resolved.local_values.get(callee)) |decl| {
-                        is_user_proc_call = decl != @import("Ast.zig").null_node and (ast.tag(decl) == .proc_decl or
-                            (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).rhs) == .proc_decl) or
-                            (ast.tag(decl) == .var_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).lhs) == .proc_type));
-                    }
+                    if (ctx.resolved.local_values.get(callee)) |decl| is_user_proc_call = ctx.localDeclIsProcedureCallable(decl);
                     if (!is_user_proc_call and ctx.resolved.overloads(name) != null) {
                         is_user_proc_call = true;
                     }
@@ -5658,6 +5654,21 @@ const GenContext = struct {
         _ = ctx;
         if (node == @import("Ast.zig").null_node or node >= typed.node_types.len) return null;
         return typeIdFromType(typed.typeOf(node));
+    }
+
+    fn localDeclIsProcedureCallable(ctx: *GenContext, decl: NodeIndex) bool {
+        const ast = ctx.ast;
+        if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return false;
+        if (ast.tag(decl) == .proc_decl) return true;
+        if (ast.tag(decl) != .var_decl) return false;
+        if (ast.data(decl).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).rhs) == .proc_decl) return true;
+        const type_node = ast.data(decl).lhs;
+        if (type_node == @import("Ast.zig").null_node or type_node >= ast.node_tags.items.len) return false;
+        if (ast.tag(type_node) == .proc_type) return true;
+        if (ast.tag(type_node) == .identifier) {
+            if (ctx.typed) |typed| return typed.proc_type_aliases.contains(ast.tokenSlice(ast.mainToken(type_node)));
+        }
+        return false;
     }
 
     fn isTopLevelVarDecl(ctx: *GenContext, decl: NodeIndex) bool {

@@ -18,6 +18,7 @@ pub const Typed = struct {
     allocator: std.mem.Allocator,
     node_types: []Type,
     type_aliases: std.StringHashMapUnmanaged(Type) = .empty,
+    proc_type_aliases: std.StringHashMapUnmanaged(void) = .empty,
     inferred_param_types: std.AutoHashMapUnmanaged(NodeIndex, Type) = .empty,
     comptime_ints: std.AutoHashMapUnmanaged(NodeIndex, i64) = .empty,
     comptime_floats: std.AutoHashMapUnmanaged(NodeIndex, f64) = .empty,
@@ -29,6 +30,7 @@ pub const Typed = struct {
 
     pub fn deinit(t: *Typed) void {
         t.type_aliases.deinit(t.allocator);
+        t.proc_type_aliases.deinit(t.allocator);
         t.inferred_param_types.deinit(t.allocator);
         t.comptime_ints.deinit(t.allocator);
         t.comptime_floats.deinit(t.allocator);
@@ -111,10 +113,11 @@ fn collectTypeAliases(ast: *const Ast, typed: *Typed, stmts_extra: u32, diag: Di
         const stmt: NodeIndex = @intCast(stmt_idx);
         if (ast.tag(stmt) == .stmt_list) {
             try collectTypeAliases(ast, typed, ast.data(stmt).lhs, diag);
-        } else if (ast.tag(stmt) == .const_decl and (ast.tag(ast.data(stmt).lhs) == .type_expr or ast.tag(ast.data(stmt).lhs) == .struct_type or ast.tag(ast.data(stmt).lhs) == .union_type or ast.tag(ast.data(stmt).lhs) == .enum_type or ast.tag(ast.data(stmt).lhs) == .array_type)) {
+        } else if (ast.tag(stmt) == .const_decl and (ast.tag(ast.data(stmt).lhs) == .type_expr or ast.tag(ast.data(stmt).lhs) == .struct_type or ast.tag(ast.data(stmt).lhs) == .union_type or ast.tag(ast.data(stmt).lhs) == .enum_type or ast.tag(ast.data(stmt).lhs) == .array_type or ast.tag(ast.data(stmt).lhs) == .proc_type)) {
             const name = ast.tokenSlice(ast.mainToken(stmt));
             const ty = try typeFromTypeExprWithAliases(ast, typed, ast.data(stmt).lhs, diag);
             try typed.type_aliases.put(typed.allocator, name, ty);
+            if (ty.isProcedure()) try typed.proc_type_aliases.put(typed.allocator, name, {});
             typed.node_types[stmt] = Type.init(InternPool.well_known.type_type);
             typed.node_types[ast.data(stmt).lhs] = Type.init(InternPool.well_known.type_type);
         }
@@ -601,9 +604,10 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.any_type);
                     }
-                    if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).lhs) and ast.tag(ast.data(decl).lhs) == .proc_type) {
+                    if (try varDeclHasProcedureType(ast, typed, decl, diag)) {
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
-                        break :blk Type.init(InternPool.well_known.s64_type);
+                        const proc_ty = try typeFromTypeExprWithAliases(ast, typed, ast.data(decl).lhs, diag);
+                        break :blk try procedureTypeReturnType(ast, typed, proc_ty, diag);
                     }
                 }
                 return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "unresolved identifier '{s}'", .{name});
@@ -1597,4 +1601,26 @@ fn internProcType(ast: *const Ast, proc_type: NodeIndex, diag: Diagnostic) !@imp
     const ip = active_ip orelse return diag.failAt(0, "internal error: procedure type interning without InternPool", .{});
     _ = ast;
     return ip.internProcType(proc_type);
+}
+
+fn varDeclHasProcedureType(ast: *const Ast, typed: *Typed, decl: NodeIndex, diag: Diagnostic) !bool {
+    if (!isValidNode(ast, decl) or ast.tag(decl) != .var_decl) return false;
+    const type_node = ast.data(decl).lhs;
+    if (type_node == @import("Ast.zig").null_node or !isValidNode(ast, type_node)) return false;
+    if (ast.tag(type_node) == .proc_type) return true;
+    return (try typeFromTypeExprWithAliases(ast, typed, type_node, diag)).isProcedure();
+}
+
+fn procedureTypeReturnType(ast: *const Ast, typed: *Typed, proc_ty: Type, diag: Diagnostic) !Type {
+    const ip = active_ip orelse return diag.failAt(0, "internal error: procedure type query without InternPool", .{});
+    return switch (ip.key(proc_ty.index)) {
+        .type_proc => |proc| blk: {
+            const proc_type_node: NodeIndex = proc.sig_node;
+            if (!isValidNode(ast, proc_type_node) or ast.tag(proc_type_node) != .proc_type) break :blk Type.init(InternPool.well_known.any_type);
+            const ret = ast.data(proc_type_node).rhs;
+            if (ret == @import("Ast.zig").null_node) break :blk Type.voidType();
+            break :blk try typeFromTypeExprWithAliases(ast, typed, ret, diag);
+        },
+        else => Type.init(InternPool.well_known.any_type),
+    };
 }
