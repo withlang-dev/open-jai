@@ -89,3 +89,7 @@ input_module_import_loads_real_source_and_event_defaults_work :: () {
 window_creation_module_import_loads_real_source_and_tracks_dimensions :: () {
     expect_compile_output("test/examples/modules/window_creation_module_import_value.jai", "window:1 2 800 600 320 240 0 0\n");
 } @TestProcedure
+
+simp_module_import_loads_real_source_and_tracks_render_state :: () {
+    expect_compile_output("test/examples/modules/simp_module_import_value.jai", "simp:true 1 32 32 true 24 42 false 1 1\n");
+} @TestProcedure

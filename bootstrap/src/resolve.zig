@@ -602,8 +602,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "Simp") or
-                    std.mem.eql(u8, module_name, "GL") or
+                } else if (std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
                     std.mem.eql(u8, module_name, "Pool") or
                     std.mem.eql(u8, module_name, "Flat_Pool") or
@@ -615,13 +614,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Simp")) {
-                        try putExternalSymbols(&r, &.{
-                            "get_font_at_size",  "texture_load_from_file", "gl_load",               "DrawTexturePro",  "immediate_quad",  "gl",
-                            "set_render_target", "set_shader_for_color",   "clear_render_target",   "swap_buffers",    "update_window",   "immediate_triangle",
-                            "load_font",         "draw_text",              "set_shader_for_images", "immediate_begin", "immediate_flush",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "GL")) {
+                    if (std.mem.eql(u8, module_name, "GL")) {
                         try putExternalSymbols(&r, &.{
                             "gl",
                             "gl_load",
