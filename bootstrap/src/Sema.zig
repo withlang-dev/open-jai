@@ -597,6 +597,17 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).rhs) and ast.tag(ast.data(decl).rhs) == .proc_decl) {
                     return try analyzeProcCall(ast, resolved, typed, ast.data(decl).rhs, args, diag, node);
                 }
+                if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl) {
+                    const callee_ty = try analyzeNode(ast, resolved, typed, callee, diag);
+                    if (callee_ty.isAny()) {
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                        break :blk Type.init(InternPool.well_known.any_type);
+                    }
+                    if (callee_ty.isProcedure()) {
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                        break :blk try procedureTypeReturnType(ast, typed, callee_ty, diag);
+                    }
+                }
             }
             const sym = resolved.lookup(name) orelse {
                 if (resolved.local_values.get(callee)) |decl| {
@@ -1655,4 +1666,39 @@ fn procedureTypeReturnType(ast: *const Ast, typed: *Typed, proc_ty: Type, diag: 
         },
         else => Type.init(InternPool.well_known.any_type),
     };
+}
+
+test "sema allows calling local values inferred as Any" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "funcs: [4] () -> int;\n" ++
+        "setup :: (theme: int) #expand {\n" ++
+        "  proc := funcs[theme];\n" ++
+        "  x := proc();\n" ++
+        "}\n" ++
+        "main :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "local_any_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
 }

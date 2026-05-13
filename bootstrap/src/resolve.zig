@@ -264,17 +264,6 @@ pub const Resolved = struct {
     }
 };
 
-fn putPlaceholder(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
-    if (!r.symbols.contains(name)) {
-        try r.symbols.put(allocator, name, .placeholder);
-        try r.implicit_placeholders.put(allocator, name, {});
-    }
-}
-
-fn putPlaceholders(r: *Resolved, allocator: std.mem.Allocator, names: []const []const u8) !void {
-    for (names) |name| try putPlaceholder(r, allocator, name);
-}
-
 fn putExternalSymbols(r: *Resolved, names: []const []const u8) !void {
     for (names) |name| try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
 }
@@ -506,13 +495,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "enum_range", .builtin_enum_range);
                     try r.symbols.put(allocator, "enum_values_as_s64", .builtin_enum_values_as_s64);
                     try r.symbols.put(allocator, "enum_names", .builtin_enum_names);
-                    try putPlaceholders(&r, allocator, &.{
-                        "append",                "sprint",            "to_c_string",         "to_string",
-                        "String_Builder",        "free_buffers",      "init_string_builder", "print_to_builder",
-                        "builder_string_length", "builder_to_string", "tprint",              "compare",
-                        "split",                 "read",              "release",             "start",
-                        "lock",                  "proc",
-                    });
                     try r.putRealSymbol("advance", .{ .const_value = @import("Ast.zig").null_node });
                     try r.putRealSymbol("log_error", .{ .const_value = @import("Ast.zig").null_node });
                     try putExternalSymbols(&r, &.{"get_mouse_pointer_position"});
@@ -582,15 +564,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                    try putPlaceholders(&r, allocator, &.{
-                        "compiler_get_version_info", "compiler_custom_link_command_is_complete",
-                        "Version_Info",
-                    });
-                } else if (std.mem.eql(u8, module_name, "Metaprogram_Plugins")) {
-                    try putPlaceholders(&r, allocator, &.{
-                        "Metaprogram_Plugin",     "Intercept_Flags",
-                        "parse_plugin_arguments", "init_plugins",
-                    });
                 } else if (std.mem.eql(u8, module_name, "System") or
                     std.mem.eql(u8, module_name, "Windows") or
                     std.mem.eql(u8, module_name, "Process") or
@@ -639,7 +612,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Process")) {
                         try r.putRealSymbol("run_command", .{ .const_value = @import("Ast.zig").null_node });
-                        try putPlaceholders(&r, allocator, &.{"read"});
                         for (&[_][]const u8{ "thread_is_done", "shutdown" }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
@@ -1579,6 +1551,35 @@ test "resolver does not globally seed compiler APIs as placeholders" {
     try std.testing.expect(!resolved.implicit_placeholders.contains("compiler_create_workspace"));
     try std.testing.expect(resolved.lookup("For_Flags") != null);
     try std.testing.expect(!resolved.implicit_placeholders.contains("For_Flags"));
+    try resolved.failIfImplicitPlaceholders(diag);
+}
+
+test "implemented module imports do not create implicit placeholders" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "#import \"Compiler\";\n" ++
+        "#import \"Process\";\n" ++
+        "main :: () { print(\"ok\\n\"); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "implemented_imports_no_placeholders.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), resolved.implicitPlaceholderCount());
+    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
     try resolved.failIfImplicitPlaceholders(diag);
 }
 
