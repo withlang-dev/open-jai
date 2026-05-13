@@ -9,3 +9,7 @@ local_module_alias_import_loads_real_source :: () {
 local_module_scope_file_keeps_private_helpers_private :: () {
     expect_compile_failure("test/examples/modules/module_private_import_value.jai", "unresolved identifier 'hidden_module_value'");
 } @TestProcedure
+
+commented_module_imports_do_not_load_source :: () {
+    expect_compile_failure("test/examples/modules/module_comment_import_value.jai", "unresolved identifier 'comment_only_value'");
+} @TestProcedure

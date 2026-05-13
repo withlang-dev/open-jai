@@ -10,6 +10,7 @@ const link_mod = @import("link.zig");
 const vm_mod = @import("vm.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const InternPool = @import("InternPool.zig").InternPool;
+const Tag = @import("Token.zig").Tag;
 
 pub const Options = struct {
     input_path: []const u8,
@@ -1162,7 +1163,7 @@ pub const Compilation = struct {
         defer out.deinit(comp.allocator);
         const dir = std.fs.path.dirname(path) orelse ".";
         var rest = source;
-        while (std.mem.indexOf(u8, rest, "#import \"")) |idx| {
+        while (try comp.nextDirectiveIndex(path, rest, .directive_import)) |idx| {
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
             const line = rest[idx .. idx + line_end];
             const name_start = idx + "#import \"".len;
@@ -1224,7 +1225,7 @@ pub const Compilation = struct {
                 continue;
             }
         }
-        while (std.mem.indexOf(u8, rest, "#load \"")) |idx| {
+        while (try comp.nextDirectiveIndex(path, rest, .directive_load)) |idx| {
             try out.appendSlice(comp.allocator, rest[0..idx]);
             const start = idx + "#load \"".len;
             const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse {
@@ -1251,6 +1252,16 @@ pub const Compilation = struct {
         }
         try out.appendSlice(comp.allocator, rest);
         return try out.toOwnedSlice(comp.allocator);
+    }
+
+    fn nextDirectiveIndex(comp: *Compilation, path: []const u8, source: []const u8, tag: Tag) !?usize {
+        const diag = Diagnostic.init(comp.allocator, path, source);
+        var tokens = try lexer.tokenize(comp.allocator, source, diag);
+        defer tokens.deinit(comp.allocator);
+        for (tokens.items(.tag), tokens.items(.start)) |token_tag, start| {
+            if (token_tag == tag) return start;
+        }
+        return null;
     }
 
     fn normalizeSpacedDirectives(comp: *Compilation, source: []const u8) ![]u8 {
