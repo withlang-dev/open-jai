@@ -45,3 +45,7 @@ program_print_module_import_loads_real_source_from_local_alias :: () {
 testscope_module_import_loads_real_source :: () {
     expect_program_output("test/examples/modules/testscope_module_import_value.jai", "42\n");
 } @TestProcedure
+
+check_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/check_module_import_value.jai", "check:true\n");
+} @TestProcedure
