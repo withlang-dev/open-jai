@@ -3907,6 +3907,24 @@ const GenContext = struct {
     fn emitContainerFieldDefaultValue(ctx: *GenContext, raw_default: []const u8, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const default_text = std.mem.trim(u8, raw_default, " \t\r\n");
         const type_name = firstTypeWord(std.mem.trim(u8, raw_type, " \t\r\n"));
+        if (isBareIdentifier(default_text)) {
+            if (ctx.polymorph_types.get(default_text)) |actual_value| {
+                const actual_type = try inferFieldTypeTextFromDefault(ctx, actual_value, diag);
+                return try ctx.emitContainerFieldDefaultValue(actual_value, actual_type, source_node, diag);
+            }
+            if (topLevelConstInitializerText(ctx, default_text)) |const_text| {
+                const const_type = try inferFieldTypeTextFromDefault(ctx, const_text, diag);
+                return try ctx.emitContainerFieldDefaultValue(const_text, const_type, source_node, diag);
+            }
+            if (ctx.resolved.lookup(default_text)) |sym| switch (sym) {
+                .const_value => |decl| {
+                    if (decl != @import("Ast.zig").null_node and decl < ctx.ast.node_tags.items.len and ctx.ast.tag(decl) == .const_decl) {
+                        return try ctx.genExpr(ctx.ast.data(decl).lhs, diag);
+                    }
+                },
+                else => {},
+            };
+        }
         if (std.mem.eql(u8, default_text, "true")) return try ctx.emitBool(source_node, true);
         if (std.mem.eql(u8, default_text, "false")) return try ctx.emitBool(source_node, false);
         if (std.mem.eql(u8, default_text, "null")) {
@@ -4048,17 +4066,17 @@ const GenContext = struct {
         var field_it = FieldSegmentIterator{ .source = body };
         while (field_it.next()) |segment| {
             const parsed = parseFieldSegment(segment) orelse continue;
+            const field_type = try parsedFieldTypeText(ctx, parsed, diag);
             var names_it = std.mem.splitScalar(u8, parsed.names_text, ',');
             while (names_it.next()) |raw_name| {
                 var name = std.mem.trim(u8, raw_name, " \t\r\n");
                 if (std.mem.startsWith(u8, name, "using")) name = std.mem.trim(u8, name[5..], " \t\r\n");
                 if (name.len == 0) continue;
-                try members.append(ctx.program.allocator, .{ .name = name, .type_name = parsed.type_text, .flags = 0 });
+                try members.append(ctx.program.allocator, .{ .name = name, .type_name = field_type, .flags = 0 });
             }
         }
         const tag: u32 = if (ctx.ast.tag(type_node) == .union_type) typeInfoTagValue("UNION").? else typeInfoTagValue("STRUCT").?;
         _ = try ctx.program.addTypeInfo(type_name, tag, members.items);
-        _ = diag;
     }
 
     fn typeInfoTypeNameForExpr(ctx: *GenContext, expr: NodeIndex) ?[]const u8 {
@@ -4096,7 +4114,8 @@ const GenContext = struct {
         while (field_it.next()) |segment| {
             const parsed = parseFieldSegment(segment) orelse continue;
             if (!parsed.is_as) continue;
-            const parent_name = firstTypeWord(stripPointerText(parsed.type_text));
+            const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+            const parent_name = firstTypeWord(stripPointerText(field_type));
             if (std.mem.eql(u8, parent_name, target_name)) return true;
             if (try ctx.typeHasAsSubclass(parent_name, target_name, diag)) return true;
         }
@@ -4817,6 +4836,12 @@ const GenContext = struct {
                         return try ctx.genExpr(lhs_call, diag);
                     }
                 }
+                if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text_for_param| {
+                    if (try containerParameterValueText(ctx, base_text_for_param, field_name)) |param_value| {
+                        const param_type = try inferFieldTypeTextFromDefault(ctx, param_value, diag);
+                        return try ctx.emitContainerFieldDefaultValue(param_value, param_type, expr, diag);
+                    }
+                }
                 if (try ctx.executeCodeNodeSnapshotField(ast.data(expr).lhs, field_name)) |value| {
                     if (!ctx.compile_time_host) {
                         return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Node fields from #run values are compile-time only", .{});
@@ -5413,7 +5438,8 @@ const GenContext = struct {
                             _ = try genCallArg(ctx, arg, diag);
                         }
                     }
-                    const elem_size = try typeTextSize(ctx, ctx.nodeSource(@intCast(args[0])), diag);
+                    const elem_type = ctx.nodeSource(@intCast(args[0]));
+                    const elem_size = try typeTextSize(ctx, elem_type, diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     if (allocator_reg) |alloc_reg| {
@@ -5421,6 +5447,9 @@ const GenContext = struct {
                         try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = alloc_reg, .source_node = expr });
                     } else {
                         try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap, .dest = reg, .arg1 = @intCast(@max(elem_size, 1)), .source_node = expr });
+                    }
+                    if (try typeTextIsEmbeddedStruct(ctx, elem_type, diag)) {
+                        try ctx.emitContainerGeneratedInitializers(reg, elem_type, expr, diag);
                     }
                     return reg;
                 }
@@ -8053,14 +8082,15 @@ fn asFieldInfoForConversion(ctx: *GenContext, source_type: []const u8, target_ty
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         var split = std.mem.splitScalar(u8, parsed.names_text, ',');
         while (split.next()) |_| {
             offset = alignForward(offset, field_align);
             if (parsed.is_as) {
-                if (typeTextsEquivalent(parsed.type_text, target_type)) return .{ .offset = offset, .type_text = parsed.type_text };
-                if (try asFieldInfoForConversion(ctx, parsed.type_text, target_type, diag)) |nested| {
+                if (typeTextsEquivalent(field_type, target_type)) return .{ .offset = offset, .type_text = field_type };
+                if (try asFieldInfoForConversion(ctx, field_type, target_type, diag)) |nested| {
                     return .{ .offset = offset + nested.offset, .type_text = nested.type_text };
                 }
             }
@@ -8490,6 +8520,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (staticArrayElementText(base_ty) != null) {
                 if (std.mem.eql(u8, field_name, "count")) return "int";
                 if (std.mem.eql(u8, field_name, "data")) return "*u8";
+            }
+            if (containerParameterValueText(ctx, base_ty, field_name) catch null) |param_value| {
+                return inferFieldTypeTextFromDefault(ctx, param_value, diag) catch null;
             }
             const info = fieldInfoFromTypeText(ctx, base_ty, field_name, diag) catch return null;
             return if (info) |actual| actual.type_text else null;
@@ -10111,8 +10144,9 @@ fn containerSizeFromBody(ctx: *GenContext, body: []const u8, diag: Diagnostic) a
     var max_align: u64 = 1;
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         max_align = @max(max_align, field_align);
         var n: u64 = 0;
         while (n < parsed.name_count) : (n += 1) {
@@ -10128,28 +10162,85 @@ fn bindContainerTypeArgs(ctx: *GenContext, raw_type: []const u8, type_node: Node
     errdefer restores.deinit(ctx.program.allocator);
 
     const clean = std.mem.trim(u8, stripPointerText(raw_type), " \t\r\n");
-    const open = std.mem.indexOfScalar(u8, clean, '(') orelse return restores;
-    const close = matchingParenIndex(clean, open) orelse return restores;
-    const args_text = clean[open + 1 .. close];
+    const args_text = blk: {
+        const open = std.mem.indexOfScalar(u8, clean, '(') orelse break :blk "";
+        const close = matchingParenIndex(clean, open) orelse break :blk "";
+        break :blk clean[open + 1 .. close];
+    };
 
     const params_text = containerTypeParameterText(ctx.ast, type_node) orelse return restores;
-    var arg_it = std.mem.splitScalar(u8, args_text, ',');
-    var param_it = std.mem.splitScalar(u8, params_text, ',');
-    while (param_it.next()) |raw_param| {
-        const raw_arg = arg_it.next() orelse break;
-        const colon = std.mem.indexOfScalar(u8, raw_param, ':') orelse raw_param.len;
-        var name = std.mem.trim(u8, raw_param[0..colon], " \t\r\n");
-        if (std.mem.startsWith(u8, name, "$")) name = std.mem.trim(u8, name[1..], " \t\r\n");
-        const value = std.mem.trim(u8, raw_arg, " \t\r\n");
-        if (name.len == 0 or value.len == 0) continue;
+    var param_index: usize = 0;
+    var param_cursor: usize = 0;
+    while (nextTopLevelCommaSegment(params_text, &param_cursor)) |raw_param| : (param_index += 1) {
+        const param = parseContainerParam(raw_param) orelse continue;
+        const value = explicitContainerArgValue(args_text, param.name, param_index) orelse param.default_text;
+        if (param.name.len == 0 or value.len == 0) continue;
         try restores.append(ctx.program.allocator, .{
-            .name = name,
-            .had_old = ctx.polymorph_types.contains(name),
-            .old = ctx.polymorph_types.get(name) orelse "",
+            .name = param.name,
+            .had_old = ctx.polymorph_types.contains(param.name),
+            .old = ctx.polymorph_types.get(param.name) orelse "",
         });
-        try ctx.polymorph_types.put(ctx.program.allocator, name, value);
+        try ctx.polymorph_types.put(ctx.program.allocator, param.name, value);
     }
     return restores;
+}
+
+const ContainerParam = struct {
+    name: []const u8,
+    default_text: []const u8 = "",
+};
+
+fn parseContainerParam(raw_param: []const u8) ?ContainerParam {
+    const clean = std.mem.trim(u8, raw_param, " \t\r\n");
+    if (clean.len == 0) return null;
+    const name_end = findTopLevelString(clean, ":=") orelse findTopLevelByte(clean, ':') orelse findTopLevelByte(clean, '=') orelse clean.len;
+    var name = std.mem.trim(u8, clean[0..name_end], " \t\r\n");
+    if (std.mem.startsWith(u8, name, "$")) name = std.mem.trim(u8, name[1..], " \t\r\n");
+    const default_text = blk: {
+        if (findTopLevelString(clean, ":=")) |pos| break :blk std.mem.trim(u8, clean[pos + 2 ..], " \t\r\n");
+        if (findTopLevelByte(clean, '=')) |pos| break :blk std.mem.trim(u8, clean[pos + 1 ..], " \t\r\n");
+        break :blk "";
+    };
+    if (name.len == 0) return null;
+    return .{ .name = name, .default_text = default_text };
+}
+
+fn explicitContainerArgValue(args_text: []const u8, param_name: []const u8, positional_index: usize) ?[]const u8 {
+    var cursor: usize = 0;
+    var positional_seen: usize = 0;
+    while (nextTopLevelCommaSegment(args_text, &cursor)) |raw_arg| {
+        const arg = std.mem.trim(u8, raw_arg, " \t\r\n");
+        if (arg.len == 0) continue;
+        if (findTopLevelByte(arg, '=')) |eq| {
+            const name = std.mem.trim(u8, arg[0..eq], " \t\r\n");
+            if (std.mem.eql(u8, name, param_name)) return std.mem.trim(u8, arg[eq + 1 ..], " \t\r\n");
+            continue;
+        }
+        if (positional_seen == positional_index) return arg;
+        positional_seen += 1;
+    }
+    return null;
+}
+
+fn containerParameterValueText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8) !?[]const u8 {
+    const type_name = firstTypeWord(stripPointerText(raw_type));
+    if (type_name.len == 0) return null;
+    const type_node = try structTypeNodeByName(ctx, type_name) orelse return null;
+    const params_text = containerTypeParameterText(ctx.ast, type_node) orelse return null;
+    const clean = std.mem.trim(u8, stripPointerText(raw_type), " \t\r\n");
+    const args_text = blk: {
+        const open = std.mem.indexOfScalar(u8, clean, '(') orelse break :blk "";
+        const close = matchingParenIndex(clean, open) orelse break :blk "";
+        break :blk clean[open + 1 .. close];
+    };
+    var param_index: usize = 0;
+    var cursor: usize = 0;
+    while (nextTopLevelCommaSegment(params_text, &cursor)) |raw_param| : (param_index += 1) {
+        const param = parseContainerParam(raw_param) orelse continue;
+        if (!std.mem.eql(u8, param.name, field_name)) continue;
+        return explicitContainerArgValue(args_text, param.name, param_index) orelse param.default_text;
+    }
+    return null;
 }
 
 fn restoreContainerTypeArgs(ctx: *GenContext, restores: []const TypeArgRestore) !void {
@@ -10169,8 +10260,21 @@ fn matchingParenIndex(text: []const u8, open: usize) ?usize {
     if (open >= text.len or text[open] != '(') return null;
     var depth: usize = 0;
     var i = open;
+    var in_string = false;
+    var escaped = false;
     while (i < text.len) : (i += 1) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (text[i] == '\\') {
+                escaped = true;
+            } else if (text[i] == '"') {
+                in_string = false;
+            }
+            continue;
+        }
         switch (text[i]) {
+            '"' => in_string = true,
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
@@ -10180,6 +10284,113 @@ fn matchingParenIndex(text: []const u8, open: usize) ?usize {
         }
     }
     return null;
+}
+
+fn nextTopLevelCommaSegment(text: []const u8, cursor: *usize) ?[]const u8 {
+    if (cursor.* > text.len) return null;
+    while (cursor.* < text.len and std.ascii.isWhitespace(text[cursor.*])) cursor.* += 1;
+    if (cursor.* >= text.len) return null;
+    const start = cursor.*;
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    while (cursor.* < text.len) : (cursor.* += 1) {
+        const c = text[cursor.*];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                const end = cursor.*;
+                cursor.* += 1;
+                return std.mem.trim(u8, text[start..end], " \t\r\n");
+            },
+            else => {},
+        }
+    }
+    const end = cursor.*;
+    cursor.* = text.len + 1;
+    return std.mem.trim(u8, text[start..end], " \t\r\n");
+}
+
+fn findTopLevelByte(text: []const u8, target: u8) ?usize {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (text, 0..) |c, i| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+        if (depth == 0 and c == target) return i;
+    }
+    return null;
+}
+
+fn findTopLevelString(text: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0 or needle.len > text.len) return null;
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    var i: usize = 0;
+    while (i + needle.len <= text.len) : (i += 1) {
+        const c = text[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+        if (depth == 0 and std.mem.eql(u8, text[i .. i + needle.len], needle)) return i;
+    }
+    return null;
+}
+
+fn isBareIdentifier(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (!(std.ascii.isAlphabetic(text[0]) or text[0] == '_')) return false;
+    for (text[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+    }
+    return true;
 }
 
 fn countCommaSeparatedArgs(text: []const u8) usize {
@@ -10316,7 +10527,7 @@ fn containerFieldSizeFromBody(ctx: *GenContext, body: []const u8, field_name: []
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
         if (!fieldListContains(parsed.names_text, field_name)) continue;
-        return try typeTextSize(ctx, parsed.type_text, diag);
+        return try typeTextSize(ctx, try parsedFieldTypeText(ctx, parsed, diag), diag);
     }
     return null;
 }
@@ -10327,15 +10538,16 @@ fn containerFieldOffsetFromSource(ctx: *GenContext, type_node: NodeIndex, field_
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         var split = std.mem.splitScalar(u8, parsed.names_text, ',');
         while (split.next()) |raw| {
             offset = alignForward(offset, field_align);
             const name = lastWord(std.mem.trim(u8, raw, " \t\r\n"));
             if (std.mem.eql(u8, name, field_name)) return offset;
             if (parsed.is_using) {
-                if (try fieldInfoFromTypeText(ctx, parsed.type_text, field_name, diag)) |nested| return offset + nested.offset;
+                if (try fieldInfoFromTypeText(ctx, field_type, field_name, diag)) |nested| return offset + nested.offset;
             }
             offset += field_size;
         }
@@ -10349,15 +10561,16 @@ fn containerFieldInfoFromSource(ctx: *GenContext, type_node: NodeIndex, field_na
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         var split = std.mem.splitScalar(u8, parsed.names_text, ',');
         while (split.next()) |raw| {
             offset = alignForward(offset, field_align);
             const name = lastWord(std.mem.trim(u8, raw, " \t\r\n"));
-            if (std.mem.eql(u8, name, field_name)) return .{ .offset = offset, .type_text = parsed.type_text };
+            if (std.mem.eql(u8, name, field_name)) return .{ .offset = offset, .type_text = field_type };
             if (parsed.is_using) {
-                if (try fieldInfoFromTypeText(ctx, parsed.type_text, field_name, diag)) |nested| {
+                if (try fieldInfoFromTypeText(ctx, field_type, field_name, diag)) |nested| {
                     return .{ .offset = offset + nested.offset, .type_text = nested.type_text };
                 }
             }
@@ -10374,12 +10587,13 @@ fn containerFieldInfoAtIndex(ctx: *GenContext, type_node: NodeIndex, target_inde
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         var split = std.mem.splitScalar(u8, parsed.names_text, ',');
         while (split.next()) |_| {
             offset = alignForward(offset, field_align);
-            if (field_index == target_index) return .{ .offset = offset, .type_text = parsed.type_text };
+            if (field_index == target_index) return .{ .offset = offset, .type_text = field_type };
             offset += field_size;
             field_index += 1;
         }
@@ -10479,6 +10693,8 @@ const ParsedFieldSegment = struct {
     name_count: u64,
     is_using: bool = false,
     is_as: bool = false,
+    is_inferred: bool = false,
+    inferred_default_text: []const u8 = "",
 };
 
 fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
@@ -10486,7 +10702,9 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
     if (std.mem.startsWith(u8, clean, "//")) return null;
     if (std.mem.indexOf(u8, clean, "//")) |comment_pos| clean = std.mem.trim(u8, clean[0..comment_pos], " \t\r\n");
     if (std.mem.indexOf(u8, clean, "::") != null) return null;
-    const colon = std.mem.indexOfScalar(u8, clean, ':') orelse return null;
+    const colon_equal = findTopLevelString(clean, ":=");
+    const colon = findTopLevelByte(clean, ':') orelse return null;
+    const inferred = colon_equal != null and colon_equal.? == colon;
     var names = std.mem.trim(u8, clean[0..colon], " \t\r\n");
     if (names.len == 0) return null;
     var is_using = false;
@@ -10505,11 +10723,102 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
             consumed_modifier = true;
         }
     }
+    if (inferred) {
+        const default_text = std.mem.trim(u8, clean[colon + 2 ..], " \t\r\n");
+        if (default_text.len == 0) return null;
+        return .{
+            .names_text = names,
+            .type_text = "",
+            .name_count = countFieldNames(names),
+            .is_using = is_using,
+            .is_as = is_as,
+            .is_inferred = true,
+            .inferred_default_text = default_text,
+        };
+    }
     var type_text = std.mem.trim(u8, clean[colon + 1 ..], " \t\r\n");
     if (std.mem.indexOfScalar(u8, type_text, '#')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
     if (std.mem.indexOfScalar(u8, type_text, '=')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
     if (type_text.len == 0) return null;
     return .{ .names_text = names, .type_text = type_text, .name_count = countFieldNames(names), .is_using = is_using, .is_as = is_as };
+}
+
+fn parsedFieldTypeText(ctx: *GenContext, parsed: ParsedFieldSegment, diag: Diagnostic) ![]const u8 {
+    if (!parsed.is_inferred) return parsed.type_text;
+    return try inferFieldTypeTextFromDefault(ctx, parsed.inferred_default_text, diag);
+}
+
+fn inferFieldTypeTextFromDefault(ctx: *GenContext, raw_default: []const u8, diag: Diagnostic) ![]const u8 {
+    const text = std.mem.trim(u8, raw_default, " \t\r\n");
+    if (text.len == 0) return diag.failAt(0, "cannot infer field type from empty initializer", .{});
+    if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "false")) return "bool";
+    if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') return "string";
+    if (std.fmt.parseInt(i64, text, 0)) |_| return "int" else |_| {}
+    if (std.fmt.parseFloat(f64, text)) |_| return "float" else |_| {}
+    if (isBareIdentifier(text)) {
+        if (ctx.polymorph_types.get(text)) |actual_value| return try inferFieldTypeTextFromDefault(ctx, actual_value, diag);
+        if (topLevelConstInitializerText(ctx, text)) |const_text| return try inferFieldTypeTextFromDefault(ctx, const_text, diag);
+        if (ctx.resolved.lookup(text)) |sym| switch (sym) {
+            .const_value => |decl| {
+                if (decl != @import("Ast.zig").null_node and decl < ctx.ast.node_tags.items.len and ctx.ast.tag(decl) == .const_decl) {
+                    const init = ctx.ast.data(decl).lhs;
+                    if (typeTextForExpr(ctx, init, diag)) |ty| return ty;
+                    return try inferFieldTypeTextFromDefault(ctx, ctx.nodeSource(init), diag);
+                }
+            },
+            else => {},
+        };
+    }
+    return diag.failAt(0, "cannot infer field type from initializer '{s}'", .{text});
+}
+
+fn topLevelConstInitializerText(ctx: *GenContext, name: []const u8) ?[]const u8 {
+    var search_start: usize = 0;
+    while (std.mem.indexOfPos(u8, ctx.ast.source, search_start, name)) |pos| {
+        search_start = pos + name.len;
+        const before_ok = pos == 0 or !(std.ascii.isAlphanumeric(ctx.ast.source[pos - 1]) or ctx.ast.source[pos - 1] == '_');
+        const after = pos + name.len;
+        const after_ok = after >= ctx.ast.source.len or !(std.ascii.isAlphanumeric(ctx.ast.source[after]) or ctx.ast.source[after] == '_');
+        if (!before_ok or !after_ok) continue;
+        var i = after;
+        while (i < ctx.ast.source.len and std.ascii.isWhitespace(ctx.ast.source[i])) : (i += 1) {}
+        if (i + 1 >= ctx.ast.source.len or ctx.ast.source[i] != ':' or ctx.ast.source[i + 1] != ':') continue;
+        i += 2;
+        const value_start = i;
+        var depth: usize = 0;
+        var in_string = false;
+        var escaped = false;
+        while (i < ctx.ast.source.len) : (i += 1) {
+            const c = ctx.ast.source[i];
+            if (in_string) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    in_string = false;
+                }
+                continue;
+            }
+            switch (c) {
+                '"' => in_string = true,
+                '(', '[', '{' => depth += 1,
+                ')', ']', '}' => {
+                    if (depth > 0) depth -= 1;
+                },
+                ';', '\n' => if (depth == 0) {
+                    const value = std.mem.trim(u8, ctx.ast.source[value_start..i], " \t\r\n");
+                    if (std.mem.startsWith(u8, value, "struct") or std.mem.startsWith(u8, value, "union") or std.mem.startsWith(u8, value, "enum")) return null;
+                    return value;
+                },
+                else => {},
+            }
+        }
+        const value = std.mem.trim(u8, ctx.ast.source[value_start..i], " \t\r\n");
+        if (std.mem.startsWith(u8, value, "struct") or std.mem.startsWith(u8, value, "union") or std.mem.startsWith(u8, value, "enum")) return null;
+        return value;
+    }
+    return null;
 }
 
 fn fieldDefaultText(segment: []const u8) ?[]const u8 {
@@ -10680,7 +10989,7 @@ fn structAlignByName(ctx: *GenContext, name: []const u8, diag: Diagnostic) anyer
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        max_align = @max(max_align, try typeTextAlign(ctx, parsed.type_text, diag));
+        max_align = @max(max_align, try typeTextAlign(ctx, try parsedFieldTypeText(ctx, parsed, diag), diag));
     }
     return max_align;
 }
@@ -11107,8 +11416,9 @@ fn emitFormattedStructValueWithOptions(ctx: *GenContext, base_reg: Bytecode.Regi
     var fields = FieldSegmentIterator{ .source = body };
     while (fields.next()) |segment| {
         const parsed = parseFieldSegment(segment) orelse continue;
-        const field_size = try typeTextSize(ctx, parsed.type_text, diag);
-        const field_align = try typeTextAlign(ctx, parsed.type_text, diag);
+        const field_type = try parsedFieldTypeText(ctx, parsed, diag);
+        const field_size = try typeTextSize(ctx, field_type, diag);
+        const field_align = try typeTextAlign(ctx, field_type, diag);
         var split = std.mem.splitScalar(u8, parsed.names_text, ',');
         while (split.next()) |raw_name| {
             const field_name = lastWord(std.mem.trim(u8, raw_name, " \t\r\n"));
@@ -11129,8 +11439,8 @@ fn emitFormattedStructValueWithOptions(ctx: *GenContext, base_reg: Bytecode.Regi
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = tmp, .arg1 = base_reg, .arg2 = @intCast(offset), .source_node = source_node });
                 break :blk tmp;
             };
-            const field_value = try emitLoadFromAddressForType(ctx, field_addr, parsed.type_text, source_node, diag);
-            try emitFormattedValueForType(ctx, field_value, parsed.type_text, source_node, true, diag);
+            const field_value = try emitLoadFromAddressForType(ctx, field_addr, field_type, source_node, diag);
+            try emitFormattedValueForType(ctx, field_value, field_type, source_node, true, diag);
             if (use_long and options.use_newlines_if_long_form) try emitLiteralPrint(ctx.program, ctx.proc, ";", source_node);
             offset += field_size;
         }

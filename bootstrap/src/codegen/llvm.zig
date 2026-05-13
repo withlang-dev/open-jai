@@ -2053,23 +2053,11 @@ fn runtimeStringValue(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) any
         .runtime_string => value.llvm_value,
         .string_addr => c.LLVMBuildLoad2(env.builder, env.ptr_ty, value.llvm_value, "load_runtime_string_local"),
         .string => |string_idx| blk: {
-            const function = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
-            const pair_ty = c.LLVMArrayType(env.llvm_i64, 2);
-            const slot = buildEntryAlloca(env, function, pair_ty, "static_runtime_string");
-            var len_indices = [_]c.LLVMValueRef{
-                c.LLVMConstInt(env.llvm_i64, 0, 0),
-                c.LLVMConstInt(env.llvm_i64, 0, 0),
-            };
-            const len_ptr = c.LLVMBuildGEP2(env.builder, pair_ty, slot, &len_indices, len_indices.len, "static_strlen_slot");
-            _ = c.LLVMBuildStore(env.builder, c.LLVMConstInt(env.llvm_i64, env.program.strings.items[string_idx].len, 0), len_ptr);
-            var data_indices = [_]c.LLVMValueRef{
-                c.LLVMConstInt(env.llvm_i64, 0, 0),
-                c.LLVMConstInt(env.llvm_i64, 1, 0),
-            };
-            const data_ptr = c.LLVMBuildGEP2(env.builder, pair_ty, slot, &data_indices, data_indices.len, "static_strdata_slot");
-            const data = c.LLVMBuildPointerCast(env.builder, value.llvm_value, env.ptr_ty, "static_strdata_ptr");
-            _ = c.LLVMBuildStore(env.builder, c.LLVMBuildPtrToInt(env.builder, data, env.llvm_i64, "static_strdata_int"), data_ptr);
-            break :blk c.LLVMBuildPointerCast(env.builder, slot, env.ptr_ty, "static_runtime_string_ptr");
+            if (string_idx >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend string index out of range", .{});
+            const data = c.LLVMBuildPointerCast(env.builder, value.llvm_value, env.ptr_ty, "literal_strdata_ptr");
+            const len = c.LLVMConstInt(env.llvm_i64, env.program.strings.items[string_idx].len, 0);
+            var args = [_]c.LLVMValueRef{ data, len };
+            break :blk c.LLVMBuildCall2(env.builder, env.string_from_parts_fn_ty, env.string_from_parts_fn, &args, args.len, "literal_runtime_string");
         },
         .pointer => value.llvm_value,
         .pointer_addr => c.LLVMBuildLoad2(env.builder, env.ptr_ty, value.llvm_value, "load_runtime_string_addr"),

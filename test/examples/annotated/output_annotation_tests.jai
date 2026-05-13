@@ -117,6 +117,10 @@ inner_module_output :: () {
     expect_program_output("examples/12/12.8_inner_module_test.jai", "{42}");
 } @TestProcedure
 
+struct_parameters_output :: () {
+    expect_program_output("examples/12/12.9_struct_parameters.jai", "a is: {5, \"Hello\"}\na.x is: 5\na.param is: Hello\nb is: {5, \"Sailor!\"}\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
