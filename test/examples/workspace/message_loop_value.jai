@@ -1,6 +1,10 @@
 #import "Basic";
 #import "Compiler";
 
+message_kind :: (message: Message) -> string {
+    return message.kind;
+}
+
 #run {
     w := compiler_create_workspace();
     compiler_begin_intercept(w);
@@ -9,7 +13,7 @@
         message := compiler_wait_for_message();
         if !message break;
 
-        print("%:%\n", message.kind, message.workspace);
+        print("%:%\n", message_kind(message), message.workspace);
 
         if message.kind == .PHASE {
             phase := cast(*Message_Phase) message;

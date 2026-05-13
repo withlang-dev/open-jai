@@ -1,9 +1,18 @@
 #import "Basic";
 #import "Compiler";
 
+node_type_string :: (node: *Code_Node) -> string {
+    return type_to_string(node.type);
+}
+
+round_trip_node :: (node: *Code_Node) -> *Code_Node {
+    return node;
+}
+
 #run {
     code :: #code print("value: % % %\n", 41 + 1, 1 < 2, true && false);
     root, expressions := compiler_get_nodes(code);
+    root = round_trip_node(root);
 
     root_call := cast(*Code_Procedure_Call) root;
     format_arg := root_call.arguments_unsorted[0].expression;
@@ -14,12 +23,12 @@
     rhs := value_arg.subexpressions[1];
 
     print("expression count: %\n", expressions.count);
-    print("format type: %\n", type_to_string(format_arg.type));
-    print("value type: %\n", type_to_string(value_arg.type));
-    print("lhs type: %\n", type_to_string(lhs.type));
-    print("rhs type: %\n", type_to_string(rhs.type));
-    print("comparison type: %\n", type_to_string(comparison_arg.type));
-    print("logical type: %\n", type_to_string(logical_arg.type));
+    print("format type: %\n", node_type_string(format_arg));
+    print("value type: %\n", node_type_string(value_arg));
+    print("lhs type: %\n", node_type_string(lhs));
+    print("rhs type: %\n", node_type_string(rhs));
+    print("comparison type: %\n", node_type_string(comparison_arg));
+    print("logical type: %\n", node_type_string(logical_arg));
 }
 
 main :: () {}

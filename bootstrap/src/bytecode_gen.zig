@@ -27,8 +27,7 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         if (ast.tag(decl) != .proc_decl) continue;
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
         if (procHasExpandModifier(ast, decl, next_decl)) continue;
-        if (procContainsCompileTimeOnlyCompilerApi(ast, decl)) continue;
-        if (procHasSourceLocationAbi(ast, decl)) continue;
+        if (procIsCompileTimeOnlyHost(ast, decl)) continue;
         if (typed.main_proc != null and decl == typed.main_proc.?) continue;
         var helper = Bytecode.ProcBytecode{ .name = ast.tokenSlice(ast.mainToken(decl)) };
         errdefer helper.deinit(allocator);
@@ -1584,7 +1583,7 @@ const GenContext = struct {
             const decl: NodeIndex = @intCast(decl_idx);
             if (decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
             if (decl == ctx.current_proc_node and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(decl)), "main")) continue;
-            if ((procHasExpandModifierLocal(ast, decl) and !procHasReturnValue(ast, decl)) or procContainsCompileTimeOnlyCompilerApi(ast, decl)) continue;
+            if ((procHasExpandModifierLocal(ast, decl) and !procHasReturnValue(ast, decl)) or procIsCompileTimeOnlyHost(ast, decl)) continue;
             try out.appendSlice(ctx.program.allocator, topLevelDeclSourceText(ast, decl));
             try out.appendSlice(ctx.program.allocator, "\n");
         }
@@ -3781,7 +3780,7 @@ const GenContext = struct {
                 if (ast.tag(callee) == .proc_decl) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
-                    if (!procContainsCompileTimeOnlyCompilerApi(ast, callee)) {
+                    if (!procIsCompileTimeOnlyHost(ast, callee)) {
                         if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
                     }
                     if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
@@ -3801,14 +3800,14 @@ const GenContext = struct {
                         if (try ctx.genCompilerIntrinsicCall(field_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
                         if (ctx.resolved.lookup(field_name)) |field_sym| switch (field_sym) {
                             .proc => |proc_node| {
-                                if (!procContainsCompileTimeOnlyCompilerApi(ast, proc_node)) {
+                                if (!procIsCompileTimeOnlyHost(ast, proc_node)) {
                                     if (try ctx.tryEmitDirectProcCall(proc_node, args, expr, diag)) |reg| return reg;
                                 }
                                 if (try ctx.tryInlineProcCall(proc_node, args, expr, diag)) |reg| return reg;
                             },
                             .const_value => |value_node| {
                                 if (value_node != @import("Ast.zig").null_node and ast.tag(value_node) == .proc_decl) {
-                                    if (!procContainsCompileTimeOnlyCompilerApi(ast, value_node)) {
+                                    if (!procIsCompileTimeOnlyHost(ast, value_node)) {
                                         if (try ctx.tryEmitDirectProcCall(value_node, args, expr, diag)) |reg| return reg;
                                     }
                                     if (try ctx.tryInlineProcCall(value_node, args, expr, diag)) |reg| return reg;
@@ -4758,7 +4757,7 @@ const GenContext = struct {
                     }
                     if (is_user_proc_call) {
                         if (ctx.resolveProcCallTarget(callee, name, args.len)) |target_proc| {
-                            if (!procContainsCompileTimeOnlyCompilerApi(ast, target_proc)) {
+                            if (!procIsCompileTimeOnlyHost(ast, target_proc)) {
                                 if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
                             }
                             if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
@@ -7619,6 +7618,11 @@ fn procHasReturnValue(ast: *const Ast, proc: NodeIndex) bool {
     return sig.return_type != @import("Ast.zig").null_node;
 }
 
+fn procIsCompileTimeOnlyHost(ast: *const Ast, proc: NodeIndex) bool {
+    if (procHasSourceLocationAbi(ast, proc)) return true;
+    return procContainsCompileTimeOnlyCompilerApi(ast, proc);
+}
+
 fn procContainsCompileTimeOnlyCompilerApi(ast: *const Ast, proc: NodeIndex) bool {
     if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
     var seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
@@ -7628,15 +7632,26 @@ fn procContainsCompileTimeOnlyCompilerApi(ast: *const Ast, proc: NodeIndex) bool
 
 fn procHasSourceLocationAbi(ast: *const Ast, proc: NodeIndex) bool {
     const sig = procSignature(ast, proc) orelse return false;
-    if (sig.return_type != @import("Ast.zig").null_node and std.mem.eql(u8, firstTypeWord(nodeSourceText(ast, sig.return_type)), "Source_Code_Location")) return true;
+    if (sig.return_type != @import("Ast.zig").null_node and isCompileTimeOnlyHostTypeText(nodeSourceText(ast, sig.return_type))) return true;
     const params = ast.extraSlice(sig.params_extra);
     for (params) |param_idx| {
         const param: NodeIndex = @intCast(param_idx);
         const param_type = ast.data(param).lhs;
-        if (param_type != @import("Ast.zig").null_node and std.mem.eql(u8, firstTypeWord(nodeSourceText(ast, param_type)), "Source_Code_Location")) return true;
+        if (param_type != @import("Ast.zig").null_node and isCompileTimeOnlyHostTypeText(nodeSourceText(ast, param_type))) return true;
         if (isCallerLocationExpr(ast, ast.data(param).rhs)) return true;
     }
     return false;
+}
+
+fn isCompileTimeOnlyHostTypeText(text: []const u8) bool {
+    const name = firstTypeWord(stripPointerText(text));
+    return std.mem.eql(u8, name, "Code") or
+        std.mem.startsWith(u8, name, "Code_") or
+        std.mem.eql(u8, name, "Source_Code_Location") or
+        std.mem.eql(u8, name, "Build_Options") or
+        std.mem.eql(u8, name, "Build_Options_LLVM_Options") or
+        std.mem.eql(u8, name, "Message") or
+        std.mem.startsWith(u8, name, "Message_");
 }
 
 fn nodeSourceText(ast: *const Ast, node: NodeIndex) []const u8 {
@@ -7656,13 +7671,25 @@ fn nodeContainsCompileTimeOnlyCompilerApi(ast: *const Ast, node: NodeIndex, seen
     switch (ast.tag(node)) {
         .call_expr => {
             const callee = data.lhs;
+            if (ast.tag(callee) == .proc_decl and procIsCompileTimeOnlyHost(ast, callee)) return true;
             if (ast.tag(callee) == .identifier) {
                 const name = ast.tokenSlice(ast.mainToken(callee));
                 if (std.mem.eql(u8, name, "compiler_get_nodes") or
                     std.mem.eql(u8, name, "compiler_get_code") or
                     std.mem.eql(u8, name, "print_expression") or
                     std.mem.eql(u8, name, "make_location") or
-                    std.mem.eql(u8, name, "compiler_report"))
+                    std.mem.eql(u8, name, "compiler_report") or
+                    std.mem.eql(u8, name, "compiler_begin_intercept") or
+                    std.mem.eql(u8, name, "compiler_end_intercept") or
+                    std.mem.eql(u8, name, "compiler_wait_for_message") or
+                    std.mem.eql(u8, name, "compiler_create_workspace") or
+                    std.mem.eql(u8, name, "get_current_workspace") or
+                    std.mem.eql(u8, name, "get_build_options") or
+                    std.mem.eql(u8, name, "set_build_options") or
+                    std.mem.eql(u8, name, "set_build_options_dc") or
+                    std.mem.eql(u8, name, "add_build_file") or
+                    std.mem.eql(u8, name, "add_build_string") or
+                    std.mem.eql(u8, name, "add_global_data"))
                 {
                     return true;
                 }
@@ -7720,7 +7747,12 @@ fn nodeContainsCompileTimeOnlyCompilerApi(ast: *const Ast, node: NodeIndex, seen
             }
             return nodeContainsCompileTimeOnlyCompilerApi(ast, data.rhs, seen);
         },
-        .var_decl, .assign_stmt, .binary_expr, .index_expr, .array_type, .meta_expr, .field_access, .proc_type => {
+        .var_decl, .assign_stmt, .binary_expr, .index_expr, .array_type, .field_access, .proc_type => {
+            return nodeContainsCompileTimeOnlyCompilerApi(ast, data.lhs, seen) or nodeContainsCompileTimeOnlyCompilerApi(ast, data.rhs, seen);
+        },
+        .meta_expr => {
+            const tok = ast.tokens[ast.mainToken(node)].tag;
+            if (tok == .directive_code or tok == .directive_location or tok == .directive_caller_location or tok == .directive_caller_code) return true;
             return nodeContainsCompileTimeOnlyCompilerApi(ast, data.lhs, seen) or nodeContainsCompileTimeOnlyCompilerApi(ast, data.rhs, seen);
         },
         .unary_expr => {
