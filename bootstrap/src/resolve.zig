@@ -390,29 +390,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.putRealSymbol("context", .{ .const_value = @import("Ast.zig").null_node });
     try r.symbols.put(allocator, "reset_temporary_storage", .builtin_reset_temporary_storage);
     try r.symbols.put(allocator, "push_allocator", .builtin_push_allocator);
-    try putPlaceholders(&r, allocator, &.{
-        "DrawTexturePro",
-        "get_build_options",
-        "set_build_options",
-        "set_build_options_dc",
-        "add_build_file",
-        "add_build_string",
-        "run_command",
-        "get_current_workspace",
-        "compiler_create_workspace",
-        "compiler_begin_intercept",
-        "compiler_wait_for_message",
-        "compiler_end_intercept",
-        "compiler_set_workspace_status",
-        "compiler_report",
-        "make_location",
-        "add_global_data",
-        "Optimization_Type",
-        "Message_Complete",
-        "compiler_get_version_info",
-        "compiler_custom_link_command_is_complete",
-        "For_Flags",
-    });
+    try r.putRealSymbol("For_Flags", .{ .const_value = @import("Ast.zig").null_node });
     try r.putRealSymbol("temp", .{ .const_value = @import("Ast.zig").null_node });
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
     var current_file: u32 = 0;
@@ -1571,6 +1549,36 @@ test "resolver lets real declarations replace implicit placeholders" {
 
     try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
     try std.testing.expect(resolved.lookup("proc").? == .proc);
+    try resolved.failIfImplicitPlaceholders(diag);
+}
+
+test "resolver does not globally seed compiler APIs as placeholders" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "for_expansion :: (body: Code, flags: For_Flags) #expand {}\n" ++
+        "main :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "no_global_compiler_placeholders.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+
+    try std.testing.expect(resolved.lookup("compiler_create_workspace") == null);
+    try std.testing.expect(!resolved.implicit_placeholders.contains("compiler_create_workspace"));
+    try std.testing.expect(resolved.lookup("For_Flags") != null);
+    try std.testing.expect(!resolved.implicit_placeholders.contains("For_Flags"));
     try resolved.failIfImplicitPlaceholders(diag);
 }
 
