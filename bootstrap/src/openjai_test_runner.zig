@@ -94,8 +94,16 @@ pub fn main(init: std.process.Init) !void {
     defer freeStringList(allocator, &example_files);
     try collectJaiFiles(allocator, io, examples_dir, &example_files);
     sortStrings(example_files.items);
+    var loaded_example_files: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var key_it = loaded_example_files.keyIterator();
+        while (key_it.next()) |key| allocator.free(key.*);
+        loaded_example_files.deinit(allocator);
+    }
+    try collectLoadedExampleFiles(allocator, io, example_files.items, &loaded_example_files);
     for (example_files.items) |path| {
         if (!isSupportedExamplePath(path)) continue;
+        if (loaded_example_files.contains(path) and !try sourceHasMainEntry(io, path, allocator)) continue;
         const rel = try relativeToRoot(allocator, repo_root, path);
         defer allocator.free(rel);
         const display = try std.fmt.allocPrint(allocator, "{s}::compiles", .{rel});
@@ -575,6 +583,35 @@ fn collectJaiFiles(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u
         const full = try std.fs.path.join(allocator, &.{ dir_path, entry.path });
         try out.append(allocator, full);
     }
+}
+
+fn collectLoadedExampleFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []const u8, out: *std.StringHashMapUnmanaged(void)) !void {
+    for (files) |path| {
+        const source = Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch continue;
+        defer allocator.free(source);
+        const dir = std.fs.path.dirname(path) orelse ".";
+        var rest = source;
+        while (std.mem.indexOf(u8, rest, "#load \"")) |idx| {
+            const start = idx + "#load \"".len;
+            const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse break;
+            const load_name = rest[start .. start + end_rel];
+            if (!std.mem.endsWith(u8, load_name, ".jai")) {
+                rest = rest[start + end_rel + 1 ..];
+                continue;
+            }
+            const loaded_path = try std.fs.path.join(allocator, &.{ dir, load_name });
+            errdefer allocator.free(loaded_path);
+            const entry = try out.getOrPut(allocator, loaded_path);
+            if (entry.found_existing) allocator.free(loaded_path);
+            rest = rest[start + end_rel + 1 ..];
+        }
+    }
+}
+
+fn sourceHasMainEntry(io: std.Io, path: []const u8, allocator: std.mem.Allocator) !bool {
+    const source = Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch return false;
+    defer allocator.free(source);
+    return std.mem.indexOf(u8, source, "main ::") != null;
 }
 
 fn isSupportedExamplePath(path: []const u8) bool {
