@@ -76,6 +76,9 @@ const CompilerMessage = struct {
     kind: []const u8,
     workspace: i64,
     phase: []const u8 = "",
+    fully_pathed_filename: []const u8 = "",
+    module_name: []const u8 = "",
+    module_type: []const u8 = "",
     executable_name: []const u8 = "",
     executable_write_failed: bool = false,
     linker_exit_code: i64 = 0,
@@ -1842,6 +1845,8 @@ pub const VM = struct {
         for (vm.workspace_sources.items) |source| {
             if (source.workspace != workspace) continue;
             found_source = true;
+            try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace, .fully_pathed_filename = source.path });
+            try vm.appendWorkspaceImportMessages(workspace, source.path, source.source);
             declaration_count += vm.appendWorkspaceDeclarations(source.path, source.source, diag) catch |err| blk: {
                 if (first_error == null) first_error = @errorName(err);
                 try vm.workspace_status.put(vm.allocator, workspace, 1);
@@ -1855,8 +1860,10 @@ pub const VM = struct {
             declaration_count = 1;
         }
         const typechecked_count = vm.compiler_message_nodes.items.len - typechecked_start;
-        try vm.appendCompilerMessage(.{ .kind = "IMPORT", .workspace = workspace });
-        try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
+        if (!found_source) {
+            try vm.appendCompilerMessage(.{ .kind = "IMPORT", .workspace = workspace, .module_name = "main", .module_type = "MAIN_PROGRAM", .fully_pathed_filename = "<implicit>" });
+            try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace, .fully_pathed_filename = "<implicit>" });
+        }
         if (first_error) |error_name| {
             try vm.appendCompilerMessage(.{ .kind = "ERROR", .workspace = workspace, .dump_text = error_name, .error_code = 1 });
             try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = 1, .error_code = 1 });
@@ -1952,6 +1959,23 @@ pub const VM = struct {
         }
         _ = parent_diag;
         return vm.compiler_message_declarations.items.len - declaration_start;
+    }
+
+    fn appendWorkspaceImportMessages(vm: *VM, workspace: i64, path: []const u8, source: []const u8) !void {
+        var rest = source;
+        while (std.mem.indexOf(u8, rest, "#import \"")) |idx| {
+            const start = idx + "#import \"".len;
+            const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse break;
+            const module_name = rest[start .. start + end_rel];
+            try vm.appendCompilerMessage(.{
+                .kind = "IMPORT",
+                .workspace = workspace,
+                .module_name = module_name,
+                .module_type = "MODULE",
+                .fully_pathed_filename = path,
+            });
+            rest = rest[start + end_rel + 1 ..];
+        }
     }
 
     fn appendWorkspaceLocalDeclarations(vm: *VM, proc_name: []const u8, path: []const u8, source: []const u8, proc_start: usize) !void {
@@ -2110,6 +2134,9 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "kind")) return .{ .string = message.kind };
         if (std.mem.eql(u8, field_name, "workspace")) return .{ .int = message.workspace };
         if (std.mem.eql(u8, field_name, "phase")) return .{ .string = message.phase };
+        if (std.mem.eql(u8, field_name, "fully_pathed_filename")) return .{ .string = message.fully_pathed_filename };
+        if (std.mem.eql(u8, field_name, "module_name")) return .{ .string = message.module_name };
+        if (std.mem.eql(u8, field_name, "module_type")) return .{ .string = message.module_type };
         if (std.mem.eql(u8, field_name, "executable_name")) return .{ .string = message.executable_name };
         if (std.mem.eql(u8, field_name, "executable_write_failed")) return .{ .bool = message.executable_write_failed };
         if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };

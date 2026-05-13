@@ -6647,6 +6647,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "kind")) return "string";
                 if (std.mem.eql(u8, field_name, "workspace")) return "Workspace";
                 if (std.mem.eql(u8, field_name, "phase")) return "string";
+                if (std.mem.eql(u8, field_name, "fully_pathed_filename")) return "string";
+                if (std.mem.eql(u8, field_name, "module_name")) return "string";
+                if (std.mem.eql(u8, field_name, "module_type")) return "string";
                 if (std.mem.eql(u8, field_name, "executable_name")) return "string";
                 if (std.mem.eql(u8, field_name, "executable_write_failed")) return "bool";
                 if (std.mem.eql(u8, field_name, "linker_exit_code")) return "int";

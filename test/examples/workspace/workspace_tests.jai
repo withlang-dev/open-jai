@@ -37,3 +37,7 @@ compile_time_command_line_is_exposed_to_build_scripts :: () {
 compiler_intercept_reports_target_source_errors :: () {
     expect_compile_output_contains("test/examples/workspace/error_message_value.jai", "error:3\ncomplete:1\n");
 } @TestProcedure
+
+compiler_file_and_import_messages_expose_specific_fields :: () {
+    expect_compile_output_contains("test/examples/workspace/file_import_message_value.jai", "file:report_target.jai\nimport:Basic:report_target.jai\n");
+} @TestProcedure
