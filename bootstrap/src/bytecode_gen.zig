@@ -2013,6 +2013,51 @@ const GenContext = struct {
         return true;
     }
 
+    fn tryEmitRunCommandMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        const children = ast.extraSlice(ast.data(stmt).lhs);
+        if (children.len != 4) return false;
+        const first: NodeIndex = @intCast(children[0]);
+        const rhs = stmtInitOrAssignRhs(ast, first) orelse return false;
+        if (ast.tag(rhs) != .call_expr) return false;
+        const callee = ast.data(rhs).lhs;
+        if (ast.tag(callee) != .identifier or !std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "run_command")) return false;
+        for (children[1..]) |child_idx| {
+            const child: NodeIndex = @intCast(child_idx);
+            if ((stmtInitOrAssignRhs(ast, child) orelse return false) != rhs) return false;
+        }
+        const args = ast.extraSlice(ast.data(rhs).rhs);
+        if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(rhs)].start, "run_command expects at least one command string", .{});
+
+        const command = try genCallArg(ctx, handleArgNode(ast, @intCast(args[0])), diag);
+        const result_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const stdout_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const stderr_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const timeout_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .host_run_command_capture,
+            .dest = result_reg,
+            .arg1 = command,
+            .arg2 = stdout_reg,
+            .arg3 = stderr_reg,
+            .arg4 = timeout_reg,
+            .source_node = rhs,
+        });
+        try ctx.bindStmtTarget(first, result_reg, diag);
+        try ctx.bindStmtTarget(@intCast(children[1]), stdout_reg, diag);
+        try ctx.bindStmtTarget(@intCast(children[2]), stderr_reg, diag);
+        try ctx.bindStmtTarget(@intCast(children[3]), timeout_reg, diag);
+        try ctx.type_overrides.put(ctx.program.allocator, first, "int");
+        try ctx.type_overrides.put(ctx.program.allocator, @intCast(children[1]), "string");
+        try ctx.type_overrides.put(ctx.program.allocator, @intCast(children[2]), "string");
+        try ctx.type_overrides.put(ctx.program.allocator, @intCast(children[3]), "bool");
+        return true;
+    }
+
     fn tryEmitAllocatorCapabilitiesMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
         const ast = ctx.ast;
         const children = ast.extraSlice(ast.data(stmt).lhs);
@@ -2066,6 +2111,7 @@ const GenContext = struct {
             },
             .stmt_list => {
                 if (try ctx.tryEmitCompilerGetNodesMultiReturn(stmt, diag)) return;
+                if (try ctx.tryEmitRunCommandMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitAllocatorCapabilitiesMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitStringMultiReturn(stmt, diag)) return;
                 var is_all_assign = true;

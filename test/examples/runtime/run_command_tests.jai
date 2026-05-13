@@ -5,3 +5,6 @@ top_level_run_command_executes :: () {
         "top-level #run executed\n");
 } @TestProcedure
 
+run_command_captures_output_values :: () {
+    expect_compile_output("test/examples/runtime/run_command_capture.jai", "result:0 output:captured stdout error:captured stderr timeout:false\n");
+} @TestProcedure

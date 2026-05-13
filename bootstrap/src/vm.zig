@@ -103,6 +103,13 @@ pub const BuildOptionsSnapshot = struct {
 
 const WorkspaceSource = WorkspaceSourceSnapshot;
 
+const RunCommandResult = struct {
+    exit_code: i64,
+    stdout: []const u8,
+    stderr: []const u8,
+    timeout_reached: bool = false,
+};
+
 const RegisterValue = union(enum) {
     empty,
     string: []const u8,
@@ -1144,6 +1151,15 @@ pub const VM = struct {
                     const command = try vm.registerText(regs[inst.arg1], diag, "run_command command");
                     regs[inst.dest] = .{ .int = try vm.hostRunCommand(command, diag) };
                 },
+                .host_run_command_capture => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len or inst.arg4 >= regs.len) return diag.failAt(0, "VM run_command capture register out of range", .{});
+                    const command = try vm.registerText(regs[inst.arg1], diag, "run_command command");
+                    const result = try vm.hostRunCommandCapture(command, diag);
+                    regs[inst.dest] = .{ .int = result.exit_code };
+                    regs[inst.arg2] = .{ .string = result.stdout };
+                    regs[inst.arg3] = .{ .string = result.stderr };
+                    regs[inst.arg4] = .{ .bool = result.timeout_reached };
+                },
                 .host_build_cpp_dynamic_lib => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM build_cpp_dynamic_lib register out of range", .{});
                     const name = try vm.registerText(regs[inst.arg1], diag, "build_cpp_dynamic_lib library name");
@@ -1631,6 +1647,11 @@ pub const VM = struct {
     }
 
     fn hostRunCommand(vm: *VM, command: []const u8, diag: Diagnostic) !i64 {
+        const result = try vm.hostRunCommandCapture(command, diag);
+        return result.exit_code;
+    }
+
+    fn hostRunCommandCapture(vm: *VM, command: []const u8, diag: Diagnostic) !RunCommandResult {
         const io = try vm.requireIo(diag, "run_command");
         const result = std.process.run(vm.allocator, io, .{
             .argv = &.{ "/bin/sh", "-c", command },
@@ -1641,10 +1662,17 @@ pub const VM = struct {
         };
         defer vm.allocator.free(result.stdout);
         defer vm.allocator.free(result.stderr);
-        return switch (result.term) {
+        const stdout = try vm.allocator.dupe(u8, result.stdout);
+        errdefer vm.allocator.free(stdout);
+        const stderr = try vm.allocator.dupe(u8, result.stderr);
+        errdefer vm.allocator.free(stderr);
+        try vm.rendered_code_strings.append(vm.allocator, stdout);
+        try vm.rendered_code_strings.append(vm.allocator, stderr);
+        const exit_code: i64 = switch (result.term) {
             .exited => |code| code,
             else => 1,
         };
+        return .{ .exit_code = exit_code, .stdout = stdout, .stderr = stderr };
     }
 
     fn hostBuildCppDynamicLib(vm: *VM, name: []const u8, source: []const u8, diag: Diagnostic) !bool {
