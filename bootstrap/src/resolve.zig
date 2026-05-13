@@ -607,9 +607,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putCompilerModuleSymbols(&r);
                 } else if (std.mem.eql(u8, module_name, "SDL") or
                     std.mem.eql(u8, module_name, "GL") or
-                    std.mem.eql(u8, module_name, "Pool") or
-                    std.mem.eql(u8, module_name, "Flat_Pool") or
-                    std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
                     std.mem.eql(u8, module_name, "glfw") or
@@ -698,24 +695,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "default_theme_procs",
                             "getrect_theme",
                         });
-                    } else if (std.mem.eql(u8, module_name, "Pool")) {
-                        try r.putRealSymbol("Pool", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("get", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("release", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("reset", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("set_allocators", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("pool_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "Flat_Pool")) {
-                        try r.putRealSymbol("Flat_Pool", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("get", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("reset", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("fini", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("flat_pool_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "rpmalloc")) {
-                        try r.putRealSymbol("rpmalloc_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         for (&[_][]const u8{
                             "Generate_Bindings_Options",
