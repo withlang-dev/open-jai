@@ -604,7 +604,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putCompilerModuleSymbols(&r);
                 } else if (std.mem.eql(u8, module_name, "System") or
                     std.mem.eql(u8, module_name, "Windows") or
-                    std.mem.eql(u8, module_name, "Process") or
                     std.mem.eql(u8, module_name, "Input") or
                     std.mem.eql(u8, module_name, "Window_Creation") or
                     std.mem.eql(u8, module_name, "Windows_Resources") or
@@ -648,11 +647,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STD_INPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "Process")) {
-                        try r.putRealSymbol("run_command", .{ .const_value = @import("Ast.zig").null_node });
-                        for (&[_][]const u8{ "thread_is_done", "shutdown" }) |name| {
-                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                        }
                     } else if (std.mem.eql(u8, module_name, "POSIX")) {
                         try r.symbols.put(allocator, "read", .builtin_posix_read);
                         try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
@@ -1480,14 +1474,17 @@ test "scope_export restores non-file visibility after #scope_file" {
     try std.testing.expect(resolved.lookup("shown") != null);
 }
 
-test "resolver treats Process shutdown as a real symbol" {
+test "resolver treats loaded Process declarations as real symbols" {
     const lexer = @import("lexer.zig");
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Process\";\n" ++
+        "#load \"modules/Process/module.jai\";\n" ++
+        "#scope_export;\n" ++
+        "shutdown :: () {}\n" ++
+        "#load \"__main_resume\";\n" ++
         "main :: () { shutdown(); }\n";
-    const diag = Diagnostic.init(std.testing.allocator, "process_shutdown.jai", source);
+    const diag = Diagnostic.init(std.testing.allocator, "loaded_process_shutdown.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
     defer tokens.deinit(std.testing.allocator);
@@ -1601,7 +1598,6 @@ test "implemented module imports do not create implicit placeholders" {
     const source =
         "#import \"Basic\";\n" ++
         "#import \"Compiler\";\n" ++
-        "#import \"Process\";\n" ++
         "main :: () { print(\"ok\\n\"); }\n";
     const diag = Diagnostic.init(std.testing.allocator, "implemented_imports_no_placeholders.jai", source);
 

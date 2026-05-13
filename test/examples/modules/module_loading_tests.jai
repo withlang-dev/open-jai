@@ -17,3 +17,7 @@ commented_module_imports_do_not_load_source :: () {
 duplicate_module_imports_load_source_once :: () {
     expect_compile_output("test/examples/modules/module_duplicate_import_value.jai", "duplicate module loaded\n");
 } @TestProcedure
+
+process_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/process_module_import_value.jai", "process:0 process-module  false\n");
+} @TestProcedure
