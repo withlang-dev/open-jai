@@ -196,6 +196,10 @@ const GenContext = struct {
     external_lvalue_addresses: std.StringHashMapUnmanaged(Bytecode.Register) = .empty,
     external_types: std.StringHashMapUnmanaged([]const u8) = .empty,
     local_type_decls: std.StringHashMapUnmanaged(NodeIndex) = .empty,
+    context_allocator: AllocatorBinding = .{},
+    context_alias_allocators: std.StringHashMapUnmanaged(AllocatorBinding) = .empty,
+    context_value_reg: ?Bytecode.Register = null,
+    current_context_allocator_reg: ?Bytecode.Register = null,
     for_expansion_it_alias: ?[]const u8 = null,
     for_expansion_index_alias: ?[]const u8 = null,
     type_context_parent: ?*GenContext = null,
@@ -237,6 +241,15 @@ const GenContext = struct {
         patches: std.ArrayList(usize) = .empty,
     };
 
+    const AllocatorBinding = struct {
+        proc: ?Bytecode.Register = null,
+        data: ?Bytecode.Register = null,
+
+        fn ready(binding: AllocatorBinding) bool {
+            return binding.proc != null and binding.data != null;
+        }
+    };
+
     pub fn deinit(ctx: *GenContext) void {
         ctx.decl_registers.deinit(ctx.program.allocator);
         ctx.decl_addresses.deinit(ctx.program.allocator);
@@ -250,6 +263,7 @@ const GenContext = struct {
         ctx.external_lvalue_addresses.deinit(ctx.program.allocator);
         ctx.external_types.deinit(ctx.program.allocator);
         ctx.local_type_decls.deinit(ctx.program.allocator);
+        ctx.context_alias_allocators.deinit(ctx.program.allocator);
         ctx.binding_option_fields.deinit(ctx.program.allocator);
         ctx.emitted_specialized_runs.deinit(ctx.program.allocator);
         for (ctx.loop_stack.items) |*frame| {
@@ -639,6 +653,10 @@ const GenContext = struct {
                 }
                 if (ctx.resolved.local_values.get(lhs)) |decl| {
                     if (ctx.decl_registers.get(decl)) |old_reg| {
+                        if (ctx.decl_addresses.get(decl)) |addr| {
+                            const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, lhs, diag) orelse "int";
+                            try emitStoreToAddressForType(ctx, addr, result, type_text, source_node, diag);
+                        }
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = result, .source_node = source_node });
                         return old_reg;
                     }
@@ -781,12 +799,10 @@ const GenContext = struct {
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_add, .dest = added_reg, .arg1 = slot_reg, .arg2 = item_reg, .arg3 = @intCast(@max(elem_size, 1)), .arg4 = if (elem_is_struct) 1 else 0, .source_node = call_expr });
                 }
-                const final_array = ctx.proc.num_registers;
-                ctx.proc.num_registers += 1;
-                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = final_array, .arg1 = slot_reg, .source_node = call_expr });
                 const old = ctx.decl_registers.get(param);
                 try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
-                try ctx.decl_registers.put(allocator, param, final_array);
+                _ = ctx.decl_addresses.remove(param);
+                try ctx.decl_registers.put(allocator, param, array_reg);
                 const array_type_text = if (std.mem.eql(u8, firstTypeWord(elem_text), "Allocator"))
                     "[..]Allocator"
                 else
@@ -816,6 +832,7 @@ const GenContext = struct {
                 try genCallArg(ctx, source, diag);
             const old = ctx.decl_registers.get(param);
             try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
+            _ = ctx.decl_addresses.remove(param);
             try ctx.decl_registers.put(allocator, param, arg_reg);
             const inline_type = if (std.mem.eql(u8, param_type_text, "Code"))
                 "Code"
@@ -2306,6 +2323,127 @@ const GenContext = struct {
         }
     }
 
+    fn contextOwnerName(ctx: *GenContext, owner: NodeIndex) ?[]const u8 {
+        const ast = ctx.ast;
+        if (owner == @import("Ast.zig").null_node or owner >= ast.node_tags.items.len or ast.tag(owner) != .identifier) return null;
+        const name = ast.tokenSlice(ast.mainToken(owner));
+        if (std.mem.eql(u8, name, "context")) return name;
+        return if (ctx.context_alias_allocators.contains(name)) name else null;
+    }
+
+    fn allocatorAssignmentOwner(ctx: *GenContext, lhs: NodeIndex) ?struct { owner: []const u8, field: []const u8 } {
+        const ast = ctx.ast;
+        if (lhs == @import("Ast.zig").null_node or lhs >= ast.node_tags.items.len or ast.tag(lhs) != .field_access) return null;
+        const field = ast.tokenSlice(ast.data(lhs).rhs);
+        if (!std.mem.eql(u8, field, "proc") and !std.mem.eql(u8, field, "data")) return null;
+        const allocator_access = ast.data(lhs).lhs;
+        if (allocator_access == @import("Ast.zig").null_node or allocator_access >= ast.node_tags.items.len or ast.tag(allocator_access) != .field_access) return null;
+        if (!std.mem.eql(u8, ast.tokenSlice(ast.data(allocator_access).rhs), "allocator")) return null;
+        const owner = ctx.contextOwnerName(ast.data(allocator_access).lhs) orelse return null;
+        return .{ .owner = owner, .field = field };
+    }
+
+    fn setContextAllocatorPart(ctx: *GenContext, owner: []const u8, field: []const u8, reg: Bytecode.Register) !void {
+        var binding = if (std.mem.eql(u8, owner, "context"))
+            ctx.context_allocator
+        else
+            ctx.context_alias_allocators.get(owner) orelse AllocatorBinding{};
+        if (std.mem.eql(u8, field, "proc")) binding.proc = reg else binding.data = reg;
+        if (std.mem.eql(u8, owner, "context")) {
+            ctx.context_allocator = binding;
+        } else {
+            try ctx.context_alias_allocators.put(ctx.program.allocator, owner, binding);
+        }
+    }
+
+    fn allocatorValueFromBinding(ctx: *GenContext, binding: AllocatorBinding, source_node: NodeIndex) !?Bytecode.Register {
+        if (!binding.ready()) return null;
+        return try ctx.emitAllocatorValue(source_node, binding.proc.?, binding.data.?);
+    }
+
+    fn emitContextValue(ctx: *GenContext, source_node: NodeIndex) !Bytecode.Register {
+        if (ctx.context_value_reg) |reg| return reg;
+        const reg = try ctx.emitDefaultAllocatorValue(source_node);
+        ctx.context_value_reg = reg;
+        ctx.current_context_allocator_reg = reg;
+        return reg;
+    }
+
+    fn materializeMutableLocalsForLoop(ctx: *GenContext, source_node: NodeIndex, diag: Diagnostic) !void {
+        const body = if (source_node != @import("Ast.zig").null_node and source_node < ctx.ast.node_tags.items.len and ctx.ast.tag(source_node) == .for_stmt)
+            ctx.ast.data(source_node).rhs
+        else
+            source_node;
+        var it = ctx.decl_registers.iterator();
+        while (it.next()) |entry| {
+            const decl = entry.key_ptr.*;
+            if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
+            if (ctx.ast.tag(decl) != .var_decl) continue;
+            if (ctx.decl_addresses.contains(decl)) continue;
+            if (!ctx.nodeAssignsDecl(body, decl)) continue;
+            const init = ctx.ast.data(decl).rhs;
+            const type_text = typeTextForDecl(ctx, decl, diag) orelse
+                (if (init != @import("Ast.zig").null_node) typeTextForExpr(ctx, init, diag) else null) orelse
+                "";
+            const type_name = firstTypeWord(type_text);
+            if (!(std.mem.eql(u8, type_name, "bool") or
+                std.mem.eql(u8, type_name, "int") or
+                std.mem.eql(u8, type_name, "s64") or
+                std.mem.eql(u8, type_name, "u64") or
+                std.mem.startsWith(u8, std.mem.trim(u8, type_text, " \t\r\n"), "*"))) continue;
+            const addr = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr, .arg1 = entry.value_ptr.*, .source_node = source_node });
+            try ctx.decl_addresses.put(ctx.program.allocator, decl, addr);
+            try ctx.pointer_addrs.put(ctx.program.allocator, addr, decl);
+        }
+    }
+
+    fn nodeAssignsDecl(ctx: *GenContext, node: NodeIndex, decl: NodeIndex) bool {
+        const ast = ctx.ast;
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return false;
+        switch (ast.tag(node)) {
+            .assign_stmt => {
+                if (ctx.lhsReferencesDecl(ast.data(node).lhs, decl)) return true;
+                return ctx.nodeAssignsDecl(ast.data(node).rhs, decl);
+            },
+            .binary_expr => {
+                const tok = ast.tokens[ast.mainToken(node)].tag;
+                if (isCompoundAssignmentOp(tok) and ctx.lhsReferencesDecl(ast.data(node).lhs, decl)) return true;
+                return ctx.nodeAssignsDecl(ast.data(node).lhs, decl) or ctx.nodeAssignsDecl(ast.data(node).rhs, decl);
+            },
+            .block, .stmt_list, .param_list => {
+                for (ast.extraSlice(ast.data(node).lhs)) |child| {
+                    if (ctx.nodeAssignsDecl(@intCast(child), decl)) return true;
+                }
+                return false;
+            },
+            .call_expr => {
+                if (ctx.nodeAssignsDecl(ast.data(node).lhs, decl)) return true;
+                for (ast.extraSlice(ast.data(node).rhs)) |arg| {
+                    if (ctx.nodeAssignsDecl(@intCast(arg), decl)) return true;
+                }
+                return false;
+            },
+            .if_stmt, .while_stmt, .for_stmt, .defer_stmt, .expr_stmt, .return_stmt, .var_decl, .const_decl, .unary_expr, .field_access, .index_expr, .meta_expr, .meta_stmt, .run_expr, .ifx_expr => {
+                const data = ast.data(node);
+                return ctx.nodeAssignsDecl(data.lhs, decl) or ctx.nodeAssignsDecl(data.rhs, decl);
+            },
+            else => return false,
+        }
+    }
+
+    fn lhsReferencesDecl(ctx: *GenContext, node: NodeIndex, decl: NodeIndex) bool {
+        const ast = ctx.ast;
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return false;
+        switch (ast.tag(node)) {
+            .identifier => return (ctx.resolved.local_values.get(node) orelse @import("Ast.zig").null_node) == decl,
+            .field_access => return ctx.lhsReferencesDecl(ast.data(node).lhs, decl),
+            .index_expr => return ctx.lhsReferencesDecl(ast.data(node).lhs, decl),
+            else => return false,
+        }
+    }
+
     fn genStmt(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !void {
         const ast = ctx.ast;
         switch (ast.tag(stmt)) {
@@ -2368,6 +2506,14 @@ const GenContext = struct {
                     }
                 }
                 const rhs = try ctx.genExpr(rhs_node, diag);
+                if (ctx.allocatorAssignmentOwner(lhs)) |target| {
+                    try ctx.setContextAllocatorPart(target.owner, target.field, rhs);
+                    if (std.mem.eql(u8, target.owner, "context")) {
+                        if (try ctx.allocatorValueFromBinding(ctx.context_allocator, stmt)) |context_alloc_reg| {
+                            ctx.current_context_allocator_reg = context_alloc_reg;
+                        }
+                    }
+                }
                 if (ast.tag(lhs) == .meta_expr and ast.tokens[ast.mainToken(lhs)].tag == .directive_insert) {
                     try ctx.storeInsertedLvalue(lhs, rhs, stmt, diag);
                     return;
@@ -2457,7 +2603,7 @@ const GenContext = struct {
                         const type_node = ast.data(decl).lhs;
                         const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, lhs, diag) orelse "int";
                         const addr = try ctx.emitGlobalAddress(decl, lhs, type_text, diag);
-                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = addr, .arg1 = rhs, .source_node = stmt });
+                        try emitStoreToAddressForType(ctx, addr, rhs, type_text, stmt, diag);
                         return;
                     }
                     if (ctx.decl_registers.get(decl)) |old_reg| {
@@ -2510,6 +2656,10 @@ const GenContext = struct {
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
                     }
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, bind_reg);
+                    if (ast.tag(stmt) == .var_decl and ast.tag(init) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(init)), "context")) {
+                        const name = ast.tokenSlice(ast.mainToken(stmt));
+                        try ctx.context_alias_allocators.put(ctx.program.allocator, name, ctx.context_allocator);
+                    }
                 } else if (ast.tag(stmt) == .var_decl and init == @import("Ast.zig").null_node) {
                     const reg = try ctx.genDefaultValue(ast.data(stmt).lhs, stmt, diag);
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, reg);
@@ -2528,8 +2678,22 @@ const GenContext = struct {
             },
             .run_expr => {
                 if (ast.tokens[ast.mainToken(stmt)].tag == .keyword_push_context) {
-                    _ = try ctx.genExpr(ast.data(stmt).rhs, diag);
+                    const old_allocator = ctx.context_allocator;
+                    const old_context_allocator_reg = ctx.current_context_allocator_reg;
+                    const pushed_allocator = blk: {
+                        const rhs = ast.data(stmt).rhs;
+                        if (rhs != @import("Ast.zig").null_node and rhs < ast.node_tags.items.len and ast.tag(rhs) == .identifier) {
+                            const name = ast.tokenSlice(ast.mainToken(rhs));
+                            if (ctx.context_alias_allocators.get(name)) |binding| {
+                                if (try ctx.allocatorValueFromBinding(binding, stmt)) |alloc_reg| break :blk alloc_reg;
+                            }
+                        }
+                        break :blk try ctx.genExpr(rhs, diag);
+                    };
+                    ctx.current_context_allocator_reg = pushed_allocator;
                     try ctx.genBlock(ast.data(stmt).lhs, diag);
+                    ctx.current_context_allocator_reg = old_context_allocator_reg;
+                    ctx.context_allocator = old_allocator;
                     return;
                 }
                 if (ctx.polymorph_types.count() != 0) {
@@ -2720,6 +2884,7 @@ const GenContext = struct {
                 return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "continue outside of loop", .{});
             },
             .for_stmt => {
+                try ctx.materializeMutableLocalsForLoop(stmt, diag);
                 const range = ast.extraSlice(ast.data(stmt).lhs);
                 if (try ctx.tryEmitForExpansion(stmt, range, diag)) return;
                 if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
@@ -3487,6 +3652,7 @@ const GenContext = struct {
                 if (ctx.resolved.local_values.get(expr)) |decl| {
                     if (decl == @import("Ast.zig").null_node) {
                         const unresolved_name = ast.tokenSlice(ast.mainToken(expr));
+                        if (std.mem.eql(u8, unresolved_name, "context")) return try ctx.emitContextValue(expr);
                         if (isBindingOptionField(unresolved_name)) return try ctx.genSyntheticBindingOptionField(unresolved_name, expr, diag);
                         if (ctx.external_registers.get(unresolved_name)) |reg| return reg;
                         if (isBuiltinTypeName(ast.tokenSlice(ast.mainToken(expr)))) {
@@ -3511,10 +3677,7 @@ const GenContext = struct {
                         const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, expr, diag) orelse "int";
                         const addr = try ctx.emitGlobalAddress(decl, expr, type_text, diag);
                         if (isStorageValueTypeText(type_text) or try typeTextIsStruct(ctx, stripPointerText(type_text), diag)) return addr;
-                        const reg = proc.num_registers;
-                        proc.num_registers += 1;
-                        try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr, .dest = reg, .arg1 = addr, .source_node = expr });
-                        return reg;
+                        return try emitLoadFromAddressForType(ctx, addr, type_text, expr, diag);
                     }
                     switch (ast.tag(decl)) {
                         .var_decl => {
@@ -3549,7 +3712,7 @@ const GenContext = struct {
                     return try ctx.emitString(expr, hostOsName());
                 }
                 if (allocatorProcIdByName(name)) |proc_id| return try ctx.emitInt(expr, proc_id);
-                if (std.mem.eql(u8, name, "context")) return try ctx.genTypedPlaceholderValue(expr, diag);
+                if (std.mem.eql(u8, name, "context")) return try ctx.emitContextValue(expr);
                 if (std.mem.eql(u8, name, "STDIN_FILENO")) return try ctx.emitInt(expr, 0);
                 if (std.mem.eql(u8, name, "STDOUT_FILENO")) return try ctx.emitInt(expr, 1);
                 if (std.mem.eql(u8, name, "STDERR_FILENO")) return try ctx.emitInt(expr, 2);
@@ -4414,6 +4577,10 @@ const GenContext = struct {
                     proc.num_registers += 1;
                     if (allocator_reg) |alloc_reg| {
                         try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = alloc_reg, .source_node = expr });
+                    } else if (ctx.current_context_allocator_reg) |context_alloc_reg| {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = context_alloc_reg, .source_node = expr });
+                    } else if (try ctx.allocatorValueFromBinding(ctx.context_allocator, expr)) |context_alloc_reg| {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_owned, .dest = reg, .arg1 = size_reg, .arg2 = context_alloc_reg, .source_node = expr });
                     } else {
                         try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_reg, .dest = reg, .arg1 = size_reg, .source_node = expr });
                     }
@@ -4722,7 +4889,15 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "push_allocator")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "push_allocator expects an allocator and optional data pointer", .{});
-                    for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
+                    const proc_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const data_reg = if (args.len > 1) try ctx.genExpr(@intCast(args[1]), diag) else blk: {
+                        const null_reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_null_ptr, .dest = null_reg, .source_node = expr });
+                        break :blk null_reg;
+                    };
+                    ctx.context_allocator = .{ .proc = proc_reg, .data = data_reg };
+                    ctx.current_context_allocator_reg = try ctx.emitAllocatorValue(expr, proc_reg, data_reg);
                     return try ctx.emitInt(expr, 0);
                 }
                 if (std.mem.eql(u8, name, "string_slice")) {
@@ -6891,6 +7066,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     }
     switch (ast.tag(expr)) {
         .string_literal => return "string",
+        .bool_literal => return "bool",
         .char_literal => return "u8",
         .integer_literal => return "int",
         .float_literal => return "float32",
@@ -6913,6 +7089,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
         },
         .identifier => {
             const ident_name = ast.tokenSlice(ast.mainToken(expr));
+            if (std.mem.eql(u8, ident_name, "context")) return "Context";
             if (ctx.polymorph_types.get(ident_name)) |actual_type| return actual_type;
             if (std.mem.eql(u8, ident_name, "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH")) return "string";
             if (bindingOptionFieldType(ident_name)) |field_type| return field_type;
@@ -7577,6 +7754,9 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
     if (std.mem.eql(u8, type_name, "Allocator")) {
         if (std.mem.eql(u8, field_name, "proc")) return .{ .offset = 0, .type_text = "s64" };
         if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*void" };
+    }
+    if (std.mem.eql(u8, type_name, "Context")) {
+        if (std.mem.eql(u8, field_name, "allocator")) return .{ .offset = 0, .type_text = "Allocator" };
     }
     if (std.mem.eql(u8, type_name, "string")) {
         if (std.mem.eql(u8, field_name, "count")) return .{ .offset = 0, .type_text = "int" };
@@ -8974,7 +9154,6 @@ fn typeTextSize(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerr
     if (ctx.polymorph_types.get(name)) |actual_type| return try typeTextSize(ctx, actual_type, diag);
     if (std.mem.eql(u8, name, "Allocator")) return 16;
     if (std.mem.eql(u8, name, "Generate_Bindings_Options")) return 8;
-    if (std.mem.eql(u8, name, "Pool") or std.mem.eql(u8, name, "Flat_Pool")) return 8;
     if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u32")) return 4;
     if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "bool")) return 1;
     if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 2;

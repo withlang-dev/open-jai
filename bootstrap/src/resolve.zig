@@ -523,6 +523,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "array_ordered_remove_by_index", .builtin_array_ordered_remove_by_index);
                     try r.symbols.put(allocator, "array_find", .builtin_array_find);
                     try r.symbols.put(allocator, "array_copy", .builtin_array_copy);
+                    try r.putRealSymbol("Allocator", .{ .const_value = @import("Ast.zig").null_node });
+                    try r.putRealSymbol("Context", .{ .const_value = @import("Ast.zig").null_node });
+                    try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
                     try r.symbols.put(allocator, "talloc_string", .builtin_talloc_string);
                     try r.symbols.put(allocator, "make_leak_report", .builtin_make_leak_report);
                     try r.symbols.put(allocator, "log_leak_report", .builtin_log_leak_report);

@@ -30,6 +30,11 @@ const Pointer = struct {
     offset: usize,
 };
 
+const allocator_proc_default: u32 = 1;
+const allocator_proc_pool: u32 = 2;
+const allocator_proc_flat_pool: u32 = 3;
+const allocator_proc_rpmalloc: u32 = 4;
+
 const CodeNode = struct {
     tree: u32 = std.math.maxInt(u32),
     index: u32 = std.math.maxInt(u32),
@@ -201,6 +206,7 @@ pub const VM = struct {
     allocator: std.mem.Allocator,
     program: *const Bytecode.Program,
     memory_blocks: std.ArrayList([]u8) = .empty,
+    allocation_owners: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     global_ptrs: std.ArrayList(?Pointer) = .empty,
     string_builders: std.AutoHashMapUnmanaged(u64, std.ArrayList(u8)) = .empty,
     string_slots: std.AutoHashMapUnmanaged(u64, []const u8) = .empty,
@@ -274,6 +280,7 @@ pub const VM = struct {
     pub fn deinit(vm: *VM) void {
         for (vm.memory_blocks.items) |block| vm.allocator.free(block);
         vm.memory_blocks.deinit(vm.allocator);
+        vm.allocation_owners.deinit(vm.allocator);
         vm.global_ptrs.deinit(vm.allocator);
         var builder_it = vm.string_builders.iterator();
         while (builder_it.next()) |entry| entry.value_ptr.deinit(vm.allocator);
@@ -585,7 +592,7 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM int_trunc_cast register out of range", .{});
                     const value: i64 = switch (regs[inst.arg1]) {
                         .int => |v| v,
-                        .bool => |v| if (v) 1 else 0,
+                        .bool => |v| if (v) @as(i64, 1) else @as(i64, 0),
                         .float => |v| @intFromFloat(v),
                         .ptr => 1,
                         else => return diag.failAt(0, "VM int_trunc_cast requires numeric, bool, or pointer operand", .{}),
@@ -601,7 +608,7 @@ pub const VM = struct {
                     regs[inst.dest] = .{ .float = switch (regs[inst.arg1]) {
                         .float => |v| v,
                         .int => |v| @as(f64, @floatFromInt(v)),
-                        .bool => |v| if (v) 1 else 0,
+                        .bool => |v| if (v) @as(i64, 1) else @as(i64, 0),
                         else => return diag.failAt(0, "VM float_cast requires numeric or bool operand", .{}),
                     } };
                 },
@@ -851,12 +858,21 @@ pub const VM = struct {
                 .exit_process => return .empty,
                 .alloc_heap => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
-                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
+                    regs[inst.dest] = .{ .ptr = try vm.allocOwnedBlock(@max(inst.arg1, 1), allocator_proc_default) };
                 },
                 .alloc_heap_reg, .alloc_heap_owned => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM allocator allocation register out of range", .{});
+                    if (inst.opcode == .alloc_heap_owned and inst.arg2 >= regs.len) return diag.failAt(0, "VM owned allocator register out of range", .{});
                     const size = try registerInt(regs[inst.arg1], diag, "allocation size");
-                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@intCast(@max(size, 1))) };
+                    var owner = allocator_proc_default;
+                    if (inst.opcode == .alloc_heap_owned) {
+                        const allocator_value = try vm.readAllocatorValue(regs[inst.arg2], diag);
+                        owner = allocator_value.proc_id;
+                        if (allocator_value.proc_id == allocator_proc_pool or allocator_value.proc_id == allocator_proc_flat_pool) {
+                            try vm.chargePoolAllocation(allocator_value.data, @intCast(@max(size, 1)), false, diag);
+                        }
+                    }
+                    regs[inst.dest] = .{ .ptr = try vm.allocOwnedBlock(@intCast(@max(size, 1)), owner) };
                 },
                 .allocator_proc_call => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_proc_call destination register out of range", .{});
@@ -864,7 +880,10 @@ pub const VM = struct {
                 },
                 .allocator_owns => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_owns destination register out of range", .{});
-                    regs[inst.dest] = .{ .bool = false };
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM allocator_owns argument register out of range", .{});
+                    const allocator_value = try vm.readAllocatorValue(regs[inst.arg1], diag);
+                    const memory = try registerPointer(regs[inst.arg2], diag, "allocator ownership query pointer");
+                    regs[inst.dest] = .{ .bool = (vm.allocation_owners.get(memory.block) orelse allocator_proc_default) == allocator_value.proc_id };
                 },
                 .allocator_cap_flags => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_cap_flags destination register out of range", .{});
@@ -872,17 +891,31 @@ pub const VM = struct {
                 },
                 .allocator_cap_name => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM allocator_cap_name destination register out of range", .{});
-                    regs[inst.dest] = .{ .string = "OpenJai allocator" };
+                    const name = if (inst.arg1 < regs.len) blk: {
+                        const allocator_value = vm.readAllocatorValue(regs[inst.arg1], diag) catch break :blk "OpenJai allocator";
+                        break :blk allocatorName(allocator_value.proc_id);
+                    } else "OpenJai allocator";
+                    regs[inst.dest] = .{ .string = name };
                 },
                 .pool_get => {
-                    if (inst.dest >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM pool_get register out of range", .{});
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM pool_get register out of range", .{});
                     const size = try registerInt(regs[inst.arg2], diag, "pool allocation size");
-                    regs[inst.dest] = .{ .ptr = try vm.allocBlock(@intCast(@max(size, 1))) };
+                    const pool = try registerPointer(regs[inst.arg1], diag, "pool_get pool pointer");
+                    try vm.chargePoolAllocation(pool, @intCast(@max(size, 1)), true, diag);
+                    const owner = if (inst.arg3 == 1) allocator_proc_flat_pool else allocator_proc_pool;
+                    regs[inst.dest] = .{ .ptr = try vm.allocOwnedBlock(@intCast(@max(size, 1)), owner) };
                 },
-                .pool_release, .pool_reset => {},
+                .pool_release => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM pool_release register out of range", .{});
+                    try vm.setPoolReleased(try registerPointer(regs[inst.arg1], diag, "pool release pointer"), diag);
+                },
+                .pool_reset => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM pool_reset register out of range", .{});
+                    try vm.resetPool(try registerPointer(regs[inst.arg1], diag, "pool reset pointer"), diag);
+                },
                 .pool_bytes_left => {
-                    if (inst.dest >= regs.len) return diag.failAt(0, "VM pool_bytes_left destination register out of range", .{});
-                    regs[inst.dest] = .{ .int = 0 };
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM pool_bytes_left destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = try vm.poolBytesLeft(try registerPointer(regs[inst.arg1], diag, "pool bytes_left pointer"), diag) };
                 },
                 .load_ptr, .load_ptr_byte, .load_ptr_float => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_ptr register out of range", .{});
@@ -1600,8 +1633,9 @@ pub const VM = struct {
                 },
                 .store_ptr_byte => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr_byte register out of range", .{});
-                    const value = switch (regs[inst.arg1]) {
+                    const value: i64 = switch (regs[inst.arg1]) {
                         .int => |v| v,
+                        .bool => |v| if (v) 1 else 0,
                         else => return diag.failAt(0, "VM store_ptr_byte requires integer source", .{}),
                     };
                     try vm.storeByte(try registerPointer(regs[inst.dest], diag, "store_ptr_byte destination"), @intCast(value & 0xff), diag);
@@ -1654,6 +1688,88 @@ pub const VM = struct {
         const index: u32 = @intCast(vm.memory_blocks.items.len);
         try vm.memory_blocks.append(vm.allocator, block);
         return .{ .block = index, .offset = 0 };
+    }
+
+    fn allocOwnedBlock(vm: *VM, size: usize, owner: u32) !Pointer {
+        const ptr = try vm.allocBlock(size);
+        try vm.allocation_owners.put(vm.allocator, ptr.block, owner);
+        return ptr;
+    }
+
+    const AllocatorValue = struct {
+        proc_id: u32,
+        data: ?Pointer,
+    };
+
+    fn readAllocatorValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !AllocatorValue {
+        const ptr = try registerPointer(value, diag, "Allocator value");
+        const proc_id: u32 = @intCast(try vm.loadU64(ptr, diag));
+        var data_addr = ptr;
+        data_addr.offset += 8;
+        const encoded_data = try vm.loadU64(data_addr, diag);
+        return .{
+            .proc_id = proc_id,
+            .data = if (encoded_data == 0) null else try vm.decodePointer(encoded_data, diag),
+        };
+    }
+
+    fn decodePointer(vm: *VM, encoded: u64, diag: Diagnostic) !Pointer {
+        const block_plus_one: u32 = @intCast(encoded >> 32);
+        if (block_plus_one == 0) return diag.failAt(0, "VM encoded pointer has null block", .{});
+        const block = block_plus_one - 1;
+        if (block >= vm.memory_blocks.items.len) return diag.failAt(0, "VM encoded pointer block out of range", .{});
+        const offset: usize = @intCast(encoded & 0xffffffff);
+        if (offset > vm.memory_blocks.items[block].len) return diag.failAt(0, "VM encoded pointer offset out of range", .{});
+        return .{ .block = block, .offset = offset };
+    }
+
+    fn allocatorName(proc_id: u32) []const u8 {
+        return switch (proc_id) {
+            allocator_proc_pool => "modules/Pool",
+            allocator_proc_flat_pool => "modules/Flat_Pool",
+            allocator_proc_rpmalloc => "rpmalloc 1.4.4",
+            else => "stripped-down rpmalloc 1.4.4 intended as Default_Allocator",
+        };
+    }
+
+    fn poolFieldPtr(pool: Pointer, offset: usize) Pointer {
+        return .{ .block = pool.block, .offset = pool.offset + offset };
+    }
+
+    fn ensurePoolInitialized(vm: *VM, pool: Pointer, diag: Diagnostic) !void {
+        const size_ptr = poolFieldPtr(pool, 0);
+        const left_ptr = poolFieldPtr(pool, 8);
+        if (try vm.loadU64(size_ptr, diag) == 0) {
+            std.mem.writeInt(u64, try vm.blockArray8(size_ptr, diag), 65536, .little);
+        }
+        if (try vm.loadU64(left_ptr, diag) == 0) {
+            std.mem.writeInt(u64, try vm.blockArray8(left_ptr, diag), 65536, .little);
+        }
+    }
+
+    fn chargePoolAllocation(vm: *VM, maybe_pool: ?Pointer, size: usize, explicit_get: bool, diag: Diagnostic) !void {
+        const pool = maybe_pool orelse return;
+        try vm.ensurePoolInitialized(pool, diag);
+        const left_ptr = poolFieldPtr(pool, 8);
+        const left = try vm.loadU64(left_ptr, diag);
+        const charged = size + if (explicit_get) @as(usize, 0) else 8;
+        const next = if (left > charged) left - charged else 0;
+        std.mem.writeInt(u64, try vm.blockArray8(left_ptr, diag), next, .little);
+    }
+
+    fn resetPool(vm: *VM, pool: Pointer, diag: Diagnostic) !void {
+        try vm.ensurePoolInitialized(pool, diag);
+        const size = try vm.loadU64(poolFieldPtr(pool, 0), diag);
+        std.mem.writeInt(u64, try vm.blockArray8(poolFieldPtr(pool, 8), diag), size, .little);
+    }
+
+    fn setPoolReleased(vm: *VM, pool: Pointer, diag: Diagnostic) !void {
+        try vm.ensurePoolInitialized(pool, diag);
+        std.mem.writeInt(u64, try vm.blockArray8(poolFieldPtr(pool, 8), diag), 0, .little);
+    }
+
+    fn poolBytesLeft(vm: *VM, pool: Pointer, diag: Diagnostic) !i64 {
+        return @intCast(try vm.loadU64(poolFieldPtr(pool, 8), diag));
     }
 
     fn globalPtr(vm: *VM, index: usize) !Pointer {
@@ -2943,10 +3059,7 @@ pub const VM = struct {
             .type_id => |type_id| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), type_id, .little),
             .type_text => return diag.failAt(0, "VM cannot store Type values into raw memory", .{}),
             .type_info_member => return diag.failAt(0, "VM cannot store Type_Info member values into raw memory", .{}),
-            .ptr => |source_ptr| {
-                const source = try vm.readRemainingBytes(source_ptr, diag);
-                if (source.len != 0) @memcpy(try vm.blockSlice(ptr, source.len, diag), source);
-            },
+            .ptr => |source_ptr| std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), encodePointer(source_ptr), .little),
             .string => |text| try vm.storeStringSlot(ptr, text, diag),
             .code => |code| if (code.text.len != 0) @memcpy(try vm.blockSlice(ptr, code.text.len, diag), code.text),
             .tuple => return diag.failAt(0, "VM cannot store undestructured multi-return values into raw memory", .{}),
@@ -4667,6 +4780,10 @@ fn registerPointer(value: RegisterValue, diag: Diagnostic, context: []const u8) 
         .ptr => |ptr| ptr,
         else => diag.failAt(0, "VM {s} requires pointer value", .{context}),
     };
+}
+
+fn encodePointer(ptr: Pointer) u64 {
+    return (@as(u64, ptr.block) + 1) << 32 | @as(u64, @intCast(ptr.offset & 0xffffffff));
 }
 
 fn compareSortValues(lhs: RegisterValue, rhs: RegisterValue, kind: u32, diag: Diagnostic) !i32 {
