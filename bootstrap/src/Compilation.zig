@@ -1098,11 +1098,8 @@ pub const Compilation = struct {
 
     fn findModule(comp: *Compilation, name: []const u8, from_path: []const u8) ![]u8 {
         const from_dir = std.fs.path.dirname(from_path) orelse ".";
-        const candidates = [_][]const u8{
-            from_dir,
-            "modules",
-        };
-        for (candidates) |base| {
+        var maybe_base: ?[]const u8 = from_dir;
+        while (maybe_base) |base| {
             const module_path = try std.fs.path.join(comp.allocator, &.{ base, name, "module.jai" });
             if (std.Io.Dir.cwd().access(comp.io, module_path, .{})) {
                 return module_path;
@@ -1115,11 +1112,35 @@ pub const Compilation = struct {
             const flat_path = try std.fs.path.join(comp.allocator, &.{ base, flat_name });
             std.Io.Dir.cwd().access(comp.io, flat_path, .{}) catch {
                 comp.allocator.free(flat_path);
+                const enclosing_name = std.fs.path.basename(base);
+                if (std.mem.eql(u8, enclosing_name, name)) {
+                    const enclosing_module_path = try std.fs.path.join(comp.allocator, &.{ base, "module.jai" });
+                    if (std.Io.Dir.cwd().access(comp.io, enclosing_module_path, .{})) {
+                        return enclosing_module_path;
+                    } else |_| {
+                        comp.allocator.free(enclosing_module_path);
+                    }
+                }
+                maybe_base = std.fs.path.dirname(base);
                 continue;
             };
             return flat_path;
         }
-        return error.SourceReadFailed;
+        const module_path = try std.fs.path.join(comp.allocator, &.{ "modules", name, "module.jai" });
+        if (std.Io.Dir.cwd().access(comp.io, module_path, .{})) {
+            return module_path;
+        } else |_| {
+            comp.allocator.free(module_path);
+        }
+
+        const flat_name = try std.fmt.allocPrint(comp.allocator, "{s}.jai", .{name});
+        defer comp.allocator.free(flat_name);
+        const flat_path = try std.fs.path.join(comp.allocator, &.{ "modules", flat_name });
+        std.Io.Dir.cwd().access(comp.io, flat_path, .{}) catch {
+            comp.allocator.free(flat_path);
+            return error.SourceReadFailed;
+        };
+        return flat_path;
     }
 
     fn expandModuleSource(comp: *Compilation, source: []const u8, params: []const u8, module_path: []const u8) ![]const u8 {

@@ -608,7 +608,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
-                    std.mem.eql(u8, module_name, "glfw") or
                     std.mem.eql(u8, module_name, "Bindings_Generator") or
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
@@ -658,35 +657,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         });
                     } else if (std.mem.eql(u8, module_name, "Wav_File")) {
                         try putExternalSymbols(&r, &.{ "load_wav_file", "get_wav_header", "Wav_File", "WAVE_FORMAT_PCM", "WAVE_FORMAT_DVI_ADPCM" });
-                    } else if (std.mem.eql(u8, module_name, "glfw")) {
-                        try putExternalSymbols(&r, &.{
-                            "glfwInit",
-                            "glfwTerminate",
-                            "glfwCreateWindow",
-                            "glfwDestroyWindow",
-                            "glfwMakeContextCurrent",
-                            "glfwWindowShouldClose",
-                            "glfwSetWindowShouldClose",
-                            "glfwSwapBuffers",
-                            "glfwSwapInterval",
-                            "glfwPollEvents",
-                            "glfwGetKey",
-                            "glfwWindowHint",
-                            "glfwSetErrorCallback",
-                            "glfwSetKeyCallback",
-                            "glfwGetFramebufferSize",
-                            "glfwGetProcAddress",
-                            "glfwGetTime",
-                            "GLFW_PRESS",
-                            "GLFW_TRUE",
-                            "GLFW_KEY_ESCAPE",
-                            "GLFW_CONTEXT_VERSION_MAJOR",
-                            "GLFW_CONTEXT_VERSION_MINOR",
-                            "GLFWwindow",
-                            "GLFWmonitor",
-                            "GLFWerrorfun",
-                            "GLFWkeyfun",
-                        });
                     }
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
