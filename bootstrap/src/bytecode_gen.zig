@@ -3914,6 +3914,11 @@ const GenContext = struct {
                         proc.num_registers += 1;
                         if (std.mem.eql(u8, firstTypeWord(clean_field_type), "string")) {
                             try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr_string, .dest = reg, .arg1 = addr, .source_node = expr });
+                        } else if (std.mem.eql(u8, firstTypeWord(clean_field_type), "bool")) {
+                            const raw = proc.num_registers;
+                            proc.num_registers += 1;
+                            try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr_byte, .dest = raw, .arg1 = addr, .source_node = expr });
+                            try proc.instructions.append(program.allocator, .{ .opcode = .int_to_bool_cast, .dest = reg, .arg1 = raw, .source_node = expr });
                         } else {
                             try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr, .dest = reg, .arg1 = addr, .source_node = expr });
                         }

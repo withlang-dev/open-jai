@@ -602,8 +602,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "Input") or
-                    std.mem.eql(u8, module_name, "Window_Creation") or
+                } else if (std.mem.eql(u8, module_name, "Window_Creation") or
                     std.mem.eql(u8, module_name, "Simp") or
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
@@ -617,14 +616,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Input")) {
-                        try putExternalSymbols(&r, &.{
-                            "events_this_frame",          "update_window_events",
-                            "SDL_INIT_VIDEO",             "SDL_Init",
-                            "SDL_GL_GetProcAddress",      "get_window_resizes",
-                            "get_mouse_pointer_position",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
+                    if (std.mem.eql(u8, module_name, "Window_Creation")) {
                         try putExternalSymbols(&r, &.{ "create_window", "get_render_dimensions" });
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putExternalSymbols(&r, &.{

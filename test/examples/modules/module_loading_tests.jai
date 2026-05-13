@@ -81,3 +81,7 @@ sort_module_import_loads_real_source_and_runtime_sorting_works :: () {
 hash_table_module_import_loads_real_source_and_finds_values :: () {
     expect_compile_output("test/examples/modules/hash_table_module_import_value.jai", "hash:true 521-1234 false false \n");
 } @TestProcedure
+
+input_module_import_loads_real_source_and_event_defaults_work :: () {
+    expect_compile_output("test/examples/modules/input_module_import_value.jai", "input:1 1 true true true 640 480 0 0 false\n");
+} @TestProcedure
