@@ -125,6 +125,8 @@ pub const Symbol = union(enum) {
 pub const Resolved = struct {
     allocator: std.mem.Allocator,
     symbols: std.StringHashMapUnmanaged(Symbol) = .empty,
+    explicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
+    used_explicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
     implicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
     used_implicit_placeholders: std.StringHashMapUnmanaged(void) = .empty,
     local_values: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex) = .empty,
@@ -142,6 +144,8 @@ pub const Resolved = struct {
         var it = r.proc_overloads.iterator();
         while (it.next()) |entry| entry.value_ptr.deinit(r.allocator);
         r.proc_overloads.deinit(r.allocator);
+        r.used_explicit_placeholders.deinit(r.allocator);
+        r.explicit_placeholders.deinit(r.allocator);
         r.used_implicit_placeholders.deinit(r.allocator);
         r.implicit_placeholders.deinit(r.allocator);
         r.external_names.deinit(r.allocator);
@@ -162,6 +166,14 @@ pub const Resolved = struct {
         return @intCast(r.used_implicit_placeholders.count());
     }
 
+    pub fn explicitPlaceholderCount(r: *const Resolved) u32 {
+        return @intCast(r.explicit_placeholders.count());
+    }
+
+    pub fn usedExplicitPlaceholderCount(r: *const Resolved) u32 {
+        return @intCast(r.used_explicit_placeholders.count());
+    }
+
     pub fn failIfImplicitPlaceholders(r: *const Resolved, diag: Diagnostic) !void {
         if (r.used_implicit_placeholders.count() == 0) return;
 
@@ -178,6 +190,24 @@ pub const Resolved = struct {
         std.debug.print("implicit placeholder symbols:\n", .{});
         for (names.items) |name| std.debug.print("  {s}\n", .{name});
         return diag.failAt(0, "implicit placeholder symbols are disabled; first used placeholder is '{s}' ({d} used, {d} accepted)", .{ names.items[0], names.items.len, r.implicit_placeholders.count() });
+    }
+
+    pub fn failIfUsedExplicitPlaceholders(r: *const Resolved, diag: Diagnostic) !void {
+        if (r.used_explicit_placeholders.count() == 0) return;
+
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(r.allocator);
+        var it = r.used_explicit_placeholders.keyIterator();
+        while (it.next()) |name| try names.append(r.allocator, name.*);
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+                return std.mem.lessThan(u8, lhs, rhs);
+            }
+        }.lessThan);
+
+        std.debug.print("unresolved explicit placeholder symbols:\n", .{});
+        for (names.items) |name| std.debug.print("  {s}\n", .{name});
+        return diag.failAt(0, "explicit placeholder '{s}' was used but never fulfilled by generated source", .{names.items[0]});
     }
 
     pub fn lookup(r: *const Resolved, name: []const u8) ?Symbol {
@@ -225,6 +255,8 @@ pub const Resolved = struct {
         try entry.value_ptr.append(r.allocator, proc);
         if (r.symbols.get(name)) |sym| {
             if (sym == .placeholder) {
+                _ = r.explicit_placeholders.remove(name);
+                _ = r.used_explicit_placeholders.remove(name);
                 _ = r.implicit_placeholders.remove(name);
                 _ = r.used_implicit_placeholders.remove(name);
                 try r.symbols.put(r.allocator, name, .{ .proc = proc });
@@ -235,6 +267,8 @@ pub const Resolved = struct {
     fn putRealSymbol(r: *Resolved, name: []const u8, sym: Symbol) !void {
         if (r.symbols.get(name)) |existing| {
             if (existing != .placeholder) return;
+            _ = r.explicit_placeholders.remove(name);
+            _ = r.used_explicit_placeholders.remove(name);
             _ = r.implicit_placeholders.remove(name);
             _ = r.used_implicit_placeholders.remove(name);
         }
@@ -273,14 +307,17 @@ fn putExplicitPlaceholder(r: *Resolved, allocator: std.mem.Allocator, name: []co
         if (sym == .placeholder) {
             _ = r.implicit_placeholders.remove(name);
             _ = r.used_implicit_placeholders.remove(name);
+            try r.explicit_placeholders.put(allocator, name, {});
         }
         return;
     }
     try r.symbols.put(allocator, name, .placeholder);
+    try r.explicit_placeholders.put(allocator, name, {});
 }
 
 fn markImplicitPlaceholderUse(r: *Resolved, allocator: std.mem.Allocator, name: []const u8) !void {
     if (r.implicit_placeholders.contains(name)) try r.used_implicit_placeholders.put(allocator, name, {});
+    if (r.explicit_placeholders.contains(name)) try r.used_explicit_placeholders.put(allocator, name, {});
 }
 
 fn putStringBuiltins(r: *Resolved) !void {
@@ -1493,6 +1530,8 @@ test "resolver allows explicit placeholder declarations under strict gate" {
     defer resolved.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
+    try std.testing.expectEqual(@as(u32, 1), resolved.explicitPlaceholderCount());
+    try std.testing.expectEqual(@as(u32, 1), resolved.usedExplicitPlaceholderCount());
     try resolved.failIfImplicitPlaceholders(diag);
 }
 

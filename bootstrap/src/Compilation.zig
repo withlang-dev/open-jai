@@ -137,6 +137,7 @@ pub const Compilation = struct {
             try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
             try comp.executeTopLevelRuns(&ast, &typed, &resolved, diag);
             if (try comp.applyPendingCurrentWorkspaceSources(&source, &applied_current_workspace_sources)) continue;
+            try resolved.failIfUsedExplicitPlaceholders(diag);
 
             if (comp.options.check_only) return;
             if (resolved.main_proc == null) return;
