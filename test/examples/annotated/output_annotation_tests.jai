@@ -30,6 +30,10 @@ swapping_output :: () {
     expect_program_output("examples/05/5.5_swapping.jai", "n is 3 and m is 2\nn2 is 3 and m2 is 2\n");
 } @TestProcedure
 
+write_helpers_output :: () {
+    expect_program_output("examples/05/5.8_write.jai", "Hello, World!\nHello, World!\n-4242");
+} @TestProcedure
+
 printing_output :: () {
     expect_example_annotations("examples/05/5.6_printing.jai");
 } @TestProcedure
@@ -44,6 +48,18 @@ backtick_identifier_output :: () {
 
 bitwise_output :: () {
     expect_example_annotations("examples/06/6.4_bitwise.jai");
+} @TestProcedure
+
+bools_output :: () {
+    expect_program_output("examples/06/6.1_bools.jai", "b1 is true and of type bool\nAre 1 and 1.0 equal? true\nAre Jai and Java different? true\ntrue\n! changes to false\nb2 is false\nb1 and b2 is false\nb1 or b2 is true\n");
+} @TestProcedure
+
+numbers_output :: () {
+    expect_program_output("examples/06/6.3_numbers.jai", "total_score is 55\n8 / 3 is 2\n8.0 / 3 is 2.666667\n8 % 3 is 2\nd is -5069095\ntotal_score has type s64\n74\na is -5069105 and b is 207\na is -5069104 and b is 208\ne is 3\ne is 1\ne is 0\nfalse\ntrue\n4\n4\n10\n");
+} @TestProcedure
+
+formatting_output :: () {
+    expect_program_output("examples/06/6.5_formatting.jai", "108 6c i2 = ff\n07 2.252\n3.140\n3.14\nScientific-notation-formatted float: 1.234235e+10, Decimal value: 12342345234\n");
 } @TestProcedure
 
 scope_output :: () {
