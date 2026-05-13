@@ -29,3 +29,7 @@ workspace_failed_status_reaches_complete_message :: () {
 custom_link_command_phase_waits_for_completion_signal :: () {
     expect_compile_output("test/examples/workspace/custom_link_command_value.jai", "ready:custom-app\npost:custom-app\ncomplete:custom-app error:0\n");
 } @TestProcedure
+
+compile_time_command_line_is_exposed_to_build_scripts :: () {
+    expect_compile_output_contains_with_arg("test/examples/workspace/compile_time_command_line_value.jai", "openjai-command-line-sentinel", "found:true\n");
+} @TestProcedure

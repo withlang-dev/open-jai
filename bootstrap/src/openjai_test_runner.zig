@@ -291,6 +291,20 @@ fn runProcTest(ctx: *Context, proc_test: ProcTest) !TestOutcome {
             const result = try expectCompileOutput(ctx, full_path, needle, .contains);
             if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
             if (result.message.len != 0) ctx.allocator.free(result.message);
+        } else if (std.mem.eql(u8, name, "expect_compile_output_contains_with_arg")) {
+            asserts += 1;
+            const path = try stringArg(ctx.allocator, ast, args, 0, expr);
+            defer ctx.allocator.free(path);
+            const arg = try stringArg(ctx.allocator, ast, args, 1, expr);
+            defer ctx.allocator.free(arg);
+            const needle = try stringArg(ctx.allocator, ast, args, 2, expr);
+            defer ctx.allocator.free(needle);
+            const full_path = try pathFromRepo(ctx.allocator, ctx.repo_root, path);
+            defer ctx.allocator.free(full_path);
+            const extra_args = [_][]const u8{arg};
+            const result = try expectCompileOutputArgs(ctx, full_path, needle, .contains, extra_args[0..]);
+            if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
+            if (result.message.len != 0) ctx.allocator.free(result.message);
         } else if (std.mem.eql(u8, name, "expect_compile_creates_file")) {
             asserts += 1;
             const path = try stringArg(ctx.allocator, ast, args, 0, expr);
@@ -501,10 +515,21 @@ fn expectCompileFailure(ctx: *Context, path: []const u8, expected: []const u8) !
 }
 
 fn expectCompileOutput(ctx: *Context, path: []const u8, expected: []const u8, mode: OutputMode) !TestOutcome {
+    return try expectCompileOutputArgs(ctx, path, expected, mode, &.{});
+}
+
+fn expectCompileOutputArgs(ctx: *Context, path: []const u8, expected: []const u8, mode: OutputMode, extra_args: []const []const u8) !TestOutcome {
     const out = try outputPathFor(ctx, path);
     defer ctx.allocator.free(out);
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(ctx.allocator);
+    try argv.appendSlice(ctx.allocator, &.{ ctx.compiler_path, path, "-o", out, "--runtime", ctx.runtime_path });
+    if (extra_args.len != 0) {
+        try argv.append(ctx.allocator, "--");
+        try argv.appendSlice(ctx.allocator, extra_args);
+    }
     const result = try std.process.run(ctx.allocator, ctx.io, .{
-        .argv = &.{ ctx.compiler_path, path, "-o", out, "--runtime", ctx.runtime_path },
+        .argv = argv.items,
         .cwd = .{ .path = ctx.repo_root },
     });
     defer ctx.allocator.free(result.stdout);

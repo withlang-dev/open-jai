@@ -8,6 +8,7 @@ expect_compile_success :: (path: string) #foreign openjai_test_framework;
 expect_compile_failure :: (path: string, expected_message: string) #foreign openjai_test_framework;
 expect_compile_output :: (path: string, expected: string) #foreign openjai_test_framework;
 expect_compile_output_contains :: (path: string, needle: string) #foreign openjai_test_framework;
+expect_compile_output_contains_with_arg :: (path: string, arg: string, needle: string) #foreign openjai_test_framework;
 expect_program_output :: (path: string, expected: string) #foreign openjai_test_framework;
 expect_program_output_contains :: (path: string, needle: string) #foreign openjai_test_framework;
 expect_compile_creates_file :: (path: string, output_path: string, expected: string) #foreign openjai_test_framework;
