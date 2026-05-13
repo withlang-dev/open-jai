@@ -325,44 +325,6 @@ fn markImplicitPlaceholderUse(r: *Resolved, allocator: std.mem.Allocator, name: 
     if (r.explicit_placeholders.contains(name)) try r.used_explicit_placeholders.put(allocator, name, {});
 }
 
-fn isSourceModuleName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Basic") or
-        std.mem.eql(u8, name, "Bindings_Generator") or
-        std.mem.eql(u8, name, "BuildCpp") or
-        std.mem.eql(u8, name, "Check") or
-        std.mem.eql(u8, name, "Compiler") or
-        std.mem.eql(u8, name, "Debug") or
-        std.mem.eql(u8, name, "File") or
-        std.mem.eql(u8, name, "File_Utilities") or
-        std.mem.eql(u8, name, "Flat_Pool") or
-        std.mem.eql(u8, name, "GL") or
-        std.mem.eql(u8, name, "GetRect") or
-        std.mem.eql(u8, name, "Hash_Table") or
-        std.mem.eql(u8, name, "Input") or
-        std.mem.eql(u8, name, "Machine_X64") or
-        std.mem.eql(u8, name, "Mail") or
-        std.mem.eql(u8, name, "Math") or
-        std.mem.eql(u8, name, "POSIX") or
-        std.mem.eql(u8, name, "Pool") or
-        std.mem.eql(u8, name, "Process") or
-        std.mem.eql(u8, name, "Program_Print") or
-        std.mem.eql(u8, name, "Random") or
-        std.mem.eql(u8, name, "SDL") or
-        std.mem.eql(u8, name, "Simp") or
-        std.mem.eql(u8, name, "Sort") or
-        std.mem.eql(u8, name, "Sound_Player") or
-        std.mem.eql(u8, name, "String") or
-        std.mem.eql(u8, name, "System") or
-        std.mem.eql(u8, name, "TestModule_Params") or
-        std.mem.eql(u8, name, "TestScope") or
-        std.mem.eql(u8, name, "Thread") or
-        std.mem.eql(u8, name, "Wav_File") or
-        std.mem.eql(u8, name, "Window_Creation") or
-        std.mem.eql(u8, name, "Windows") or
-        std.mem.eql(u8, name, "Windows_Resources") or
-        std.mem.eql(u8, name, "rpmalloc");
-}
-
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool, external_names: []const []const u8) !Resolved {
     var r = Resolved{ .allocator = allocator, .require_main = require_main };
     errdefer r.deinit();
@@ -447,18 +409,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
             .import_decl => {
                 const module_name = ast.stringTokenContents(ast.data(decl).lhs);
                 if (ast.data(decl).rhs != 0) {
-                    if (std.mem.eql(u8, module_name, "raylib")) {
-                        try putExternalSymbols(&r, &.{
-                            "InitWindow",       "CloseWindow",     "SetTargetFPS", "WindowShouldClose",
-                            "GetScreenWidth",   "GetScreenHeight", "GetFrameTime", "BeginDrawing",
-                            "EndDrawing",       "ClearBackground", "DrawText",     "DrawRectangle",
-                            "DrawRectangleRec", "DrawCircle",      "PI",
-                        });
-                    } else if (isSourceModuleName(module_name)) continue;
-                    continue;
+                    return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'; module loader did not provide source for this #import,dir", .{module_name});
                 }
-                if (isSourceModuleName(module_name)) continue;
-                return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
+                return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'; module loader did not provide source for this import", .{module_name});
             },
             .load_decl => {
                 const load_name = ast.stringTokenContents(ast.data(decl).lhs);
@@ -1062,7 +1015,6 @@ test "scope_export restores non-file visibility after #scope_file" {
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "#load \"alpha.jai\";\n" ++
         "#scope_file;\n" ++
         "hidden :: 1;\n" ++
@@ -1154,7 +1106,6 @@ test "resolver lets real declarations replace implicit placeholders" {
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "proc :: () {}\n" ++
         "main :: () { proc(); }\n";
     const diag = Diagnostic.init(std.testing.allocator, "placeholder_replacement.jai", source);
@@ -1182,7 +1133,6 @@ test "resolver does not globally seed compiler APIs as placeholders" {
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "for_expansion :: (body: Code, flags: For_Flags) #expand {}\n" ++
         "main :: () {}\n";
     const diag = Diagnostic.init(std.testing.allocator, "no_global_compiler_placeholders.jai", source);
@@ -1207,7 +1157,7 @@ test "resolver does not globally seed compiler APIs as placeholders" {
     try resolved.failIfImplicitPlaceholders(diag);
 }
 
-test "basic import does not create implicit placeholders" {
+test "resolver rejects raw imports that were not expanded by module loader" {
     const lexer = @import("lexer.zig");
     const parser = @import("parser.zig");
 
@@ -1226,12 +1176,7 @@ test "basic import does not create implicit placeholders" {
         ast.deinit();
     }
 
-    var resolved = try resolve(std.testing.allocator, &ast, diag, true, &.{});
-    defer resolved.deinit();
-
-    try std.testing.expectEqual(@as(u32, 0), resolved.implicitPlaceholderCount());
-    try std.testing.expectEqual(@as(u32, 0), resolved.usedImplicitPlaceholderCount());
-    try resolved.failIfImplicitPlaceholders(diag);
+    try std.testing.expectError(error.CompilationFailed, resolve(std.testing.allocator, &ast, diag, true, &.{}));
 }
 
 test "resolver treats OS as a real compiler-provided value" {
@@ -1239,7 +1184,6 @@ test "resolver treats OS as a real compiler-provided value" {
     const parser = @import("parser.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "main :: () { print(\"%\\n\", OS); }\n";
     const diag = Diagnostic.init(std.testing.allocator, "os_builtin.jai", source);
 

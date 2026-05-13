@@ -1707,7 +1707,6 @@ test "sema allows calling local values inferred as Any" {
     const resolve_mod = @import("resolve.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "funcs: [4] () -> int;\n" ++
         "setup :: (theme: int) #expand {\n" ++
         "  proc := funcs[theme];\n" ++

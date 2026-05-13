@@ -21,12 +21,21 @@ const allocator_cap_is_this_yours: u32 = 1 << 3;
 pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typed, resolved: *const Resolved, diag: Diagnostic) !Bytecode.Program {
     var program = Bytecode.Program.init(allocator);
     errdefer program.deinit();
+    var reachable_runtime_procs: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+    defer reachable_runtime_procs.deinit(allocator);
+    if (typed.main_proc) |main_proc| {
+        var seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer seen.deinit(allocator);
+        try addReachableProc(allocator, ast, resolved, &reachable_runtime_procs, &seen, main_proc);
+    }
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
     for (root_decls, 0..) |decl_idx, i| {
         const decl: NodeIndex = @intCast(decl_idx);
         if (ast.tag(decl) != .proc_decl) continue;
+        if (typed.main_proc != null and !reachable_runtime_procs.contains(decl)) continue;
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
         if (procHasExpandModifier(ast, decl, next_decl)) continue;
+        if (procHasForeignModifierLocal(ast, decl)) continue;
         if (procIsCompileTimeOnlyHost(ast, decl)) continue;
         if (procSignature(ast, decl)) |sig| if (procSignatureContainsPolymorphicTypeResolved(ast, resolved, sig)) continue;
         if (typed.main_proc != null and decl == typed.main_proc.?) continue;
@@ -100,6 +109,7 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
         if (!reachable.contains(decl)) continue;
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
         if (procHasExpandModifier(ast, decl, next_decl) and decl != proc_node and !procHasReturnValue(ast, decl)) continue;
+        if (procHasForeignModifierLocal(ast, decl)) continue;
         if (decl != proc_node) if (procSignature(ast, decl)) |sig| if (procSignatureContainsPolymorphicTypeResolved(ast, resolved, sig)) continue;
         if (typed) |t| if (t.main_proc != null and decl == t.main_proc.?) continue;
 
@@ -452,6 +462,7 @@ const GenContext = struct {
     fn tryEmitDirectProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         if (!ctx.allow_root_proc_calls) return null;
         const ast = ctx.ast;
+        if (procHasForeignModifierLocal(ast, proc_node)) return null;
         if (procHasExpandModifierLocal(ast, proc_node) and !procHasReturnValue(ast, proc_node)) return null;
         const sig = procSignature(ast, proc_node) orelse return null;
         if (procSignatureContainsPolymorphicType(ctx, sig)) return null;
@@ -512,6 +523,23 @@ const GenContext = struct {
 
     fn typeIdCanUseDirectCall(type_id: u32) bool {
         return type_id == 0 or type_id == 1 or (type_id >= 2 and type_id <= 15) or type_id == 17;
+    }
+
+    fn emitForeignProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const ast = ctx.ast;
+        for (args) |arg_idx| {
+            const arg: NodeIndex = @intCast(arg_idx);
+            if (ast.tag(arg) == .assign_stmt)
+                _ = try ctx.genExpr(ast.data(arg).rhs, diag)
+            else
+                _ = try genCallArg(ctx, arg, diag);
+        }
+        if (procSignature(ast, proc_node)) |sig| {
+            if (sig.return_type != @import("Ast.zig").null_node) {
+                return try ctx.genDefaultValue(sig.return_type, call_expr, diag);
+            }
+        }
+        return try ctx.emitInt(call_expr, 0);
     }
 
     fn isStringBuilderPointerType(ast: *const Ast, type_node: NodeIndex) bool {
@@ -693,12 +721,12 @@ const GenContext = struct {
 
     fn emitCompoundAssignment(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
-        const current = try ctx.genExpr(lhs, diag);
+        const current = try ctx.genLvalueCurrentValue(lhs, diag);
         const operand = try ctx.genExpr(rhs, diag);
         const result = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
         try ctx.proc.instructions.append(ctx.program.allocator, .{
-            .opcode = compoundAssignmentOpcode(ctx, lhs, rhs, op),
+            .opcode = compoundAssignmentOpcode(ctx, lhs, rhs, op, diag),
             .dest = result,
             .arg1 = current,
             .arg2 = operand,
@@ -753,6 +781,32 @@ const GenContext = struct {
             else => {},
         }
         return result;
+    }
+
+    fn genLvalueCurrentValue(ctx: *GenContext, lhs: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const ast = ctx.ast;
+        switch (ast.tag(lhs)) {
+            .field_access, .index_expr => {
+                if (ast.tag(lhs) == .field_access and std.mem.eql(u8, ast.tokenSlice(ast.data(lhs).rhs), "_s64") and isCodeNodeExpression(ctx, ast.data(lhs).lhs, diag)) {
+                    return try ctx.genExpr(lhs, diag);
+                }
+                if (typeTextForExpr(ctx, lhs, diag)) |type_text| {
+                    const addr = try genAddressOfLvalue(ctx, lhs, diag);
+                    return try emitLoadFromAddressForType(ctx, addr, type_text, lhs, diag);
+                }
+            },
+            .unary_expr => {
+                const op = ast.tokens[ast.mainToken(lhs)].tag;
+                if (op == .shift_left or op == .dot_star) {
+                    if (typeTextForExpr(ctx, lhs, diag)) |type_text| {
+                        const addr = try genAddressOfLvalue(ctx, lhs, diag);
+                        return try emitLoadFromAddressForType(ctx, addr, type_text, lhs, diag);
+                    }
+                }
+            },
+            else => {},
+        }
+        return try ctx.genExpr(lhs, diag);
     }
 
     fn isLoopIndexIdentifier(ctx: *GenContext, ident: NodeIndex, for_node: NodeIndex) bool {
@@ -1727,7 +1781,7 @@ const GenContext = struct {
         var visible_procs = std.ArrayList(u8).empty;
         defer visible_procs.deinit(allocator);
         try ctx.appendVisibleInsertedProcSources(&visible_procs);
-        const source = try std.fmt.allocPrint(allocator, "#import \"Basic\";\n{s}\nmain :: () {{\n{s}{s}\n}}\n", .{ visible_procs.items, code, suffix });
+        const source = try std.fmt.allocPrint(allocator, "{s}\nmain :: () {{\n{s}{s}\n}}\n", .{ visible_procs.items, code, suffix });
         defer allocator.free(source);
 
         const lexer = @import("lexer.zig");
@@ -2161,7 +2215,7 @@ const GenContext = struct {
                     const reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     try ctx.proc.instructions.append(ctx.program.allocator, .{
-                        .opcode = compoundAssignmentOpcode(ctx, source_node, source_node, op.tag),
+                        .opcode = compoundAssignmentOpcode(ctx, source_node, source_node, op.tag, diag),
                         .dest = reg,
                         .arg1 = lhs_reg,
                         .arg2 = rhs_reg,
@@ -4000,7 +4054,7 @@ const GenContext = struct {
                     }
                 }
                 const opcode: Bytecode.Opcode = switch (op) {
-                    .star, .star_equal => if (ctx.typed != null and (ctx.typed.?.typeOf(ast.data(expr).lhs).isFloat() or ctx.typed.?.typeOf(ast.data(expr).rhs).isFloat())) .mul_float else .mul_int,
+                    .star, .star_equal => if (exprUsesFloatArithmetic(ctx, ast.data(expr).lhs, diag) or exprUsesFloatArithmetic(ctx, ast.data(expr).rhs, diag)) .mul_float else .mul_int,
                     .percent => .rem_int,
                     .ampersand, .ampersand_equal => .bit_and,
                     .pipe, .pipe_equal => .bit_or,
@@ -4009,9 +4063,9 @@ const GenContext = struct {
                     .shift_right => .shr_int,
                     .shift_left_rotate => .rotl_int,
                     .shift_right_rotate => .shr_int,
-                    .plus, .plus_equal => if (ctx.typed != null and (ctx.typed.?.typeOf(ast.data(expr).lhs).isFloat() or ctx.typed.?.typeOf(ast.data(expr).rhs).isFloat())) .add_float else .add_int,
-                    .slash, .slash_equal => if (ctx.typed != null and (ctx.typed.?.typeOf(ast.data(expr).lhs).isFloat() or ctx.typed.?.typeOf(ast.data(expr).rhs).isFloat())) .div_float else .div_int,
-                    .minus, .minus_equal => if (ctx.typed != null and (ctx.typed.?.typeOf(ast.data(expr).lhs).isFloat() or ctx.typed.?.typeOf(ast.data(expr).rhs).isFloat())) .sub_float else .sub_int,
+                    .plus, .plus_equal => if (exprUsesFloatArithmetic(ctx, ast.data(expr).lhs, diag) or exprUsesFloatArithmetic(ctx, ast.data(expr).rhs, diag)) .add_float else .add_int,
+                    .slash, .slash_equal => if (exprUsesFloatArithmetic(ctx, ast.data(expr).lhs, diag) or exprUsesFloatArithmetic(ctx, ast.data(expr).rhs, diag)) .div_float else .div_int,
+                    .minus, .minus_equal => if (exprUsesFloatArithmetic(ctx, ast.data(expr).lhs, diag) or exprUsesFloatArithmetic(ctx, ast.data(expr).rhs, diag)) .sub_float else .sub_int,
                     .equal_equal, .keyword_case => .cmp_eq,
                     .bang_equal => .cmp_ne,
                     .less_than => .cmp_lt_int,
@@ -4494,6 +4548,7 @@ const GenContext = struct {
                 if (ast.tag(callee) == .proc_decl) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
+                    if (procHasForeignModifierLocal(ast, callee)) return try ctx.emitForeignProcCall(callee, args, expr, diag);
                     if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
                     if (!procIsCompileTimeOnlyHost(ast, callee) or procHasBody(ast, callee)) {
                         if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
@@ -4514,6 +4569,7 @@ const GenContext = struct {
                         if (try ctx.genCompilerIntrinsicCall(field_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
                         if (ctx.resolved.lookup(field_name)) |field_sym| switch (field_sym) {
                             .proc => |proc_node| {
+                                if (procHasForeignModifierLocal(ast, proc_node)) return try ctx.emitForeignProcCall(proc_node, args, expr, diag);
                                 if (try ctx.tryEmitDirectProcCall(proc_node, args, expr, diag)) |reg| return reg;
                                 if (!procIsCompileTimeOnlyHost(ast, proc_node) or procHasBody(ast, proc_node)) {
                                     if (try ctx.tryInlineProcCall(proc_node, args, expr, diag)) |reg| return reg;
@@ -4521,6 +4577,7 @@ const GenContext = struct {
                             },
                             .const_value => |value_node| {
                                 if (value_node != @import("Ast.zig").null_node and ast.tag(value_node) == .proc_decl) {
+                                    if (procHasForeignModifierLocal(ast, value_node)) return try ctx.emitForeignProcCall(value_node, args, expr, diag);
                                     if (try ctx.tryEmitDirectProcCall(value_node, args, expr, diag)) |reg| return reg;
                                     if (!procIsCompileTimeOnlyHost(ast, value_node) or procHasBody(ast, value_node)) {
                                         if (try ctx.tryInlineProcCall(value_node, args, expr, diag)) |reg| return reg;
@@ -4647,7 +4704,7 @@ const GenContext = struct {
                         if (std.mem.eql(u8, name, "-")) {
                             const reg = proc.num_registers;
                             proc.num_registers += 1;
-                            const opcode: Bytecode.Opcode = if (ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[0])).isFloat()) .neg_float else .neg_int;
+                            const opcode: Bytecode.Opcode = if (exprUsesFloatArithmetic(ctx, @intCast(args[0]), diag)) .neg_float else .neg_int;
                             try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = lhs, .source_node = expr });
                             return reg;
                         }
@@ -4656,8 +4713,8 @@ const GenContext = struct {
                     const rhs = try ctx.genExpr(@intCast(args[1]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
-                    const lhs_float = ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[0])).isFloat();
-                    const rhs_float = ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[1])).isFloat();
+                    const lhs_float = exprUsesFloatArithmetic(ctx, @intCast(args[0]), diag);
+                    const rhs_float = exprUsesFloatArithmetic(ctx, @intCast(args[1]), diag);
                     const opcode: Bytecode.Opcode = if (std.mem.eql(u8, name, "+"))
                         if (lhs_float or rhs_float) .add_float else .add_int
                     else if (std.mem.eql(u8, name, "-"))
@@ -5521,6 +5578,7 @@ const GenContext = struct {
                     }
                     if (is_user_proc_call) {
                         if (ctx.resolveProcCallTarget(callee, name, args.len)) |target_proc| {
+                            if (procHasForeignModifierLocal(ast, target_proc)) return try ctx.emitForeignProcCall(target_proc, args, expr, diag);
                             if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
                             if (!procIsCompileTimeOnlyHost(ast, target_proc) or procHasBody(ast, target_proc)) {
                                 if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
@@ -8058,7 +8116,7 @@ fn typeTextIsScalarComparable(raw: []const u8) bool {
         std.mem.eql(u8, name, "float64");
 }
 
-fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) !?FieldInfo {
+fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return null;
     if (std.mem.eql(u8, type_name, "Allocator")) {
@@ -8454,8 +8512,8 @@ fn isCompoundAssignmentOp(op: TokenTag) bool {
         op == .caret_equal;
 }
 
-fn compoundAssignmentOpcode(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag) Bytecode.Opcode {
-    const float_arithmetic = ctx.typed != null and (ctx.typed.?.typeOf(lhs).isFloat() or ctx.typed.?.typeOf(rhs).isFloat());
+fn compoundAssignmentOpcode(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag, diag: Diagnostic) Bytecode.Opcode {
+    const float_arithmetic = exprUsesFloatArithmetic(ctx, lhs, diag) or exprUsesFloatArithmetic(ctx, rhs, diag);
     return switch (op) {
         .plus_equal => if (float_arithmetic) .add_float else .add_int,
         .minus_equal => if (float_arithmetic) .sub_float else .sub_int,
@@ -8467,6 +8525,15 @@ fn compoundAssignmentOpcode(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op
         .caret_equal => .bit_xor,
         else => unreachable,
     };
+}
+
+fn exprUsesFloatArithmetic(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
+    if (ctx.typed != null and ctx.typed.?.typeOf(expr).isFloat()) return true;
+    const type_text = typeTextForExpr(ctx, expr, diag) orelse return false;
+    const name = firstTypeWord(stripPointerText(std.mem.trim(u8, type_text, " \t\r\n")));
+    return std.mem.eql(u8, name, "float") or
+        std.mem.eql(u8, name, "float32") or
+        std.mem.eql(u8, name, "float64");
 }
 
 fn parseIntLiteral(ast: *const Ast, expr: NodeIndex, diag: Diagnostic) !i64 {
@@ -8673,6 +8740,19 @@ fn procHasExpandModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     const start = token_start - @min(token_start, 200);
     if (body_start <= start or body_start > ast.source.len) return false;
     return std.mem.indexOf(u8, ast.source[start..body_start], "#expand") != null;
+}
+
+fn procHasForeignModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
+    if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
+    const token_start = ast.tokens[ast.mainToken(proc)].start;
+    const body = ast.data(proc).lhs;
+    const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
+    const start = token_start - @min(token_start, 200);
+    if (body_start <= start or body_start > ast.source.len) return false;
+    const header = ast.source[start..body_start];
+    return std.mem.indexOf(u8, header, "#foreign") != null or
+        std.mem.indexOf(u8, header, "#system_library") != null or
+        std.mem.indexOf(u8, header, "#library") != null;
 }
 
 fn procHasReturnValue(ast: *const Ast, proc: NodeIndex) bool {
@@ -9274,7 +9354,7 @@ fn containerFieldSizeFromBody(ctx: *GenContext, body: []const u8, field_name: []
     return null;
 }
 
-fn containerFieldOffsetFromSource(ctx: *GenContext, type_node: NodeIndex, field_name: []const u8, diag: Diagnostic) !?u64 {
+fn containerFieldOffsetFromSource(ctx: *GenContext, type_node: NodeIndex, field_name: []const u8, diag: Diagnostic) anyerror!?u64 {
     const body = containerBodySource(ctx.ast, type_node) orelse return null;
     var offset: u64 = 0;
     var it = FieldSegmentIterator{ .source = body };
@@ -9287,13 +9367,16 @@ fn containerFieldOffsetFromSource(ctx: *GenContext, type_node: NodeIndex, field_
             offset = alignForward(offset, field_align);
             const name = lastWord(std.mem.trim(u8, raw, " \t\r\n"));
             if (std.mem.eql(u8, name, field_name)) return offset;
+            if (parsed.is_using) {
+                if (try fieldInfoFromTypeText(ctx, parsed.type_text, field_name, diag)) |nested| return offset + nested.offset;
+            }
             offset += field_size;
         }
     }
     return null;
 }
 
-fn containerFieldInfoFromSource(ctx: *GenContext, type_node: NodeIndex, field_name: []const u8, diag: Diagnostic) !?FieldInfo {
+fn containerFieldInfoFromSource(ctx: *GenContext, type_node: NodeIndex, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
     const body = containerBodySource(ctx.ast, type_node) orelse return null;
     var offset: u64 = 0;
     var it = FieldSegmentIterator{ .source = body };
@@ -9306,6 +9389,11 @@ fn containerFieldInfoFromSource(ctx: *GenContext, type_node: NodeIndex, field_na
             offset = alignForward(offset, field_align);
             const name = lastWord(std.mem.trim(u8, raw, " \t\r\n"));
             if (std.mem.eql(u8, name, field_name)) return .{ .offset = offset, .type_text = parsed.type_text };
+            if (parsed.is_using) {
+                if (try fieldInfoFromTypeText(ctx, parsed.type_text, field_name, diag)) |nested| {
+                    return .{ .offset = offset + nested.offset, .type_text = nested.type_text };
+                }
+            }
             offset += field_size;
         }
     }
@@ -9412,6 +9500,7 @@ const ParsedFieldSegment = struct {
     names_text: []const u8,
     type_text: []const u8,
     name_count: u64,
+    is_using: bool = false,
 };
 
 fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
@@ -9423,12 +9512,16 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
     var names = std.mem.trim(u8, clean[0..colon], " \t\r\n");
     if (names.len == 0) return null;
     while (std.mem.startsWith(u8, names, "#as")) names = std.mem.trim(u8, names[3..], " \t\r\n");
-    while (std.mem.startsWith(u8, names, "using")) names = std.mem.trim(u8, names[5..], " \t\r\n");
+    var is_using = false;
+    while (std.mem.startsWith(u8, names, "using")) {
+        is_using = true;
+        names = std.mem.trim(u8, names[5..], " \t\r\n");
+    }
     var type_text = std.mem.trim(u8, clean[colon + 1 ..], " \t\r\n");
     if (std.mem.indexOfScalar(u8, type_text, '#')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
     if (std.mem.indexOfScalar(u8, type_text, '=')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
     if (type_text.len == 0) return null;
-    return .{ .names_text = names, .type_text = type_text, .name_count = countFieldNames(names) };
+    return .{ .names_text = names, .type_text = type_text, .name_count = countFieldNames(names), .is_using = is_using };
 }
 
 fn countFieldNames(names: []const u8) u64 {
@@ -10221,7 +10314,7 @@ test "Phase 2 xx autocast lowers to integer trunc cast" {
     const resolve = @import("resolve.zig");
     const sema = @import("Sema.zig");
 
-    const source = "#import \"Basic\";\nmain :: () {\n c: u16 = 50;\n b: u8 = 10;\n b = xx c;\n print(\"%\\n\", b);\n}\n";
+    const source = "main :: () {\n c: u16 = 50;\n b: u8 = 10;\n b = xx c;\n print(\"%\\n\", b);\n}\n";
     const diag = Diagnostic.init(std.testing.allocator, "xx_probe.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
@@ -10260,7 +10353,7 @@ test "Phase 1 hello sailor lowers to expected bytecode flow" {
     const resolve = @import("resolve.zig");
     const sema = @import("Sema.zig");
 
-    const source = "#import \"Basic\";\nmain :: () {\n print(\"Hello, Sailor from Jai!\\n\");\n}\n";
+    const source = "main :: () {\n print(\"Hello, Sailor from Jai!\\n\");\n}\n";
     const diag = Diagnostic.init(std.testing.allocator, "hello.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
@@ -10303,7 +10396,7 @@ test "compiler_write_file lowers to file write bytecode" {
     const resolve = @import("resolve.zig");
     const sema = @import("Sema.zig");
 
-    const source = "#import \"Basic\";\nmain :: () {\n ok := compiler_write_file(\"out/tmp/write_probe.txt\", \"probe\\n\");\n if !ok exit(1);\n}\n";
+    const source = "main :: () {\n ok := compiler_write_file(\"out/tmp/write_probe.txt\", \"probe\\n\");\n if !ok exit(1);\n}\n";
     const diag = Diagnostic.init(std.testing.allocator, "write_probe.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
@@ -10346,7 +10439,6 @@ test "module alias compiler intrinsic calls lower to host opcodes" {
     const sema = @import("Sema.zig");
 
     const source =
-        "#import \"Basic\";\n" ++
         "helper :: () {\n" ++
         "  Compiler :: #import \"Compiler\";\n" ++
         "  code := #code 1 + 2;\n" ++
@@ -10393,7 +10485,7 @@ test "push_context emits the nested block body" {
     const resolve = @import("resolve.zig");
     const sema = @import("Sema.zig");
 
-    const source = "#import \"Basic\";\nmain :: () {\n ctx := 0;\n push_context ctx {\n  print(\"inner\\n\");\n }\n print(\"outer\\n\");\n}\n";
+    const source = "main :: () {\n ctx := 0;\n push_context ctx {\n  print(\"inner\\n\");\n }\n print(\"outer\\n\");\n}\n";
     const diag = Diagnostic.init(std.testing.allocator, "push_context.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);

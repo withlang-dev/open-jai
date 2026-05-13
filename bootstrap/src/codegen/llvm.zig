@@ -179,6 +179,10 @@ const LlvmEnv = struct {
     llvm_i64: c.LLVMTypeRef,
     llvm_f64: c.LLVMTypeRef,
     ptr_ty: c.LLVMTypeRef,
+    current_proc_name: []const u8 = "<none>",
+    current_proc_index: usize = 0,
+    current_opcode: Bytecode.Opcode = .ret_void,
+    current_instruction_index: usize = 0,
 };
 
 pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program, output_obj: []const u8, diag: Diagnostic) !void {
@@ -444,6 +448,8 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     for (program.procs.items, 0..) |*helper_proc, i| {
         if (program.main_proc != null and i == program.main_proc.?) continue;
         const helper_fn = proc_functions[i] orelse continue;
+        env.current_proc_name = helper_proc.name;
+        env.current_proc_index = i;
         const helper_entry = c.LLVMAppendBasicBlockInContext(context, helper_fn, "entry");
         c.LLVMPositionBuilderAtEnd(builder, helper_entry);
         const helper_registers = try allocator.alloc(RegisterValue, @max(helper_proc.num_registers, 1));
@@ -466,6 +472,8 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         const entry = c.LLVMAppendBasicBlockInContext(context, user_main_fn.?, "entry");
         c.LLVMPositionBuilderAtEnd(builder, entry);
         const proc = &program.procs.items[main_proc];
+        env.current_proc_name = proc.name;
+        env.current_proc_index = main_proc;
         const registers = try allocator.alloc(RegisterValue, @max(proc.num_registers, 1));
         defer allocator.free(registers);
         @memset(registers, .{});
@@ -538,6 +546,8 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
     _ = c.LLVMBuildBr(env.builder, blocks[0]);
 
     for (proc.instructions.items, 0..) |inst, instruction_index| {
+        env.current_opcode = inst.opcode;
+        env.current_instruction_index = instruction_index;
         c.LLVMPositionBuilderAtEnd(env.builder, blocks[instruction_index]);
         var terminates_block = false;
         switch (inst.opcode) {
@@ -2052,7 +2062,7 @@ fn valueAsInt(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValu
         .undefined_string => c.LLVMConstInt(env.llvm_i64, 0, 0),
         .type_id => value.llvm_value,
         .void_value => c.LLVMConstInt(env.llvm_i64, 0, 0),
-        else => diag.failAt(0, "expected integer-compatible register, got {s}", .{@tagName(value.kind)}),
+        else => diag.failAt(0, "expected integer-compatible register in proc '{s}' ({d}) for LLVM instruction {s}#{d}, got {s}", .{ env.current_proc_name, env.current_proc_index, @tagName(env.current_opcode), env.current_instruction_index, @tagName(value.kind) }),
     };
 }
 
@@ -2127,7 +2137,7 @@ fn valueAsFloat(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMVa
     return switch (value.kind) {
         .float => value.llvm_value,
         .int, .int_addr, .bool, .bool_addr => c.LLVMBuildSIToFP(env.builder, try valueAsInt(env, value, diag), env.llvm_f64, "tofp"),
-        else => diag.failAt(0, "expected numeric register", .{}),
+        else => diag.failAt(0, "expected numeric register in proc '{s}' ({d}) for LLVM instruction {s}#{d}, got {s}", .{ env.current_proc_name, env.current_proc_index, @tagName(env.current_opcode), env.current_instruction_index, @tagName(value.kind) }),
     };
 }
 

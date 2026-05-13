@@ -1294,6 +1294,10 @@ pub const Compilation = struct {
             return error.SourceReadFailed;
         };
         defer comp.allocator.free(raw_source);
+        return try comp.processSourceWithLoads(path, raw_source);
+    }
+
+    fn processSourceWithLoads(comp: *Compilation, path: []const u8, raw_source: []const u8) anyerror![]u8 {
         const source = try comp.normalizeSpacedDirectives(raw_source);
         defer comp.allocator.free(source);
         var module_prelude = std.ArrayList(u8).empty;
@@ -1308,15 +1312,22 @@ pub const Compilation = struct {
             const absolute_idx = source.len - rest.len + idx;
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
             const line = rest[idx .. idx + line_end];
-            const name_start = idx + "#import \"".len;
+            const directive_end = idx + "#import".len;
+            const quote_rel = std.mem.indexOfScalar(u8, rest[directive_end .. idx + line_end], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "expected module string after #import", .{});
+            const name_start = directive_end + quote_rel + 1;
             const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module name", .{});
             const module_name = rest[name_start .. name_start + name_end_rel];
+            const after_name = name_start + name_end_rel + 1;
             const line_start = if (std.mem.lastIndexOfScalar(u8, rest[0..idx], '\n')) |newline| newline + 1 else 0;
             const import_prefix = std.mem.trim(u8, rest[line_start..idx], " \t\r\n");
             const assigned_import = import_prefix.len != 0;
             const comment_start = std.mem.indexOf(u8, line, "//") orelse line.len;
-            const import_syntax = line[0..comment_start];
-            if (std.mem.indexOfScalar(u8, import_syntax, '(')) |param_start_rel| {
+            const import_syntax_end = idx + comment_start;
+            var param_start: ?usize = null;
+            var scan = after_name;
+            while (scan < import_syntax_end and std.ascii.isWhitespace(rest[scan])) : (scan += 1) {}
+            if (scan < import_syntax_end and rest[scan] == '(') param_start = scan + 1;
+            if (param_start) |param_start_value| {
                 try out.appendSlice(comp.allocator, rest[0..idx]);
                 if (assigned_import) {
                     try out.appendSlice(comp.allocator, rest[idx .. idx + line_end]);
@@ -1324,9 +1335,8 @@ pub const Compilation = struct {
                     rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                     continue;
                 }
-                const param_start = idx + param_start_rel + 1;
-                const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start..], ')') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module parameters", .{});
-                const params = rest[param_start .. param_start + param_end_rel];
+                const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start_value..], ')') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module parameters", .{});
+                const params = rest[param_start_value .. param_start_value + param_end_rel];
                 const module_path = comp.findModule(module_name, path) catch {
                     try out.appendSlice(comp.allocator, "#import \"");
                     try out.appendSlice(comp.allocator, module_name);
@@ -1342,7 +1352,9 @@ pub const Compilation = struct {
                 defer comp.allocator.free(module_src);
                 const expanded = try comp.expandModuleSource(module_src, params, module_path);
                 defer comp.allocator.free(expanded);
-                try out.appendSlice(comp.allocator, expanded);
+                const loaded_expanded = try comp.processSourceWithLoads(module_path, expanded);
+                defer comp.allocator.free(loaded_expanded);
+                try out.appendSlice(comp.allocator, loaded_expanded);
                 try out.append(comp.allocator, '\n');
                 rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                 continue;
