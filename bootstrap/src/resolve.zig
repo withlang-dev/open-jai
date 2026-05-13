@@ -565,15 +565,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "find_index_from_right", .builtin_find_index_from_right);
                     try r.symbols.put(allocator, "equal", .builtin_compare);
                     try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
-                } else if (std.mem.eql(u8, module_name, "Random")) {
-                    try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
-                    try r.symbols.put(allocator, "random_get", .builtin_random_get);
-                    try r.symbols.put(allocator, "random_get_zero_to_one", .builtin_random_get_zero_to_one);
-                    try r.symbols.put(allocator, "random_get_within_range", .builtin_random_get_within_range);
-                    try r.symbols.put(allocator, "compiler_arg_count", .builtin_compiler_arg_count);
-                    try r.symbols.put(allocator, "compiler_arg", .builtin_compiler_arg);
-                    try r.symbols.put(allocator, "compiler_read_file", .builtin_compiler_read_file);
-                    try r.symbols.put(allocator, "compiler_write_file", .builtin_compiler_write_file);
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);

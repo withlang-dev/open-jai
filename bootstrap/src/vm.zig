@@ -232,6 +232,7 @@ pub const VM = struct {
     next_workspace_id: ?*i64 = null,
     current_workspace_id: i64 = 2,
     start_monotonic_ns: ?i64 = null,
+    random_state: u64 = 0x4d595df4d0f33173,
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
@@ -797,6 +798,26 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_float64_seconds register out of range", .{});
                     const low = try registerInt(regs[inst.arg1], diag, "to_float64_seconds");
                     regs[inst.dest] = .{ .float = @as(f64, @floatFromInt(low)) / @as(f64, @floatFromInt(std.time.ns_per_s)) };
+                },
+                .random_seed => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM random_seed seed register out of range", .{});
+                    const seed = try registerInt(regs[inst.arg1], diag, "random_seed seed");
+                    const bits: u64 = @bitCast(seed);
+                    vm.random_state = if (bits == 0) 0x9e3779b97f4a7c15 else bits;
+                },
+                .random_get => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM random_get destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = @bitCast(vm.nextRandom()) };
+                },
+                .random_get_zero_to_one => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM random_get_zero_to_one destination register out of range", .{});
+                    regs[inst.dest] = .{ .float = vm.nextRandomZeroToOne() };
+                },
+                .random_get_within_range => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM random_get_within_range register out of range", .{});
+                    const min = try numericAsFloatOrInt(regs[inst.arg1], diag, "random_get_within_range minimum");
+                    const max = try numericAsFloatOrInt(regs[inst.arg2], diag, "random_get_within_range maximum");
+                    regs[inst.dest] = .{ .float = min + (max - min) * vm.nextRandomZeroToOne() };
                 },
                 .to_calendar => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_calendar register out of range", .{});
@@ -2123,6 +2144,19 @@ pub const VM = struct {
             .INTR => return vm.hostMonotonicNs(diag),
             else => return diag.failAt(0, "VM monotonic clock failed", .{}),
         }
+    }
+
+    fn nextRandom(vm: *VM) u64 {
+        var z = vm.random_state +% 0x9e3779b97f4a7c15;
+        vm.random_state = z;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        return z ^ (z >> 31);
+    }
+
+    fn nextRandomZeroToOne(vm: *VM) f64 {
+        const bits = vm.nextRandom() >> 11;
+        return @as(f64, @floatFromInt(bits)) * (1.0 / 9007199254740992.0);
     }
 
     fn hostToCalendar(vm: *VM, low_ns: u64, timezone: u32, diag: Diagnostic) !CalendarValue {
