@@ -510,14 +510,14 @@ const GenContext = struct {
         if (ast.tag(callee) == .proc_decl) return callee;
         if (ctx.resolved.local_values.get(callee)) |decl| {
             if (decl != @import("Ast.zig").null_node) {
-                if (ast.tag(decl) == .proc_decl) return decl;
+                if (ast.tag(decl) == .proc_decl and procAcceptsArgCount(ast, decl, arg_count)) return decl;
                 if (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node) {
                     const init = ast.data(decl).rhs;
-                    if (ast.tag(init) == .proc_decl) return init;
+                    if (ast.tag(init) == .proc_decl and procAcceptsArgCount(ast, init, arg_count)) return init;
                     if (ast.tag(init) == .identifier) {
-                        if (ctx.resolved.local_values.get(init)) |init_decl| if (ast.tag(init_decl) == .proc_decl) return init_decl;
+                        if (ctx.resolved.local_values.get(init)) |init_decl| if (ast.tag(init_decl) == .proc_decl and procAcceptsArgCount(ast, init_decl, arg_count)) return init_decl;
                         if (ctx.resolved.lookup(ast.tokenSlice(ast.mainToken(init)))) |sym| switch (sym) {
-                            .proc => |proc_node| return proc_node,
+                            .proc => |proc_node| if (procAcceptsArgCount(ast, proc_node, arg_count)) return proc_node,
                             else => {},
                         };
                     }
@@ -531,7 +531,17 @@ const GenContext = struct {
                     continue;
                 };
                 const params = ast.extraSlice(sig.params_extra);
-                if (arg_count <= params.len) return candidate;
+                var required: usize = 0;
+                var variadic = false;
+                for (params) |param_idx| {
+                    const param: NodeIndex = @intCast(param_idx);
+                    if (ast.data(param).rhs == 1) {
+                        variadic = true;
+                        break;
+                    }
+                    if (ast.data(param).rhs == @import("Ast.zig").null_node or ast.data(param).rhs == using_param_sentinel) required += 1;
+                }
+                if (arg_count >= required and (variadic or arg_count <= params.len)) return candidate;
             }
         }
         if (ctx.resolved.lookup(name)) |sym| switch (sym) {
@@ -539,6 +549,22 @@ const GenContext = struct {
             else => {},
         };
         return null;
+    }
+
+    fn procAcceptsArgCount(ast: *const Ast, proc_node: NodeIndex, arg_count: usize) bool {
+        const sig = procSignature(ast, proc_node) orelse return arg_count == 0;
+        const params = ast.extraSlice(sig.params_extra);
+        var required: usize = 0;
+        var variadic = false;
+        for (params) |param_idx| {
+            const param: NodeIndex = @intCast(param_idx);
+            if (ast.data(param).rhs == 1) {
+                variadic = true;
+                break;
+            }
+            if (ast.data(param).rhs == @import("Ast.zig").null_node or ast.data(param).rhs == using_param_sentinel) required += 1;
+        }
+        return arg_count >= required and (variadic or arg_count <= params.len);
     }
 
     fn stmtContainsNestedReturn(ctx: *GenContext, stmt: NodeIndex) bool {
@@ -4505,9 +4531,11 @@ const GenContext = struct {
                     std.mem.eql(u8, name, "lock") or
                     std.mem.eql(u8, name, "unlock"))
                 {
-                    const args = ast.extraSlice(ast.data(expr).rhs);
-                    for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
-                    return try ctx.emitInt(expr, 0);
+                    if (!ctx.nameResolvesToUserProc(name)) {
+                        const args = ast.extraSlice(ast.data(expr).rhs);
+                        for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+                        return try ctx.emitInt(expr, 0);
+                    }
                 }
                 if (isOperatorIdentifierName(name)) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
@@ -4555,7 +4583,7 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = lhs, .arg2 = rhs, .source_node = expr });
                     return reg;
                 }
-                if (std.mem.eql(u8, name, "thread_is_done")) {
+                if (std.mem.eql(u8, name, "thread_is_done") and !ctx.nameResolvesToUserProc(name)) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
                     return try ctx.emitBool(expr, true);

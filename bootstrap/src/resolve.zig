@@ -560,28 +560,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "find_index_from_right", .builtin_find_index_from_right);
                     try r.symbols.put(allocator, "equal", .builtin_compare);
                     try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
-                } else if (std.mem.eql(u8, module_name, "Thread")) {
-                    try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
-                    for (&[_][]const u8{
-                        "Thread",
-                        "Thread_Group",
-                        "Thread_Continue_Status",
-                        "Mutex",
-                        "init",
-                        "start",
-                        "add_work",
-                        "get_completed_work",
-                        "shutdown",
-                        "lock",
-                        "unlock",
-                        "thread_init",
-                        "thread_start",
-                        "thread_deinit",
-                        "thread_destroy",
-                        "thread_is_done",
-                    }) |name| {
-                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                    }
                 } else if (std.mem.eql(u8, module_name, "Random")) {
                     try r.symbols.put(allocator, "random_seed", .builtin_random_seed);
                     try r.symbols.put(allocator, "random_get", .builtin_random_get);

@@ -105,3 +105,7 @@ sound_modules_import_real_source_and_track_streams :: () {
 bindings_generator_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/bindings_generator_module_import_value.jai", "bindings:true true 31 1 1 1 1 2 true\n");
 } @TestProcedure
+
+thread_module_import_loads_real_source_and_updates_state :: () {
+    expect_compile_output("test/examples/modules/thread_module_import_value.jai", "thread:true true true true true 3 2 true true 7 true 1\n");
+} @TestProcedure
