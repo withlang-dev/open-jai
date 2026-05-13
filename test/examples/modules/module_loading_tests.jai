@@ -21,3 +21,7 @@ duplicate_module_imports_load_source_once :: () {
 process_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/process_module_import_value.jai", "process:0 process-module  false\n");
 } @TestProcedure
+
+file_utilities_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/file_utilities_module_import_value.jai", "file-utilities:true true copied\n");
+} @TestProcedure

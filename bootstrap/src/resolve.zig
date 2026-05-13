@@ -619,7 +619,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Flat_Pool") or
                     std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "Program_Print") or
-                    std.mem.eql(u8, module_name, "File_Utilities") or
                     std.mem.eql(u8, module_name, "BuildCpp") or
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "TestScope") or
@@ -651,13 +650,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STDOUT_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STDERR_FILENO", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "File_Utilities")) {
-                        try r.symbols.put(allocator, "make_directory_if_it_does_not_exist", .builtin_make_directory_if_it_does_not_exist);
-                        try r.symbols.put(allocator, "delete_directory", .builtin_delete_directory);
-                        try r.symbols.put(allocator, "set_working_directory", .builtin_set_working_directory);
-                        try r.symbols.put(allocator, "get_working_directory", .builtin_get_working_directory);
-                        try r.symbols.put(allocator, "visit_files", .builtin_visit_files);
-                        try r.putRealSymbol("copy_file", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
                         for (&[_][]const u8{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });

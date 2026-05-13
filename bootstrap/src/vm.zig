@@ -1238,6 +1238,16 @@ pub const VM = struct {
                     const path = try vm.registerText(regs[inst.arg1], diag, "compiler_read_file path");
                     regs[inst.dest] = .{ .bytes = try vm.hostReadFile(path, diag) };
                 },
+                .read_entire_file => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM read_entire_file register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "read_entire_file path");
+                    const result = try vm.hostReadEntireFile(path, diag);
+                    regs[inst.dest] = .{ .string = result.contents };
+                    if (inst.arg2 != std.math.maxInt(u32)) {
+                        if (inst.arg2 >= regs.len) return diag.failAt(0, "VM read_entire_file success register out of range", .{});
+                        regs[inst.arg2] = .{ .bool = result.success };
+                    }
+                },
                 .compiler_write_file => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM compiler_write_file register out of range", .{});
                     const path = try vm.registerText(regs[inst.arg1], diag, "compiler_write_file path");
@@ -1742,6 +1752,26 @@ pub const VM = struct {
         errdefer vm.allocator.free(contents);
         try vm.rendered_code_strings.append(vm.allocator, contents);
         return contents;
+    }
+
+    const ReadEntireFileResult = struct {
+        contents: []const u8,
+        success: bool,
+    };
+
+    fn hostReadEntireFile(vm: *VM, path: []const u8, diag: Diagnostic) !ReadEntireFileResult {
+        const io = try vm.requireIo(diag, "read_entire_file");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        const contents = std.Io.Dir.cwd().readFileAlloc(io, full, vm.allocator, .limited(64 * 1024 * 1024)) catch {
+            const empty = try vm.allocator.dupe(u8, "");
+            errdefer vm.allocator.free(empty);
+            try vm.rendered_code_strings.append(vm.allocator, empty);
+            return .{ .contents = empty, .success = false };
+        };
+        errdefer vm.allocator.free(contents);
+        try vm.rendered_code_strings.append(vm.allocator, contents);
+        return .{ .contents = contents, .success = true };
     }
 
     fn hostWriteFile(vm: *VM, path: []const u8, contents: []const u8, diag: Diagnostic) !bool {

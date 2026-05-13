@@ -2018,6 +2018,33 @@ const GenContext = struct {
         return true;
     }
 
+    fn tryEmitReadEntireFileMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        const children = ast.extraSlice(ast.data(stmt).lhs);
+        if (children.len != 2) return false;
+        const first: NodeIndex = @intCast(children[0]);
+        const rhs = stmtInitOrAssignRhs(ast, first) orelse return false;
+        if (ast.tag(rhs) != .call_expr) return false;
+        const callee = ast.data(rhs).lhs;
+        if (ast.tag(callee) != .identifier or !std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "read_entire_file")) return false;
+        const second: NodeIndex = @intCast(children[1]);
+        if ((stmtInitOrAssignRhs(ast, second) orelse return false) != rhs) return false;
+
+        const args = ast.extraSlice(ast.data(rhs).rhs);
+        if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(rhs)].start, "read_entire_file expects one path string", .{});
+        const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+        const contents_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const success_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .read_entire_file, .dest = contents_reg, .arg1 = path_reg, .arg2 = success_reg, .source_node = rhs });
+        try ctx.bindStmtTarget(first, contents_reg, diag);
+        try ctx.bindStmtTarget(second, success_reg, diag);
+        try ctx.type_overrides.put(ctx.program.allocator, first, "string");
+        try ctx.type_overrides.put(ctx.program.allocator, second, "bool");
+        return true;
+    }
+
     fn tryEmitCompilerGetNodesMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
         const ast = ctx.ast;
         const children = ast.extraSlice(ast.data(stmt).lhs);
@@ -2147,6 +2174,7 @@ const GenContext = struct {
                 if (try ctx.tryEmitRunCommandMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitAllocatorCapabilitiesMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitStringMultiReturn(stmt, diag)) return;
+                if (try ctx.tryEmitReadEntireFileMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitFileOpenMultiReturn(stmt, diag)) return;
                 var is_all_assign = true;
                 var all_assign_targets_are_locals = true;
@@ -4259,13 +4287,22 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .cpu_has_feature, .dest = reg, .arg1 = feature_reg, .source_node = expr });
                     return reg;
                 }
-                if (std.mem.eql(u8, name, "compiler_read_file") or std.mem.eql(u8, name, "read_entire_file")) {
+                if (std.mem.eql(u8, name, "compiler_read_file")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one path string", .{name});
                     const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .compiler_read_file, .dest = reg, .arg1 = path_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "read_entire_file")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "read_entire_file expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .read_entire_file, .dest = reg, .arg1 = path_reg, .arg2 = std.math.maxInt(u32), .source_node = expr });
                     return reg;
                 }
                 if (std.mem.eql(u8, name, "compiler_write_file") or std.mem.eql(u8, name, "write_entire_file")) {
