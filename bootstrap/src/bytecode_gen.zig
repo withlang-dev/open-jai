@@ -3797,6 +3797,9 @@ const GenContext = struct {
                 if (ast.tag(callee) == .field_access) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     const field_name = ast.tokenSlice(ast.data(callee).rhs);
+                    if (isImportAliasField(ctx, callee)) {
+                        if (try ctx.genCompilerIntrinsicCall(field_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
+                    }
                     if (std.mem.eql(u8, field_name, "proc")) {
                         const allocator_reg = try ctx.genExpr(ast.data(callee).lhs, diag);
                         if (args.len >= 1) {
@@ -6208,6 +6211,15 @@ fn handleArgNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
     if (ast.tag(arg) == .assign_stmt) return ast.data(arg).rhs;
     if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) return ast.data(arg).rhs;
     return arg;
+}
+
+fn isImportAliasField(ctx: *const GenContext, field_access: NodeIndex) bool {
+    const ast = ctx.ast;
+    if (field_access == @import("Ast.zig").null_node or field_access >= ast.node_tags.items.len or ast.tag(field_access) != .field_access) return false;
+    const lhs = ast.data(field_access).lhs;
+    if (lhs == @import("Ast.zig").null_node or lhs >= ast.node_tags.items.len or ast.tag(lhs) != .identifier) return false;
+    const decl = ctx.resolved.local_values.get(lhs) orelse return false;
+    return decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len and ast.tag(decl) == .import_decl;
 }
 
 fn namedBoolArg(ctx: *GenContext, args: []const u32, option_name: []const u8, default_value: bool, diag: Diagnostic) !u32 {
@@ -9055,6 +9067,54 @@ test "compiler_write_file lowers to file write bytecode" {
     try std.testing.expect(inst.dest < proc.num_registers);
     try std.testing.expect(inst.arg1 < proc.num_registers);
     try std.testing.expect(inst.arg2 < proc.num_registers);
+}
+
+test "module alias compiler intrinsic calls lower to host opcodes" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve = @import("resolve.zig");
+    const sema = @import("Sema.zig");
+
+    const source =
+        "#import \"Basic\";\n" ++
+        "helper :: () {\n" ++
+        "  Compiler :: #import \"Compiler\";\n" ++
+        "  code := #code 1 + 2;\n" ++
+        "  node := Compiler.compiler_get_nodes(code);\n" ++
+        "}\n" ++
+        "main :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "module_alias_intrinsic.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const token_slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, token_slice.items(.tag), token_slice.items(.start), token_slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+
+    var typed = try sema.analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+
+    const helper = resolved.lookup("helper").?.proc;
+    var program = try generateProcWithParamCount(std.testing.allocator, &ast, &resolved, &typed, helper, diag, 0);
+    defer program.deinit();
+
+    const proc = &program.procs.items[program.main_proc.?];
+    var saw_get_nodes = false;
+    for (proc.instructions.items) |inst| {
+        if (inst.opcode == .compiler_get_nodes_root) saw_get_nodes = true;
+    }
+    try std.testing.expect(saw_get_nodes);
 }
 
 test "push_context emits the nested block body" {

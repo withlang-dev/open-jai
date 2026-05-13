@@ -550,7 +550,24 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             const callee = ast.data(node).lhs;
             const args = ast.extraSlice(ast.data(node).rhs);
             if (ast.tag(callee) == .field_access) {
+                const field_name = ast.tokenSlice(ast.data(callee).rhs);
                 _ = try analyzeNode(ast, resolved, typed, ast.data(callee).lhs, diag);
+                if (isImportAliasField(ast, resolved, callee)) {
+                    if (try compilerIntrinsicReturnType(ast, field_name, diag)) |return_ty| {
+                        for (args) |arg_idx| {
+                            const arg: NodeIndex = @intCast(arg_idx);
+                            if (ast.tag(arg) == .assign_stmt)
+                                _ = try analyzeNode(ast, resolved, typed, ast.data(arg).rhs, diag)
+                            else if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier)
+                                _ = try analyzeNode(ast, resolved, typed, ast.data(arg).rhs, diag)
+                            else if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .dot_dot)
+                                _ = try analyzeNode(ast, resolved, typed, ast.data(arg).lhs, diag)
+                            else
+                                _ = try analyzeNode(ast, resolved, typed, arg, diag);
+                        }
+                        break :blk return_ty;
+                    }
+                }
                 for (args) |arg_idx| {
                     const arg: NodeIndex = @intCast(arg_idx);
                     if (ast.tag(arg) == .assign_stmt)
@@ -1452,6 +1469,14 @@ fn callArgValueNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
     if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) return ast.data(arg).rhs;
     if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .dot_dot) return ast.data(arg).lhs;
     return arg;
+}
+
+fn isImportAliasField(ast: *const Ast, resolved: *const Resolved, field_access: NodeIndex) bool {
+    if (!isValidNode(ast, field_access) or ast.tag(field_access) != .field_access) return false;
+    const lhs = ast.data(field_access).lhs;
+    if (!isValidNode(ast, lhs) or ast.tag(lhs) != .identifier) return false;
+    const decl = resolved.local_values.get(lhs) orelse return false;
+    return isValidNode(ast, decl) and ast.tag(decl) == .import_decl;
 }
 
 fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnostic) !?Type {
