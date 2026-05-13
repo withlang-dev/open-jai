@@ -118,7 +118,7 @@ log :: (format: string, args: ..Any) -> s64 #foreign;
 assert :: (condition: bool, message := "", args: ..Any) #foreign;
 exit :: (status: s64) #foreign;
 
-swap :: (a: *$T, b: *T) #foreign;
+swap :: (a: *$T, b: *T) #intrinsic;
 memcpy :: (dest: *void, source: *void, count: s64) -> *void #intrinsic;
 memset :: (dest: *void, value: s64, count: s64) -> *void #intrinsic;
 

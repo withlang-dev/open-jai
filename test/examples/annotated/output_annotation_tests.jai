@@ -10,8 +10,24 @@ exit_example_output :: () {
     expect_example_annotations("examples/03/3.3_exit.jai");
 } @TestProcedure
 
+hello_sailor_chapter_04_output :: () {
+    expect_program_output("examples/04/4.1_hello_sailor.jai", "Hello, Sailor from Jai!\nn is 42\n");
+} @TestProcedure
+
+intrinsics_chapter_04_output :: () {
+    expect_program_output("examples/04/4.2_intrinsics.jai", "y is 42\n");
+} @TestProcedure
+
+literals_output :: () {
+    expect_program_output("examples/05/5.1_literals.jai", "Hello, Sailor!\nI greet you: Hello, Sailor!\n42\nfalse\nchar literal: 49\nThe type of Hello, Sailor! is string\nThe type of 42 is s64\nThe type of false is bool\n");
+} @TestProcedure
+
 variable_declarations_2_output :: () {
     expect_example_annotations("examples/05/5.4_variable_declarations2.jai");
+} @TestProcedure
+
+swapping_output :: () {
+    expect_program_output("examples/05/5.5_swapping.jai", "n is 3 and m is 2\nn2 is 3 and m2 is 2\n");
 } @TestProcedure
 
 printing_output :: () {

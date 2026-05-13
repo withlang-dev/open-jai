@@ -6108,6 +6108,20 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .select_value, .dest = reg, .arg1 = high_cmp, .arg2 = high, .arg3 = lower_bounded, .source_node = expr });
             return reg;
         }
+        if (std.mem.eql(u8, name, "swap")) {
+            if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "swap expects exactly two arguments", .{});
+            const lhs_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+            const rhs_ptr = try ctx.genExpr(@intCast(args[1]), diag);
+            const lhs_value = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            const rhs_value = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = lhs_value, .arg1 = lhs_ptr, .source_node = expr });
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = rhs_value, .arg1 = rhs_ptr, .source_node = expr });
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = lhs_ptr, .arg1 = rhs_value, .source_node = expr });
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = rhs_ptr, .arg1 = lhs_value, .source_node = expr });
+            return lhs_value;
+        }
         if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
             if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one numeric argument", .{name});
             const arg_reg = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
