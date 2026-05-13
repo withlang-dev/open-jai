@@ -88,6 +88,12 @@ struct_heap_output :: () {
     expect_program_output_contains("examples/12/12.2_struct_heap.jai", "{\"Jim\", 67}\n");
 } @TestProcedure
 
+linked_list_output :: () {
+    expect_program_output_contains("examples/12/12.3_linked_list.jai", "Our list is: ");
+    expect_program_output_contains("examples/12/12.3_linked_list.jai", "Our << list is: {0, ");
+    expect_program_output_contains("examples/12/12.3_linked_list.jai", "List data is 0 -> 12 -> 24 -> 36\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
