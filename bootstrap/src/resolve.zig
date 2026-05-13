@@ -502,6 +502,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "split",                 "read",              "release",             "start",
                         "lock",                  "proc",
                     });
+                    try r.symbols.put(allocator, "equal", .builtin_compare);
                     for (&[_][]const u8{ "make_vector2", "make_vector3", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                     }
@@ -520,7 +521,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "begins_with", .builtin_begins_with);
                     try r.symbols.put(allocator, "find_index_from_left", .builtin_find_index_from_left);
                     try r.symbols.put(allocator, "find_index_from_right", .builtin_find_index_from_right);
-                    try r.putRealSymbol("equal", .{ .const_value = @import("Ast.zig").null_node });
+                    try r.symbols.put(allocator, "equal", .builtin_compare);
                     try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
                 } else if (std.mem.eql(u8, module_name, "Thread")) {
                     try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
