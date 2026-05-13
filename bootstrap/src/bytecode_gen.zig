@@ -3799,6 +3799,23 @@ const GenContext = struct {
                     const field_name = ast.tokenSlice(ast.data(callee).rhs);
                     if (isImportAliasField(ctx, callee)) {
                         if (try ctx.genCompilerIntrinsicCall(field_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
+                        if (ctx.resolved.lookup(field_name)) |field_sym| switch (field_sym) {
+                            .proc => |proc_node| {
+                                if (!procContainsCompileTimeOnlyCompilerApi(ast, proc_node)) {
+                                    if (try ctx.tryEmitDirectProcCall(proc_node, args, expr, diag)) |reg| return reg;
+                                }
+                                if (try ctx.tryInlineProcCall(proc_node, args, expr, diag)) |reg| return reg;
+                            },
+                            .const_value => |value_node| {
+                                if (value_node != @import("Ast.zig").null_node and ast.tag(value_node) == .proc_decl) {
+                                    if (!procContainsCompileTimeOnlyCompilerApi(ast, value_node)) {
+                                        if (try ctx.tryEmitDirectProcCall(value_node, args, expr, diag)) |reg| return reg;
+                                    }
+                                    if (try ctx.tryInlineProcCall(value_node, args, expr, diag)) |reg| return reg;
+                                }
+                            },
+                            else => {},
+                        };
                     }
                     if (std.mem.eql(u8, field_name, "proc")) {
                         const allocator_reg = try ctx.genExpr(ast.data(callee).lhs, diag);

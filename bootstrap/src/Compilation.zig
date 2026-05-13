@@ -1102,6 +1102,10 @@ pub const Compilation = struct {
             if (assigned_import) {
                 try out.appendSlice(comp.allocator, rest[0 .. idx + line_end]);
                 if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
+                if (comp.findModule(module_name, path)) |module_path| {
+                    defer comp.allocator.free(module_path);
+                    try comp.appendLoadedModule(&out, module_path, path);
+                } else |_| {}
                 rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                 continue;
             }

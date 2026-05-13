@@ -567,6 +567,13 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         }
                         break :blk return_ty;
                     }
+                    if (resolved.lookup(field_name)) |field_sym| switch (field_sym) {
+                        .proc => |proc_node| return try analyzeProcCall(ast, resolved, typed, proc_node, args, diag, node),
+                        .const_value => |value_node| {
+                            if (isValidNode(ast, value_node) and ast.tag(value_node) == .proc_decl) return try analyzeProcCall(ast, resolved, typed, value_node, args, diag, node);
+                        },
+                        else => {},
+                    };
                 }
                 for (args) |arg_idx| {
                     const arg: NodeIndex = @intCast(arg_idx);
