@@ -3262,6 +3262,7 @@ const GenContext = struct {
                 if (ctx.resolved.local_values.get(expr)) |decl| {
                     if (decl == @import("Ast.zig").null_node) {
                         const unresolved_name = ast.tokenSlice(ast.mainToken(expr));
+                        if (isBindingOptionField(unresolved_name)) return try ctx.genSyntheticBindingOptionField(unresolved_name, expr, diag);
                         if (ctx.external_registers.get(unresolved_name)) |reg| return reg;
                         if (isBuiltinTypeName(ast.tokenSlice(ast.mainToken(expr)))) {
                             const reg = proc.num_registers;
@@ -6489,6 +6490,8 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
     const program = ctx.program;
     switch (ast.tag(expr)) {
         .identifier => {
+            const ident_name = ast.tokenSlice(ast.mainToken(expr));
+            if (isBindingOptionField(ident_name)) return try ctx.genSyntheticBindingOptionField(ident_name, expr, diag);
             if (ctx.resolved.local_values.get(expr)) |decl| {
                 if (ctx.isTopLevelVarDecl(decl)) {
                     const type_node = ast.data(decl).lhs;

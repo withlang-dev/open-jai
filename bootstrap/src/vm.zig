@@ -1452,7 +1452,7 @@ pub const VM = struct {
                 },
                 .get_command_line_arguments => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
-                    return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
+                    regs[inst.dest] = .{ .ptr = try vm.commandLineArgumentsArray(diag) };
                 },
                 .file_open => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM file_open destination register out of range", .{});
@@ -1843,6 +1843,12 @@ pub const VM = struct {
         if (len != 0) @memcpy(out, file.contents.items[file.cursor .. file.cursor + len]);
         file.cursor += len;
         return true;
+    }
+
+    fn commandLineArgumentsArray(vm: *VM, diag: Diagnostic) !Pointer {
+        const header = try vm.newDynamicArray(0, 16, diag);
+        for (vm.command_line) |arg| _ = try vm.dynamicArrayAdd(header, .{ .string = arg }, 16, diag);
+        return header;
     }
 
     fn hostMakeDirectory(vm: *VM, path: []const u8, diag: Diagnostic) !bool {
