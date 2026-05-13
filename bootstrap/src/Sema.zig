@@ -24,6 +24,8 @@ pub const Typed = struct {
     comptime_floats: std.AutoHashMapUnmanaged(NodeIndex, f64) = .empty,
     comptime_strings: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_strings: std.ArrayList([]const u8) = .empty,
+    comptime_type_texts: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
+    owned_comptime_type_texts: std.ArrayList([]const u8) = .empty,
     comptime_bytes: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
     comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
@@ -44,6 +46,9 @@ pub const Typed = struct {
         t.comptime_strings.deinit(t.allocator);
         for (t.owned_comptime_strings.items) |value| t.allocator.free(value);
         t.owned_comptime_strings.deinit(t.allocator);
+        t.comptime_type_texts.deinit(t.allocator);
+        for (t.owned_comptime_type_texts.items) |value| t.allocator.free(value);
+        t.owned_comptime_type_texts.deinit(t.allocator);
         t.comptime_bytes.deinit(t.allocator);
         for (t.owned_comptime_bytes.items) |value| t.allocator.free(value);
         t.owned_comptime_bytes.deinit(t.allocator);
@@ -69,6 +74,13 @@ pub const Typed = struct {
         errdefer t.allocator.free(owned);
         try t.owned_comptime_strings.append(t.allocator, owned);
         try t.comptime_strings.put(t.allocator, node, owned);
+    }
+
+    pub fn putComptimeTypeText(t: *Typed, node: NodeIndex, value: []const u8) !void {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_comptime_type_texts.append(t.allocator, owned);
+        try t.comptime_type_texts.put(t.allocator, node, owned);
     }
 
     pub fn putComptimeBytes(t: *Typed, node: NodeIndex, value: []const u8) !void {

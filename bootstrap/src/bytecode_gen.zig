@@ -1468,6 +1468,7 @@ const GenContext = struct {
             if (typed.comptime_ints.get(expr)) |value| return .{ .int = value };
             if (typed.comptime_floats.get(expr)) |value| return .{ .float = value };
             if (typed.comptime_strings.get(expr)) |value| return .{ .string = value };
+            if (typed.comptime_type_texts.get(expr)) |value| return .{ .type_text = value };
             if (typed.comptime_bytes.get(expr)) |value| return .{ .bytes = value };
             if (typed.comptime_source_locations.get(expr)) |value| return .{ .source_location = .{
                 .fully_pathed_filename = value.fully_pathed_filename,
@@ -1533,6 +1534,7 @@ const GenContext = struct {
                     if (typed.comptime_ints.get(decl)) |value| break :blk .{ .int = value };
                     if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
                     if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
+                    if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
@@ -3051,7 +3053,7 @@ const GenContext = struct {
                         try ctx.rememberLocalCode(stmt, try ctx.codeTextForMacroArg(init, &[_]MacroCodeBinding{}, diag));
                     }
                     if (ctx.typed) |typed| {
-                        if (typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init)) {
+                        if (typed.comptime_type_texts.contains(stmt) or typed.comptime_type_texts.contains(init) or typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init)) {
                             return;
                         }
                     }
@@ -3924,6 +3926,9 @@ const GenContext = struct {
                     if (typed.comptime_strings.get(expr)) |value| {
                         return try ctx.emitString(expr, value);
                     }
+                    if (typed.comptime_type_texts.get(expr)) |value| {
+                        return try ctx.emitTypeText(expr, value, diag);
+                    }
                     if (typed.comptime_bytes.get(expr)) |value| {
                         const idx = try program.addByteArray(value);
                         const reg = proc.num_registers;
@@ -4131,6 +4136,11 @@ const GenContext = struct {
                     if (ctx.typed) |typed| {
                         if (typed.comptime_source_locations.get(decl)) |value| {
                             const reg = try ctx.emitSourceLocationValue(expr, value, diag);
+                            try ctx.decl_registers.put(program.allocator, decl, reg);
+                            return reg;
+                        }
+                        if (typed.comptime_type_texts.get(decl)) |value| {
+                            const reg = try ctx.emitTypeText(expr, value, diag);
                             try ctx.decl_registers.put(program.allocator, decl, reg);
                             return reg;
                         }
@@ -7733,6 +7743,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     }
     if (ctx.typed) |typed| {
         if (typed.comptime_strings.contains(expr) or typed.comptime_bytes.contains(expr)) return "string";
+        if (typed.comptime_type_texts.contains(expr)) return "Type";
         if (typed.comptime_source_locations.contains(expr)) return "Source_Code_Location";
         if (typed.comptime_calendars.contains(expr)) return "Calendar";
         if (typed.comptime_build_options.contains(expr)) return "Build_Options";
@@ -7779,6 +7790,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (ctx.type_overrides.get(decl)) |actual_type| return actual_type;
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
+                if (typed.comptime_type_texts.contains(decl)) return "Type";
                 if (typed.comptime_source_locations.contains(decl)) return "Source_Code_Location";
                 if (typed.comptime_calendars.contains(decl)) return "Calendar";
                 if (typed.comptime_build_options.contains(decl)) return "Build_Options";

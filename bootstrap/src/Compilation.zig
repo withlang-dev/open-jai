@@ -349,7 +349,10 @@ pub const Compilation = struct {
                 try typed.putComptimeMessage(value_node, message_value);
                 try typed.putComptimeMessage(decl_node, message_value);
             },
-            .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
+            .type_text => |type_text| {
+                try typed.putComptimeTypeText(value_node, type_text);
+                try typed.putComptimeTypeText(decl_node, type_text);
+            },
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
     }
@@ -457,13 +460,14 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
                     .float => |float_value| try typed.comptime_floats.put(comp.allocator, node, float_value),
                     .bool => |bool_value| try typed.comptime_ints.put(comp.allocator, node, if (bool_value) 1 else 0),
                     .string => |string_value| try typed.putComptimeString(node, string_value),
+                    .type_text => |type_text| try typed.putComptimeTypeText(node, type_text),
                     .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
                     .code => |code_value| try typed.putComptimeString(node, code_value.text),
                     .source_location => |loc| try typed.putComptimeSourceLocation(node, .{
@@ -483,7 +487,6 @@ pub const Compilation = struct {
                     }),
                     .build_options => |options| try typed.putComptimeBuildOptions(node, buildOptionsSnapshotToSema(options)),
                     .message => |message| try typed.putComptimeMessage(node, messageSnapshotToSema(message)),
-                    .type_text => {},
                     .void => {},
                 }
             },
@@ -688,6 +691,8 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .float = value });
             } else if (typed.comptime_strings.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .string = value });
+            } else if (typed.comptime_type_texts.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .type_text = value });
             } else if (typed.comptime_bytes.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .bytes = value });
             } else if (typed.comptime_source_locations.get(arg)) |value| {
@@ -730,6 +735,8 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .float = value });
                 } else if (typed.comptime_strings.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .string = value });
+                } else if (typed.comptime_type_texts.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .type_text = value });
                 } else if (typed.comptime_bytes.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .bytes = value });
                 } else if (typed.comptime_source_locations.get(decl)) |value| {
@@ -761,6 +768,8 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .float = value });
                     } else if (typed.comptime_strings.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .string = value });
+                    } else if (typed.comptime_type_texts.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .type_text = value });
                     } else if (typed.comptime_bytes.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .bytes = value });
                     } else if (typed.comptime_source_locations.get(initializer_node)) |value| {
@@ -980,6 +989,10 @@ pub const Compilation = struct {
                 const owned_path = try comp.ownRunString(code_value.path);
                 break :blk .{ .code = .{ .text = owned_text, .path = owned_path, .line_number = code_value.line_number } };
             },
+            .type_text => |type_text| blk: {
+                const owned = try comp.ownRunString(type_text);
+                break :blk .{ .type_text = owned };
+            },
             .source_location => |loc| blk: {
                 const owned_path = try comp.ownRunString(loc.fully_pathed_filename);
                 break :blk .{ .source_location = .{ .fully_pathed_filename = owned_path, .line_number = loc.line_number } };
@@ -1009,6 +1022,7 @@ pub const Compilation = struct {
         if (typed.comptime_ints.get(arg)) |value| return .{ .int = value };
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
         if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
+        if (typed.comptime_type_texts.get(arg)) |value| return .{ .type_text = value };
         if (typed.comptime_bytes.get(arg)) |value| return .{ .bytes = value };
         if (typed.comptime_source_locations.get(arg)) |value| return .{ .source_location = .{
             .fully_pathed_filename = value.fully_pathed_filename,
@@ -1043,6 +1057,7 @@ pub const Compilation = struct {
                     if (typed.comptime_ints.get(decl)) |value| break :blk .{ .int = value };
                     if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
                     if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
+                    if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
