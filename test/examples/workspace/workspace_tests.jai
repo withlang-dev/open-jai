@@ -41,3 +41,7 @@ compiler_intercept_reports_target_source_errors :: () {
 compiler_file_and_import_messages_expose_specific_fields :: () {
     expect_compile_output_contains("test/examples/workspace/file_import_message_value.jai", "file:report_target.jai\nimport:Basic:report_target.jai\n");
 } @TestProcedure
+
+compiler_import_messages_are_ast_backed_and_deduped :: () {
+    expect_compile_output("test/examples/workspace/import_message_ast_value.jai", "import:Basic\nimports:1\n");
+} @TestProcedure

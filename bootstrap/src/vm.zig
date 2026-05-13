@@ -1842,11 +1842,16 @@ pub const VM = struct {
         var found_source = false;
         var declaration_count: usize = 0;
         var first_error: ?[]const u8 = null;
+        var seen_imports = std.StringHashMapUnmanaged(void).empty;
+        defer seen_imports.deinit(vm.allocator);
         for (vm.workspace_sources.items) |source| {
             if (source.workspace != workspace) continue;
             found_source = true;
             try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace, .fully_pathed_filename = source.path });
-            try vm.appendWorkspaceImportMessages(workspace, source.path, source.source);
+            vm.appendWorkspaceImportMessages(workspace, source.path, source.source, &seen_imports, diag) catch |err| {
+                if (first_error == null) first_error = @errorName(err);
+                try vm.workspace_status.put(vm.allocator, workspace, 1);
+            };
             declaration_count += vm.appendWorkspaceDeclarations(source.path, source.source, diag) catch |err| blk: {
                 if (first_error == null) first_error = @errorName(err);
                 try vm.workspace_status.put(vm.allocator, workspace, 1);
@@ -1961,20 +1966,53 @@ pub const VM = struct {
         return vm.compiler_message_declarations.items.len - declaration_start;
     }
 
-    fn appendWorkspaceImportMessages(vm: *VM, workspace: i64, path: []const u8, source: []const u8) !void {
-        var rest = source;
-        while (std.mem.indexOf(u8, rest, "#import \"")) |idx| {
-            const start = idx + "#import \"".len;
-            const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse break;
-            const module_name = rest[start .. start + end_rel];
-            try vm.appendCompilerMessage(.{
-                .kind = "IMPORT",
-                .workspace = workspace,
-                .module_name = module_name,
-                .module_type = "MODULE",
-                .fully_pathed_filename = path,
-            });
-            rest = rest[start + end_rel + 1 ..];
+    fn appendWorkspaceImportMessages(vm: *VM, workspace: i64, path: []const u8, source: []const u8, seen_imports: *std.StringHashMapUnmanaged(void), parent_diag: Diagnostic) !void {
+        const diag = Diagnostic.init(vm.allocator, path, source);
+        var tokens = try lexer.tokenize(vm.allocator, source, diag);
+        defer tokens.deinit(vm.allocator);
+        var ast = try parser.parse(
+            vm.allocator,
+            source,
+            tokens.items(.tag),
+            tokens.items(.start),
+            tokens.items(.end),
+            diag,
+        );
+        defer ast.deinit();
+        defer vm.allocator.free(ast.tokens);
+        if (ast.root == @import("Ast.zig").null_node) return;
+        const decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (decls) |decl_idx| {
+            try vm.appendWorkspaceImportMessagesFromNode(workspace, path, &ast, @intCast(decl_idx), seen_imports);
+        }
+        _ = parent_diag;
+    }
+
+    fn appendWorkspaceImportMessagesFromNode(vm: *VM, workspace: i64, path: []const u8, ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex, seen_imports: *std.StringHashMapUnmanaged(void)) !void {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return;
+        switch (ast.tag(node)) {
+            .import_decl => {
+                const module_name = ast.stringTokenContents(@intCast(ast.data(node).lhs));
+                if (seen_imports.contains(module_name)) return;
+                try seen_imports.put(vm.allocator, module_name, {});
+                try vm.appendCompilerMessage(.{
+                    .kind = "IMPORT",
+                    .workspace = workspace,
+                    .module_name = module_name,
+                    .module_type = "MODULE",
+                    .fully_pathed_filename = path,
+                });
+            },
+            .const_decl => {
+                if (ast.data(node).lhs != @import("Ast.zig").null_node) try vm.appendWorkspaceImportMessagesFromNode(workspace, path, ast, ast.data(node).lhs, seen_imports);
+            },
+            .proc_decl => {
+                if (ast.data(node).lhs != @import("Ast.zig").null_node) try vm.appendWorkspaceImportMessagesFromNode(workspace, path, ast, ast.data(node).lhs, seen_imports);
+            },
+            .block, .stmt_list => {
+                for (ast.extraSlice(ast.data(node).lhs)) |child| try vm.appendWorkspaceImportMessagesFromNode(workspace, path, ast, @intCast(child), seen_imports);
+            },
+            else => {},
         }
     }
 
