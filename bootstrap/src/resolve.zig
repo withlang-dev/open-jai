@@ -605,8 +605,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "SDL") or
-                    std.mem.eql(u8, module_name, "GL") or
+                } else if (
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
                     std.mem.eql(u8, module_name, "glfw") or
@@ -614,74 +613,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "SDL")) {
-                        try putExternalSymbols(&r, &.{
-                            "SDL_INIT_VIDEO",
-                            "SDL_WINDOWPOS_UNDEFINED",
-                            "SDL_WINDOW_OPENGL",
-                            "SDL_WINDOW_RESIZABLE",
-                            "SDL_GL_CONTEXT_PROFILE_MASK",
-                            "SDL_GL_CONTEXT_PROFILE_CORE",
-                            "SDL_QUIT",
-                            "SDL_KEYUP",
-                            "SDL_WINDOWEVENT",
-                            "SDL_WINDOWEVENT_SIZE_CHANGED",
-                            "SDLK_ESCAPE",
-                            "SDL_Event",
-                            "SDL_Init",
-                            "SDL_Quit",
-                            "SDL_CreateWindow",
-                            "SDL_DestroyWindow",
-                            "SDL_SetWindowTitle",
-                            "SDL_GetError",
-                            "SDL_GL_SetAttribute",
-                            "SDL_GL_CreateContext",
-                            "SDL_GL_GetProcAddress",
-                            "SDL_GL_SwapWindow",
-                            "SDL_PollEvent",
-                            "SDL_WINDOWPOS_CENTERED_DISPLAY",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "GL")) {
-                        try putExternalSymbols(&r, &.{
-                            "GL_VENDOR",
-                            "GL_RENDERER",
-                            "GL_VERSION",
-                            "GL_SHADING_LANGUAGE_VERSION",
-                            "GL_COLOR_BUFFER_BIT",
-                            "GL_TEXTURE_2D",
-                            "GL_TEXTURE_MIN_FILTER",
-                            "GL_TEXTURE_MAG_FILTER",
-                            "GL_NEAREST",
-                            "GL_ARRAY_BUFFER",
-                            "GL_STATIC_DRAW",
-                            "GL_VERTEX_SHADER",
-                            "GL_FRAGMENT_SHADER",
-                            "GL_TRIANGLES",
-                            "GL_FLOAT",
-                            "GL_FALSE",
-                            "GL_TRUE",
-                            "gl",
-                            "gl_load",
-                            "glGetString",
-                            "glTexParameteri",
-                            "glViewport",
-                            "glClearColor",
-                            "glClear",
-                            "glGenBuffers",
-                            "glBindBuffer",
-                            "glBufferData",
-                            "glCreateShader",
-                            "_glShaderSource",
-                            "glCompileShader",
-                            "glCreateProgram",
-                            "glAttachShader",
-                            "glLinkProgram",
-                            "glGetUniformLocation",
-                            "glGetAttribLocation",
-                            "glUseProgram",
-                            "glDrawArrays",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "GetRect")) {
+                    if (std.mem.eql(u8, module_name, "GetRect")) {
                         try putExternalSymbols(&r, &.{
                             "ui_init",
                             "ui_per_frame_update",

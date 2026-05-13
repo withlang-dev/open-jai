@@ -1307,8 +1307,8 @@ pub const Compilation = struct {
             const rel = rest[start .. start + end_rel];
             const full = try std.fs.path.join(comp.allocator, &[_][]const u8{ dir, rel });
             defer comp.allocator.free(full);
-            const loaded = std.Io.Dir.cwd().readFileAlloc(comp.io, full, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
-                std.debug.print("{s}: error: unable to read #load file: {s}\n", .{ full, @errorName(err) });
+            const loaded = comp.loadSourceWithLoads(full) catch |err| {
+                std.debug.print("{s}: error: unable to load #load file: {s}\n", .{ full, @errorName(err) });
                 return error.SourceReadFailed;
             };
             defer comp.allocator.free(loaded);
