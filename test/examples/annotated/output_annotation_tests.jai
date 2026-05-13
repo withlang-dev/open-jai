@@ -109,6 +109,10 @@ as_using_output :: () {
     expect_program_output("examples/12/12.6_#as_using.jai", "{{\"Gates\"}, \"software engineer\"}\n{\"Gates\"}\nnum is {42, 3.1415}\ni is 42\n");
 } @TestProcedure
 
+struct_align_output :: () {
+    expect_program_output("examples/12/12.7_struct_align.jai", "size = 16, value = 1010\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure

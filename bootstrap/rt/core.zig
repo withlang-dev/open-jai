@@ -135,12 +135,15 @@ export fn __openjai_print_static_string_array(data: ?*const anyopaque, count: us
 
 export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64) void {
     var buf: [128]u8 = undefined;
-    const unsigned_value: u64 = @intCast(value);
     const digits = "0123456789abcdef";
     var tmp: [65]u8 = undefined;
-    var n = unsigned_value;
+    const actual_base: u64 = if (base >= 2 and base <= 16) @intCast(base) else 10;
+    const negative_decimal = value < 0 and actual_base == 10;
+    var n: u64 = if (value < 0)
+        if (actual_base == 10) @as(u64, @intCast(-(value + 1))) + 1 else @bitCast(value)
+    else
+        @intCast(value);
     var len: usize = 0;
-    const actual_base: u64 = if (base == 16) 16 else 10;
     while (true) {
         tmp[tmp.len - 1 - len] = digits[@intCast(n % actual_base)];
         len += 1;
@@ -148,8 +151,16 @@ export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64)
         if (n == 0) break;
     }
     var out_len: usize = 0;
+    if (negative_decimal) {
+        buf[out_len] = '-';
+        out_len += 1;
+    }
     const min_digits: usize = if (minimum_digits > 0) @intCast(minimum_digits) else 0;
-    while (out_len + len < min_digits) : (out_len += 1) buf[out_len] = '0';
+    var pad_len: usize = 0;
+    while (pad_len + len < min_digits) : (pad_len += 1) {
+        buf[out_len] = '0';
+        out_len += 1;
+    }
     @memcpy(buf[out_len .. out_len + len], tmp[tmp.len - len ..]);
     out_len += len;
     writeAll(buf[0..out_len]);
