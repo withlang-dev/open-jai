@@ -4300,6 +4300,91 @@ const GenContext = struct {
                     if (ast.tag(array_operand) == .identifier) if (ctx.resolved.local_values.get(array_operand)) |decl| try ctx.array_last_items.put(program.allocator, decl, result);
                     return result;
                 }
+                if (std.mem.eql(u8, name, "peek")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "peek expects one array argument", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try ctx.genExpr(arrayValueOperand(ctx.ast, array_node), diag);
+                    const count_reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = array_reg, .source_node = expr });
+                    const one_reg = try ctx.emitInt(expr, 1);
+                    const index_reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .sub_int, .dest = index_reg, .arg1 = count_reg, .arg2 = one_reg, .source_node = expr });
+                    return try emitDynamicArrayIndex(ctx, expr, array_reg, index_reg, elem_ty, diag);
+                }
+                if (std.mem.eql(u8, name, "pop")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "pop expects one array argument", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try arrayRegisterForBuiltinArg(ctx, array_node, diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    const elem_size = try typeTextSize(ctx, elem_ty, diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_pop, .dest = reg, .arg1 = array_reg, .arg3 = @intCast(elem_size), .arg4 = try dynamicArrayElementKind(ctx, elem_ty, diag), .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "array_reset")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_reset expects one array argument", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try arrayRegisterForBuiltinArg(ctx, array_node, diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_reset, .arg1 = array_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .source_node = expr });
+                    return try ctx.emitInt(expr, 0);
+                }
+                if (std.mem.eql(u8, name, "array_reserve")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_reserve expects an array and capacity", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try arrayRegisterForBuiltinArg(ctx, array_node, diag);
+                    const capacity_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_reserve, .arg1 = array_reg, .arg2 = capacity_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .source_node = expr });
+                    return try ctx.emitInt(expr, 0);
+                }
+                if (std.mem.eql(u8, name, "array_ordered_remove_by_index")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_ordered_remove_by_index expects an array and index", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try arrayRegisterForBuiltinArg(ctx, array_node, diag);
+                    const index_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_ordered_remove_by_index, .arg1 = array_reg, .arg2 = index_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .source_node = expr });
+                    return try ctx.emitInt(expr, 0);
+                }
+                if (std.mem.eql(u8, name, "array_find")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_find expects an array and value", .{});
+                    const array_node: NodeIndex = @intCast(args[0]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, array_node, expr, diag);
+                    const array_reg = try ctx.genExpr(arrayValueOperand(ctx.ast, array_node), diag);
+                    const needle_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .array_find, .dest = reg, .arg1 = array_reg, .arg2 = needle_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .arg4 = try dynamicArrayElementKind(ctx, elem_ty, diag), .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "array_copy")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1 and args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_copy expects a source array or destination and source arrays", .{});
+                    const source_node: NodeIndex = @intCast(if (args.len == 1) args[0] else args[1]);
+                    const elem_ty = try dynamicArrayElementTextForArg(ctx, source_node, expr, diag);
+                    const source_reg = try ctx.genExpr(arrayValueOperand(ctx.ast, source_node), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    if (args.len == 2) {
+                        const dest_node: NodeIndex = @intCast(args[0]);
+                        const dest_reg = try arrayRegisterForBuiltinArg(ctx, dest_node, diag);
+                        try proc.instructions.append(program.allocator, .{ .opcode = .array_copy, .dest = reg, .arg1 = source_reg, .arg2 = dest_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .arg5 = 1, .source_node = expr });
+                    } else {
+                        try proc.instructions.append(program.allocator, .{ .opcode = .array_copy, .dest = reg, .arg1 = source_reg, .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)), .source_node = expr });
+                    }
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "assert")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "assert expects at least one argument", .{});
@@ -6530,6 +6615,46 @@ fn staticArrayTypeNodeForExpr(ctx: *GenContext, expr: NodeIndex) ?NodeIndex {
 fn isDynamicArrayTypeText(raw: []const u8) bool {
     const ty = std.mem.trim(u8, raw, " \t\r\n");
     return std.mem.startsWith(u8, ty, "[..]") or std.mem.startsWith(u8, ty, "[]");
+}
+
+fn arrayValueOperand(ast: *const Ast, arg: NodeIndex) NodeIndex {
+    if (arg != @import("Ast.zig").null_node and ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .star) return ast.data(arg).lhs;
+    return arg;
+}
+
+fn arrayRegisterForBuiltinArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+    const ast = ctx.ast;
+    if (arg != @import("Ast.zig").null_node and ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .star) {
+        return try genAddressOfLvalue(ctx, ast.data(arg).lhs, diag);
+    }
+    return try ctx.genExpr(arg, diag);
+}
+
+fn dynamicArrayElementTextForArg(ctx: *GenContext, arg: NodeIndex, source_node: NodeIndex, diag: Diagnostic) ![]const u8 {
+    const operand = arrayValueOperand(ctx.ast, arg);
+    const array_text = typeTextForExpr(ctx, operand, diag) orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "dynamic array builtin requires an array-typed argument", .{});
+    return dynamicArrayElementText(array_text) orelse return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "dynamic array builtin requires a dynamic array, found '{s}'", .{array_text});
+}
+
+fn dynamicArrayElementKind(ctx: *GenContext, elem_ty: []const u8, diag: Diagnostic) !u32 {
+    if (try typeTextIsEmbeddedStruct(ctx, elem_ty, diag)) return 1;
+    if (std.mem.eql(u8, firstTypeWord(elem_ty), "string")) return 2;
+    return 0;
+}
+
+fn emitDynamicArrayIndex(ctx: *GenContext, source_node: NodeIndex, array_reg: Bytecode.Register, index_reg: Bytecode.Register, elem_ty: []const u8, diag: Diagnostic) !Bytecode.Register {
+    const reg = ctx.proc.num_registers;
+    ctx.proc.num_registers += 1;
+    try ctx.proc.instructions.append(ctx.program.allocator, .{
+        .opcode = .array_index,
+        .dest = reg,
+        .arg1 = array_reg,
+        .arg2 = index_reg,
+        .arg3 = @intCast(try typeTextSize(ctx, elem_ty, diag)),
+        .arg4 = try dynamicArrayElementKind(ctx, elem_ty, diag),
+        .source_node = source_node,
+    });
+    return reg;
 }
 
 fn isStorageValueTypeText(raw: []const u8) bool {

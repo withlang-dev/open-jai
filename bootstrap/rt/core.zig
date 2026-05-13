@@ -871,7 +871,7 @@ export fn __openjai_string_slice(source: ?*OpenJaiRuntimeString, start_raw: i64,
 export fn __openjai_array_add(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) ?*anyopaque {
     const slot_ptr = slot orelse @panic("array_add on null array slot");
     if (elem_size == 0) return null;
-    var array = slot_ptr.*;
+    var array = arrayFromRuntimeValue(slot);
     if (array == null) {
         const raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return null;
         array = @ptrCast(@alignCast(raw));
@@ -898,6 +898,92 @@ export fn __openjai_array_add(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, e
     }
     a.count += 1;
     return dst;
+}
+
+export fn __openjai_array_pop(slot: ?*?*OpenJaiArray, elem_size: usize) ?*anyopaque {
+    const a = arrayFromRuntimeValue(slot) orelse @panic("pop on null dynamic array");
+    if (a.count == 0) @panic("pop from empty dynamic array");
+    const result = rtAlloc(elem_size) orelse return null;
+    const data: [*]u8 = @ptrCast(a.data.?);
+    const src = data + (a.count - 1) * elem_size;
+    @memcpy(@as([*]u8, @ptrCast(result))[0..elem_size], src[0..elem_size]);
+    a.count -= 1;
+    return result;
+}
+
+export fn __openjai_array_reset(slot: ?*?*OpenJaiArray) void {
+    const a = arrayFromRuntimeValue(slot) orelse return;
+    a.count = 0;
+}
+
+export fn __openjai_array_reserve(slot: ?*?*OpenJaiArray, capacity: usize, elem_size: usize) void {
+    const slot_ptr = slot orelse @panic("array_reserve on null array slot");
+    if (elem_size == 0) return;
+    var array = arrayFromRuntimeValue(slot);
+    if (array == null) {
+        const raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return;
+        array = @ptrCast(@alignCast(raw));
+        array.?.* = .{ .count = 0, .capacity = 0, .data = null };
+        slot_ptr.* = array;
+    }
+    const a = array.?;
+    if (capacity <= a.capacity) return;
+    const old_bytes = a.capacity * elem_size;
+    const new_bytes = capacity * elem_size;
+    const new_data = rtRealloc(a.data, old_bytes, new_bytes) orelse return;
+    a.data = new_data;
+    a.capacity = capacity;
+}
+
+export fn __openjai_array_ordered_remove_by_index(slot: ?*?*OpenJaiArray, index: i64, elem_size: usize) void {
+    const a = arrayFromRuntimeValue(slot) orelse @panic("array_ordered_remove_by_index on null dynamic array");
+    if (index < 0 or @as(usize, @intCast(index)) >= a.count) @panic("array_ordered_remove_by_index out of bounds");
+    const idx: usize = @intCast(index);
+    const data: [*]u8 = @ptrCast(a.data.?);
+    const trailing = a.count - idx - 1;
+    if (trailing != 0) {
+        const dst = data + idx * elem_size;
+        const src = data + (idx + 1) * elem_size;
+        std.mem.copyForwards(u8, dst[0 .. trailing * elem_size], src[0 .. trailing * elem_size]);
+    }
+    a.count -= 1;
+}
+
+export fn __openjai_array_find(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) bool {
+    const a = arrayFromRuntimeValue(slot) orelse return false;
+    const needle = item orelse return false;
+    if (a.count == 0 or a.data == null) return false;
+    const data: [*]const u8 = @ptrCast(a.data.?);
+    const wanted: [*]const u8 = @ptrCast(needle);
+    var i: usize = 0;
+    while (i < a.count) : (i += 1) {
+        if (std.mem.eql(u8, data[i * elem_size .. (i + 1) * elem_size], wanted[0..elem_size])) return true;
+    }
+    return false;
+}
+
+export fn __openjai_array_copy(source: ?*?*OpenJaiArray, elem_size: usize) ?*OpenJaiArray {
+    const src = arrayFromRuntimeValue(source) orelse return null;
+    const raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return null;
+    const dest: *OpenJaiArray = @ptrCast(@alignCast(raw));
+    const bytes = src.count * elem_size;
+    const data = if (bytes == 0) null else rtAlloc(bytes) orelse {
+        rtFree(raw);
+        return null;
+    };
+    if (bytes != 0) @memcpy(@as([*]u8, @ptrCast(data.?))[0..bytes], @as([*]u8, @ptrCast(src.data.?))[0..bytes]);
+    dest.* = .{ .count = src.count, .capacity = src.count, .data = data };
+    return dest;
+}
+
+export fn __openjai_array_copy_to(dest_slot: ?*?*OpenJaiArray, source: ?*?*OpenJaiArray, elem_size: usize) ?*OpenJaiArray {
+    const src = arrayFromRuntimeValue(source) orelse return null;
+    __openjai_array_reserve(dest_slot, src.count, elem_size);
+    const dest = arrayFromRuntimeValue(dest_slot) orelse return null;
+    const bytes = src.count * elem_size;
+    if (bytes != 0) @memcpy(@as([*]u8, @ptrCast(dest.data.?))[0..bytes], @as([*]u8, @ptrCast(src.data.?))[0..bytes]);
+    dest.count = src.count;
+    return dest;
 }
 
 export fn __openjai_new_array(count: usize, elem_size: usize, elem_align: usize) ?*OpenJaiArray {

@@ -1013,6 +1013,74 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const result = c.LLVMBuildCall2(env.builder, env.array_add_fn_ty, env.array_add_fn, &args, args.len, "array_item");
                 try setPointerResult(env, registers, inst.dest, result);
             },
+            .array_pop => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_pop register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_pop") orelse c.LLVMAddFunction(env.module, "__openjai_array_pop", fn_ty);
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "array_pop array"), c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                const item_ptr = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "array_pop");
+                switch (inst.arg4) {
+                    1 => try setPointerResult(env, registers, inst.dest, item_ptr),
+                    2 => registers[inst.dest] = .{ .llvm_value = c.LLVMBuildLoad2(env.builder, env.ptr_ty, item_ptr, "array_pop_string"), .kind = .runtime_string },
+                    else => if (inst.arg3 == 1) {
+                        const byte = c.LLVMBuildLoad2(env.builder, c.LLVMInt8TypeInContext(env.context), item_ptr, "array_pop_u8");
+                        try setIntResult(env, registers, inst.dest, c.LLVMBuildZExt(env.builder, byte, env.llvm_i64, "array_pop_u8_zext"));
+                    } else {
+                        try setIntResult(env, registers, inst.dest, c.LLVMBuildLoad2(env.builder, env.llvm_i64, item_ptr, "array_pop_int"));
+                    },
+                }
+            },
+            .array_reset => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_reset register out of range", .{});
+                const params = [_]c.LLVMTypeRef{env.ptr_ty};
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_reset") orelse c.LLVMAddFunction(env.module, "__openjai_array_reset", fn_ty);
+                var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "array_reset array")};
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .array_reserve => {
+                if (inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend array_reserve register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_reserve") orelse c.LLVMAddFunction(env.module, "__openjai_array_reserve", fn_ty);
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "array_reserve array"), try valueAsInt(env, registers[inst.arg2], diag), c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .array_ordered_remove_by_index => {
+                if (inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend array_ordered_remove_by_index register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_ordered_remove_by_index") orelse c.LLVMAddFunction(env.module, "__openjai_array_ordered_remove_by_index", fn_ty);
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "array_ordered_remove_by_index array"), try valueAsInt(env, registers[inst.arg2], diag), c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .array_find => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend array_find register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMInt1TypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_find") orelse c.LLVMAddFunction(env.module, "__openjai_array_find", fn_ty);
+                const item_ptr = if (inst.arg4 != 0) try pointerValue(env, registers[inst.arg2], diag, "array_find struct item") else try valueAddress(env, registers[inst.arg2], diag);
+                var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "array_find array"), item_ptr, c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                registers[inst.dest] = .{ .llvm_value = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "array_find"), .kind = .bool };
+            },
+            .array_copy => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_copy register out of range", .{});
+                if (inst.arg5 != 0) {
+                    if (inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend array_copy destination register out of range", .{});
+                    const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.ptr_ty, env.llvm_i64 };
+                    const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                    const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_copy_to") orelse c.LLVMAddFunction(env.module, "__openjai_array_copy_to", fn_ty);
+                    var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg2], diag, "array_copy destination"), try pointerValue(env, registers[inst.arg1], diag, "array_copy source"), c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                    try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "array_copy_to"));
+                } else {
+                    const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
+                    const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                    const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_array_copy") orelse c.LLVMAddFunction(env.module, "__openjai_array_copy", fn_ty);
+                    var args = [_]c.LLVMValueRef{ try pointerValue(env, registers[inst.arg1], diag, "array_copy source"), c.LLVMConstInt(env.llvm_i64, inst.arg3, 0) };
+                    try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "array_copy"));
+                }
+            },
             .sort_array => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend sort_array register out of range", .{});
                 if (inst.arg5 == 0) return diag.failAt(0, "LLVM backend dynamic array sort is not implemented for runtime code yet", .{});

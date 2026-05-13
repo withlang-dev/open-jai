@@ -717,6 +717,52 @@ pub const VM = struct {
                     else
                         try vm.dynamicArrayAdd(slot, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), diag) };
                 },
+                .array_pop => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_pop register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "array_pop array");
+                    regs[inst.dest] = try vm.dynamicArrayPop(ptr, @intCast(@max(inst.arg3, 1)), inst.arg4, diag);
+                },
+                .array_reset => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM array_reset register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "array_reset array");
+                    try vm.dynamicArrayReset(ptr, @intCast(@max(inst.arg3, 1)), diag);
+                },
+                .array_reserve => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_reserve register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "array_reserve array");
+                    const capacity = switch (regs[inst.arg2]) {
+                        .int => |value| value,
+                        else => return diag.failAt(0, "VM array_reserve capacity must be integer", .{}),
+                    };
+                    if (capacity < 0) return diag.failAt(0, "VM array_reserve capacity cannot be negative", .{});
+                    try vm.dynamicArrayReserve(ptr, @intCast(capacity), @intCast(@max(inst.arg3, 1)), diag);
+                },
+                .array_ordered_remove_by_index => {
+                    if (inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_ordered_remove_by_index register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "array_ordered_remove_by_index array");
+                    const index = switch (regs[inst.arg2]) {
+                        .int => |value| value,
+                        else => return diag.failAt(0, "VM array_ordered_remove_by_index index must be integer", .{}),
+                    };
+                    if (index < 0) return diag.failAt(0, "VM array_ordered_remove_by_index index cannot be negative", .{});
+                    try vm.dynamicArrayOrderedRemove(ptr, @intCast(index), @intCast(@max(inst.arg3, 1)), diag);
+                },
+                .array_find => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM array_find register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "array_find array");
+                    regs[inst.dest] = .{ .bool = try vm.dynamicArrayFind(ptr, regs[inst.arg2], @intCast(@max(inst.arg3, 1)), inst.arg4, diag) };
+                },
+                .array_copy => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_copy register out of range", .{});
+                    const source = try registerPointer(regs[inst.arg1], diag, "array_copy source");
+                    if (inst.arg5 != 0) {
+                        if (inst.arg2 >= regs.len) return diag.failAt(0, "VM array_copy destination register out of range", .{});
+                        const dest = try registerPointer(regs[inst.arg2], diag, "array_copy destination");
+                        regs[inst.dest] = .{ .ptr = try vm.dynamicArrayCopyTo(dest, source, @intCast(@max(inst.arg3, 1)), diag) };
+                    } else {
+                        regs[inst.dest] = .{ .ptr = try vm.dynamicArrayCopy(source, @intCast(@max(inst.arg3, 1)), diag) };
+                    }
+                },
                 .sort_array => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM sort_array register out of range", .{});
                     const array_ptr = try registerPointer(regs[inst.arg1], diag, "sort_array");
@@ -2149,6 +2195,95 @@ pub const VM = struct {
             last = try vm.dynamicArrayAdd(array_ptr, item, elem_size, diag);
         }
         return last orelse array_ptr;
+    }
+
+    fn dynamicArrayPop(vm: *VM, array_ptr: Pointer, elem_size: usize, elem_kind: u32, diag: Diagnostic) !RegisterValue {
+        const array_index = vm.dynamicArrayIndexForPointer(array_ptr) orelse return diag.failAt(0, "VM pop requires a dynamic array", .{});
+        const array = &vm.dynamic_arrays.items[array_index];
+        if (array.elems.items.len == 0) return diag.failAt(0, "VM pop from empty dynamic array", .{});
+        const value = try vm.dynamicArrayIndex(array_ptr, array.elems.items.len - 1, elem_size, elem_kind, diag) orelse return diag.failAt(0, "VM pop failed to read dynamic array element", .{});
+        _ = array.elems.pop();
+        try vm.writeDynamicArrayHeader(array_index, diag);
+        return value;
+    }
+
+    fn dynamicArrayReset(vm: *VM, array_ptr: Pointer, elem_size: usize, diag: Diagnostic) !void {
+        const array_index = try vm.ensureDynamicArrayForPointer(array_ptr, elem_size, diag);
+        vm.dynamic_arrays.items[array_index].elems.clearRetainingCapacity();
+        try vm.writeDynamicArrayHeader(array_index, diag);
+    }
+
+    fn dynamicArrayReserve(vm: *VM, array_ptr: Pointer, capacity: usize, elem_size: usize, diag: Diagnostic) !void {
+        const array_index = try vm.ensureDynamicArrayForPointer(array_ptr, elem_size, diag);
+        try vm.dynamic_arrays.items[array_index].elems.ensureTotalCapacity(vm.allocator, capacity);
+        try vm.ensureDynamicArrayData(array_index, capacity, diag);
+        try vm.writeDynamicArrayHeader(array_index, diag);
+    }
+
+    fn dynamicArrayOrderedRemove(vm: *VM, array_ptr: Pointer, index: usize, elem_size: usize, diag: Diagnostic) !void {
+        const array_index = vm.dynamicArrayIndexForPointer(array_ptr) orelse return diag.failAt(0, "VM array_ordered_remove_by_index requires a dynamic array", .{});
+        const array = &vm.dynamic_arrays.items[array_index];
+        if (index >= array.elems.items.len) return diag.failAt(0, "VM array_ordered_remove_by_index out of bounds", .{});
+        _ = array.elems.orderedRemove(index);
+        try vm.ensureDynamicArrayData(array_index, array.elems.items.len, diag);
+        for (array.elems.items, 0..) |item, i| {
+            const item_ptr = try vm.dynamicArrayItemPointer(array_index, i, diag);
+            try vm.storeDynamicArrayElementBytes(item_ptr, item, elem_size, diag);
+        }
+        try vm.writeDynamicArrayHeader(array_index, diag);
+    }
+
+    fn dynamicArrayFind(vm: *VM, array_ptr: Pointer, needle: RegisterValue, elem_size: usize, elem_kind: u32, diag: Diagnostic) !bool {
+        const array_index = vm.dynamicArrayIndexForPointer(array_ptr) orelse return diag.failAt(0, "VM array_find requires a dynamic array", .{});
+        var i: usize = 0;
+        while (i < vm.dynamic_arrays.items[array_index].elems.items.len) : (i += 1) {
+            const value = try vm.dynamicArrayIndex(array_ptr, i, elem_size, elem_kind, diag) orelse return diag.failAt(0, "VM array_find failed to read dynamic array element", .{});
+            if (try vm.valuesEqual(value, needle, diag)) return true;
+        }
+        return false;
+    }
+
+    fn dynamicArrayCopy(vm: *VM, source_ptr: Pointer, elem_size: usize, diag: Diagnostic) !Pointer {
+        const result = try vm.newDynamicArray(0, elem_size, diag);
+        return try vm.dynamicArrayCopyTo(result, source_ptr, elem_size, diag);
+    }
+
+    fn dynamicArrayCopyTo(vm: *VM, dest_ptr: Pointer, source_ptr: Pointer, elem_size: usize, diag: Diagnostic) !Pointer {
+        const source_index = vm.dynamicArrayIndexForPointer(source_ptr) orelse return diag.failAt(0, "VM array_copy source must be a dynamic array", .{});
+        const dest_index = try vm.ensureDynamicArrayForPointer(dest_ptr, elem_size, diag);
+        vm.dynamic_arrays.items[dest_index].elems.clearRetainingCapacity();
+        for (vm.dynamic_arrays.items[source_index].elems.items) |item| {
+            _ = try vm.dynamicArrayAdd(dest_ptr, item, elem_size, diag);
+        }
+        return dest_ptr;
+    }
+
+    fn valuesEqual(vm: *VM, lhs: RegisterValue, rhs: RegisterValue, diag: Diagnostic) !bool {
+        _ = vm;
+        _ = diag;
+        return switch (lhs) {
+            .int => |l| switch (rhs) {
+                .int => |r| l == r,
+                else => false,
+            },
+            .float => |l| switch (rhs) {
+                .float => |r| l == r,
+                else => false,
+            },
+            .bool => |l| switch (rhs) {
+                .bool => |r| l == r,
+                else => false,
+            },
+            .string, .bytes => |l| switch (rhs) {
+                .string, .bytes => |r| std.mem.eql(u8, l, r),
+                else => false,
+            },
+            .ptr => |l| switch (rhs) {
+                .ptr => |r| l.block == r.block and l.offset == r.offset,
+                else => false,
+            },
+            else => false,
+        };
     }
 
     fn sortDynamicArray(vm: *VM, array_ptr: Pointer, kind: u32, diag: Diagnostic) !void {
