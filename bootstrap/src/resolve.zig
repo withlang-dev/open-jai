@@ -1303,6 +1303,10 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
             } else if (r.external_names.contains(name)) {
                 try r.local_values.put(r.allocator, node, @import("Ast.zig").null_node);
+            } else if (isOperatorIdentifierName(name)) {
+                // Expression-form `operator +(a, b)` parses the operator token
+                // as an identifier callee. It is resolved by sema/codegen using
+                // the same operator table as infix expressions.
             } else {
                 return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unresolved identifier '{s}'", .{name});
             }
@@ -1323,6 +1327,20 @@ fn isMacroGeneratedIdentifier(name: []const u8) bool {
 
 fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+}
+
+fn isOperatorIdentifierName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "+") or
+        std.mem.eql(u8, name, "-") or
+        std.mem.eql(u8, name, "*") or
+        std.mem.eql(u8, name, "/") or
+        std.mem.eql(u8, name, "%") or
+        std.mem.eql(u8, name, "==") or
+        std.mem.eql(u8, name, "!=") or
+        std.mem.eql(u8, name, "<") or
+        std.mem.eql(u8, name, "<=") or
+        std.mem.eql(u8, name, ">") or
+        std.mem.eql(u8, name, ">=");
 }
 
 test "scope_export restores non-file visibility after #scope_file" {

@@ -569,6 +569,16 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             }
             if (ast.tag(callee) != .identifier) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "Phase 1 only supports calls by identifier", .{});
             const name = ast.tokenSlice(ast.mainToken(callee));
+            if (isOperatorIdentifierName(name)) {
+                if (args.len != 1 and args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "operator call expects one or two operands", .{});
+                const lhs_ty = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
+                if (args.len == 1) break :blk lhs_ty;
+                const rhs_ty = try analyzeNode(ast, resolved, typed, @intCast(args[1]), diag);
+                if (std.mem.eql(u8, name, "==") or std.mem.eql(u8, name, "!=") or std.mem.eql(u8, name, "<") or std.mem.eql(u8, name, "<=") or std.mem.eql(u8, name, ">") or std.mem.eql(u8, name, ">=")) break :blk Type.boolType();
+                if (lhs_ty.isFloat() or rhs_ty.isFloat()) break :blk Type.init(InternPool.well_known.float32_type);
+                if (lhs_ty.isInteger() and rhs_ty.isInteger()) break :blk lhs_ty;
+                break :blk lhs_ty;
+            }
             if (resolved.overloads(name)) |candidates| {
                 const selected = try selectOverload(ast, candidates, args.len, diag, node);
                 return try analyzeProcCall(ast, resolved, typed, selected, args, diag, node);
@@ -647,7 +657,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                             try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
                         else
                             try analyzeNode(ast, resolved, typed, arg_node, diag);
-                        if (!(arg_ty.isString() or arg_ty.isInteger() or arg_ty.index == InternPool.well_known.float32_type or arg_ty.index == InternPool.well_known.float64_type or arg_ty.isBool() or arg_ty.isVoid() or arg_ty.isPointer() or arg_ty.index == InternPool.well_known.type_type or arg_ty.index == InternPool.well_known.type_table_type or arg_ty.isAny() or arg_ty.index == InternPool.well_known.apollo_time_type or arg_ty.index == InternPool.well_known.calendar_type)) return diag.failAt(ast.tokens[ast.mainToken(@intCast(arg))].start, "Phase 3 print currently rejected this argument type", .{});
+                        if (!(arg_ty.isString() or arg_ty.isInteger() or arg_ty.index == InternPool.well_known.float32_type or arg_ty.index == InternPool.well_known.float64_type or arg_ty.isBool() or arg_ty.isVoid() or arg_ty.isPointer() or arg_ty.index == InternPool.well_known.type_type or arg_ty.index == InternPool.well_known.type_table_type or arg_ty.isAny() or arg_ty.index == InternPool.well_known.apollo_time_type or arg_ty.index == InternPool.well_known.calendar_type or arg_ty.index == InternPool.well_known.vector3_type)) return diag.failAt(ast.tokens[ast.mainToken(@intCast(arg))].start, "Phase 3 print currently rejected this argument type", .{});
                     }
                     break :blk Type.voidType();
                 },
@@ -1496,6 +1506,20 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
 
 fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "String_Builder") or isCompilerMetaTypeName(name);
+}
+
+fn isOperatorIdentifierName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "+") or
+        std.mem.eql(u8, name, "-") or
+        std.mem.eql(u8, name, "*") or
+        std.mem.eql(u8, name, "/") or
+        std.mem.eql(u8, name, "%") or
+        std.mem.eql(u8, name, "==") or
+        std.mem.eql(u8, name, "!=") or
+        std.mem.eql(u8, name, "<") or
+        std.mem.eql(u8, name, "<=") or
+        std.mem.eql(u8, name, ">") or
+        std.mem.eql(u8, name, ">=");
 }
 
 fn isCompilerMetaTypeName(name: []const u8) bool {

@@ -3903,6 +3903,52 @@ const GenContext = struct {
                     for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
                     return try ctx.emitInt(expr, 0);
                 }
+                if (isOperatorIdentifierName(name)) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1 and args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "operator call expects one or two operands", .{});
+                    const lhs = try ctx.genExpr(@intCast(args[0]), diag);
+                    if (args.len == 1) {
+                        if (std.mem.eql(u8, name, "-")) {
+                            const reg = proc.num_registers;
+                            proc.num_registers += 1;
+                            const opcode: Bytecode.Opcode = if (ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[0])).isFloat()) .neg_float else .neg_int;
+                            try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = lhs, .source_node = expr });
+                            return reg;
+                        }
+                        return lhs;
+                    }
+                    const rhs = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    const lhs_float = ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[0])).isFloat();
+                    const rhs_float = ctx.typed != null and ctx.typed.?.typeOf(@intCast(args[1])).isFloat();
+                    const opcode: Bytecode.Opcode = if (std.mem.eql(u8, name, "+"))
+                        if (lhs_float or rhs_float) .add_float else .add_int
+                    else if (std.mem.eql(u8, name, "-"))
+                        if (lhs_float or rhs_float) .sub_float else .sub_int
+                    else if (std.mem.eql(u8, name, "*"))
+                        if (lhs_float or rhs_float) .mul_float else .mul_int
+                    else if (std.mem.eql(u8, name, "/"))
+                        if (lhs_float or rhs_float) .div_float else .div_int
+                    else if (std.mem.eql(u8, name, "%"))
+                        .rem_int
+                    else if (std.mem.eql(u8, name, "=="))
+                        .cmp_eq
+                    else if (std.mem.eql(u8, name, "!="))
+                        .cmp_ne
+                    else if (std.mem.eql(u8, name, "<"))
+                        .cmp_lt_int
+                    else if (std.mem.eql(u8, name, "<="))
+                        .cmp_le_int
+                    else if (std.mem.eql(u8, name, ">"))
+                        .cmp_gt_int
+                    else if (std.mem.eql(u8, name, ">="))
+                        .cmp_ge_int
+                    else
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "unsupported operator call '{s}'", .{name});
+                    try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = lhs, .arg2 = rhs, .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "thread_is_done")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     for (args) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
@@ -7001,6 +7047,20 @@ fn decodeCharLiteral(allocator: std.mem.Allocator, raw: []const u8, diag: Diagno
 
 fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+}
+
+fn isOperatorIdentifierName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "+") or
+        std.mem.eql(u8, name, "-") or
+        std.mem.eql(u8, name, "*") or
+        std.mem.eql(u8, name, "/") or
+        std.mem.eql(u8, name, "%") or
+        std.mem.eql(u8, name, "==") or
+        std.mem.eql(u8, name, "!=") or
+        std.mem.eql(u8, name, "<") or
+        std.mem.eql(u8, name, "<=") or
+        std.mem.eql(u8, name, ">") or
+        std.mem.eql(u8, name, ">=");
 }
 
 fn typeInfoTagValue(name: []const u8) ?u32 {
