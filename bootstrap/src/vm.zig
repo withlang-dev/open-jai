@@ -86,11 +86,21 @@ const CompilerMessage = struct {
     dump_text: []const u8 = "",
 };
 
-const WorkspaceSource = struct {
+pub const WorkspaceSourceSnapshot = struct {
     workspace: i64,
     path: []const u8,
     source: []const u8,
 };
+
+pub const BuildOptionsSnapshot = struct {
+    output_executable_name: []const u8 = "",
+    output_path: []const u8 = "",
+    output_type: []const u8 = "EXECUTABLE",
+    backend: []const u8 = "LLVM",
+    llvm_output_bitcode: bool = false,
+};
+
+const WorkspaceSource = WorkspaceSourceSnapshot;
 
 const RegisterValue = union(enum) {
     empty,
@@ -175,6 +185,42 @@ pub const VM = struct {
 
     pub fn initWithContext(allocator: std.mem.Allocator, program: *const Bytecode.Program, io: std.Io, base_dir: []const u8) VM {
         return .{ .allocator = allocator, .program = program, .io = io, .base_dir = base_dir };
+    }
+
+    pub fn exportWorkspaceBuildState(
+        vm: *VM,
+        allocator: std.mem.Allocator,
+        sources: *std.ArrayList(WorkspaceSourceSnapshot),
+        options: *std.AutoHashMapUnmanaged(i64, BuildOptionsSnapshot),
+    ) !void {
+        for (vm.workspace_sources.items) |source| {
+            if (source.workspace <= 2) continue;
+            try sources.append(allocator, .{
+                .workspace = source.workspace,
+                .path = try allocator.dupe(u8, source.path),
+                .source = try allocator.dupe(u8, source.source),
+            });
+        }
+        var it = vm.workspace_build_options.iterator();
+        while (it.next()) |entry| {
+            const workspace = entry.key_ptr.*;
+            const snapshot = try vm.buildOptionsSnapshot(allocator, entry.value_ptr.*);
+            if (try options.fetchPut(allocator, workspace, snapshot)) |old| {
+                freeBuildOptionsSnapshot(allocator, old.value);
+            }
+        }
+    }
+
+    pub fn freeWorkspaceSourceSnapshot(allocator: std.mem.Allocator, source: WorkspaceSourceSnapshot) void {
+        allocator.free(source.path);
+        allocator.free(source.source);
+    }
+
+    pub fn freeBuildOptionsSnapshot(allocator: std.mem.Allocator, options: BuildOptionsSnapshot) void {
+        allocator.free(options.output_executable_name);
+        allocator.free(options.output_path);
+        allocator.free(options.output_type);
+        allocator.free(options.backend);
     }
 
     pub fn deinit(vm: *VM) void {
@@ -1636,9 +1682,8 @@ pub const VM = struct {
             try vm.rebuildInterceptMessages(workspace, diag);
             return true;
         }
-        if (workspace != -1 and workspace != 1) {
-            // Target-workspace scheduling is handled outside the current
-            // workspace source reparse loop.
+        if (workspace != -1 and workspace != 1 and workspace != vm.current_workspace_id) {
+            try vm.addWorkspaceSource(workspace, "<add_build_string>", source);
             return true;
         }
         const sink = vm.current_workspace_build_strings orelse return diag.failAt(0, "add_build_string requires an active compiler workspace", .{});
@@ -1998,6 +2043,18 @@ pub const VM = struct {
         const cloned_index = vm.dynamicArrayIndexForPointer(header) orelse return diag.failAt(0, "VM dynamic array clone allocation failed", .{});
         for (source.elems.items) |item| _ = try vm.dynamicArrayAdd(header, item, source.elem_size, diag);
         return cloned_index;
+    }
+
+    fn buildOptionsSnapshot(vm: *VM, allocator: std.mem.Allocator, index: usize) !BuildOptionsSnapshot {
+        if (index >= vm.build_options.items.len) return error.InvalidBuildOptionsHandle;
+        const options = vm.build_options.items[index];
+        return .{
+            .output_executable_name = try allocator.dupe(u8, options.output_executable_name),
+            .output_path = try allocator.dupe(u8, options.output_path),
+            .output_type = try allocator.dupe(u8, options.output_type),
+            .backend = try allocator.dupe(u8, options.backend),
+            .llvm_output_bitcode = options.llvm_output_bitcode,
+        };
     }
 
     fn optimizationMode(vm: *VM, value: RegisterValue, diag: Diagnostic) !i64 {

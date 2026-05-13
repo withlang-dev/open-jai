@@ -306,6 +306,21 @@ fn runProcTest(ctx: *Context, proc_test: ProcTest) !TestOutcome {
             const result = try expectCompileCreatesFile(ctx, full_path, full_output_path, expected);
             if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
             if (result.message.len != 0) ctx.allocator.free(result.message);
+        } else if (std.mem.eql(u8, name, "expect_compile_creates_program_output")) {
+            asserts += 1;
+            const path = try stringArg(ctx.allocator, ast, args, 0, expr);
+            defer ctx.allocator.free(path);
+            const program_path = try stringArg(ctx.allocator, ast, args, 1, expr);
+            defer ctx.allocator.free(program_path);
+            const expected = try stringArg(ctx.allocator, ast, args, 2, expr);
+            defer ctx.allocator.free(expected);
+            const full_path = try pathFromRepo(ctx.allocator, ctx.repo_root, path);
+            defer ctx.allocator.free(full_path);
+            const full_program_path = try pathFromRepo(ctx.allocator, ctx.repo_root, program_path);
+            defer ctx.allocator.free(full_program_path);
+            const result = try expectCompileCreatesProgramOutput(ctx, full_path, full_program_path, expected);
+            if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
+            if (result.message.len != 0) ctx.allocator.free(result.message);
         } else if (std.mem.eql(u8, name, "expect_program_output")) {
             asserts += 1;
             const path = try stringArg(ctx.allocator, ast, args, 0, expr);
@@ -515,9 +530,18 @@ fn expectCompileCreatesFile(ctx: *Context, path: []const u8, output_path: []cons
         else => return err,
     };
 
-    const result = try expectCompileSuccess(ctx, path);
-    if (!result.passed) return result;
-    if (result.message.len != 0) ctx.allocator.free(result.message);
+    const out = try outputPathFor(ctx, path);
+    defer ctx.allocator.free(out);
+    const compile_result = try std.process.run(ctx.allocator, ctx.io, .{
+        .argv = &.{ ctx.compiler_path, path, "-o", out, "--runtime", ctx.runtime_path },
+        .cwd = .{ .path = ctx.repo_root },
+    });
+    defer ctx.allocator.free(compile_result.stdout);
+    defer ctx.allocator.free(compile_result.stderr);
+    if (!termOk(compile_result.term)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "compile failed for {s} ({}):\n{s}{s}", .{ path, compile_result.term, compile_result.stdout, compile_result.stderr });
+        return .{ .passed = false, .asserts = 1, .message = msg };
+    }
 
     const actual = Dir.cwd().readFileAlloc(ctx.io, output_path, ctx.allocator, .limited(1024 * 1024)) catch |err| {
         const msg = try std.fmt.allocPrint(ctx.allocator, "expected compile of {s} to create {s}: {s}", .{ path, output_path, @errorName(err) });
@@ -527,6 +551,37 @@ fn expectCompileCreatesFile(ctx: *Context, path: []const u8, output_path: []cons
 
     if (std.mem.eql(u8, actual, expected)) return .{ .passed = true, .asserts = 1 };
     const msg = try std.fmt.allocPrint(ctx.allocator, "file output mismatch for {s}\nexpected: \"{s}\"\nactual:   \"{s}\"", .{ output_path, expected, actual });
+    return .{ .passed = false, .asserts = 1, .message = msg };
+}
+
+fn expectCompileCreatesProgramOutput(ctx: *Context, path: []const u8, program_path: []const u8, expected: []const u8) !TestOutcome {
+    Dir.cwd().deleteFile(ctx.io, program_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+
+    const out = try outputPathFor(ctx, path);
+    defer ctx.allocator.free(out);
+    const compile_result = try std.process.run(ctx.allocator, ctx.io, .{
+        .argv = &.{ ctx.compiler_path, path, "-o", out, "--runtime", ctx.runtime_path },
+        .cwd = .{ .path = ctx.repo_root },
+    });
+    defer ctx.allocator.free(compile_result.stdout);
+    defer ctx.allocator.free(compile_result.stderr);
+    if (!termOk(compile_result.term)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "compile failed for {s} ({}):\n{s}{s}", .{ path, compile_result.term, compile_result.stdout, compile_result.stderr });
+        return .{ .passed = false, .asserts = 1, .message = msg };
+    }
+
+    const run_result = try std.process.run(ctx.allocator, ctx.io, .{ .argv = &.{program_path}, .cwd = .{ .path = ctx.repo_root } });
+    defer ctx.allocator.free(run_result.stdout);
+    defer ctx.allocator.free(run_result.stderr);
+    if (!termOk(run_result.term)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "program {s} exited with {}:\n{s}{s}", .{ program_path, run_result.term, run_result.stdout, run_result.stderr });
+        return .{ .passed = false, .asserts = 1, .message = msg };
+    }
+    if (std.mem.eql(u8, run_result.stdout, expected)) return .{ .passed = true, .asserts = 1 };
+    const msg = try std.fmt.allocPrint(ctx.allocator, "program output mismatch for {s}\nexpected: \"{s}\"\nactual:   \"{s}\"", .{ program_path, expected, run_result.stdout });
     return .{ .passed = false, .asserts = 1, .message = msg };
 }
 

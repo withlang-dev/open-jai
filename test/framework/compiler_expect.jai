@@ -10,4 +10,6 @@ expect_compile_output :: (path: string, expected: string) #foreign openjai_test_
 expect_compile_output_contains :: (path: string, needle: string) #foreign openjai_test_framework;
 expect_program_output :: (path: string, expected: string) #foreign openjai_test_framework;
 expect_program_output_contains :: (path: string, needle: string) #foreign openjai_test_framework;
+expect_compile_creates_file :: (path: string, output_path: string, expected: string) #foreign openjai_test_framework;
+expect_compile_creates_program_output :: (path: string, program_path: string, expected: string) #foreign openjai_test_framework;
 expect_example_annotations :: (path: string) #foreign openjai_test_framework;

@@ -26,6 +26,8 @@ pub const Compilation = struct {
     owned_run_result_strings: std.ArrayList([]const u8) = .empty,
     owned_run_result_bytes: std.ArrayList([]const u8) = .empty,
     pending_current_workspace_sources: std.ArrayList([]const u8) = .empty,
+    workspace_sources: std.ArrayList(vm_mod.WorkspaceSourceSnapshot) = .empty,
+    workspace_build_options: std.AutoHashMapUnmanaged(i64, vm_mod.BuildOptionsSnapshot) = .empty,
     next_workspace_id: i64 = 3,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
@@ -39,6 +41,18 @@ pub const Compilation = struct {
     fn clearPendingCurrentWorkspaceSources(comp: *Compilation) void {
         for (comp.pending_current_workspace_sources.items) |value| comp.allocator.free(value);
         comp.pending_current_workspace_sources.clearRetainingCapacity();
+    }
+
+    fn clearWorkspaceBuildState(comp: *Compilation) void {
+        for (comp.workspace_sources.items) |source| vm_mod.VM.freeWorkspaceSourceSnapshot(comp.allocator, source);
+        comp.workspace_sources.clearRetainingCapacity();
+        var it = comp.workspace_build_options.iterator();
+        while (it.next()) |entry| vm_mod.VM.freeBuildOptionsSnapshot(comp.allocator, entry.value_ptr.*);
+        comp.workspace_build_options.clearRetainingCapacity();
+    }
+
+    fn captureVMWorkspaceState(comp: *Compilation, vm: *vm_mod.VM) !void {
+        try vm.exportWorkspaceBuildState(comp.allocator, &comp.workspace_sources, &comp.workspace_build_options);
     }
 
     fn hasAppliedCurrentWorkspaceSource(applied: []const []const u8, source: []const u8) bool {
@@ -81,6 +95,77 @@ pub const Compilation = struct {
         return true;
     }
 
+    fn currentWorkspaceOutputDisabled(comp: *Compilation) bool {
+        const options = comp.workspace_build_options.get(2) orelse return false;
+        return std.mem.eql(u8, options.output_type, "NO_OUTPUT");
+    }
+
+    fn compileTargetWorkspaces(comp: *Compilation, diag: Diagnostic) anyerror!void {
+        var seen = std.AutoHashMapUnmanaged(i64, void){};
+        defer seen.deinit(comp.allocator);
+        for (comp.workspace_sources.items) |source| {
+            if (source.workspace <= 2) continue;
+            const entry = try seen.getOrPut(comp.allocator, source.workspace);
+            if (entry.found_existing) continue;
+            try comp.compileTargetWorkspace(source.workspace, diag);
+        }
+    }
+
+    fn compileTargetWorkspace(comp: *Compilation, workspace: i64, parent_diag: Diagnostic) anyerror!void {
+        const options = comp.workspace_build_options.get(workspace) orelse return;
+        if (std.mem.eql(u8, options.output_type, "NO_OUTPUT")) return;
+
+        var combined = std.ArrayList(u8).empty;
+        defer combined.deinit(comp.allocator);
+        var first_path: ?[]const u8 = null;
+        for (comp.workspace_sources.items) |source| {
+            if (source.workspace != workspace) continue;
+            if (first_path == null) first_path = source.path;
+            if (combined.items.len != 0 and combined.items[combined.items.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+            try combined.print(comp.allocator, "\n// Added to workspace {d} from {s}.\n", .{ workspace, source.path });
+            try combined.appendSlice(comp.allocator, source.source);
+            if (source.source.len == 0 or source.source[source.source.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+        }
+        if (combined.items.len == 0) return;
+
+        const workspace_dir = try std.fmt.allocPrint(comp.allocator, "out/workspaces/{d}", .{workspace});
+        defer comp.allocator.free(workspace_dir);
+        std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, workspace_dir) catch |err| {
+            return parent_diag.failAt(0, "failed creating workspace build directory '{s}': {s}", .{ workspace_dir, @errorName(err) });
+        };
+
+        const source_path = try std.fmt.allocPrint(comp.allocator, "{s}/workspace.jai", .{workspace_dir});
+        defer comp.allocator.free(source_path);
+        std.Io.Dir.cwd().writeFile(comp.io, .{ .sub_path = source_path, .data = combined.items }) catch |err| {
+            return parent_diag.failAt(0, "failed writing generated workspace source '{s}': {s}", .{ source_path, @errorName(err) });
+        };
+
+        const output_path = try comp.outputPathForWorkspace(workspace, options);
+        defer comp.allocator.free(output_path);
+        var nested = Compilation.init(comp.allocator, comp.io, .{
+            .input_path = source_path,
+            .output_path = output_path,
+            .runtime_path = comp.options.runtime_path,
+            .check_only = comp.options.check_only,
+            .command_line = comp.options.command_line,
+        });
+        nested.compile() catch |err| {
+            return parent_diag.failAt(0, "workspace {d} build failed from '{s}': {s}", .{ workspace, first_path orelse source_path, @errorName(err) });
+        };
+    }
+
+    fn outputPathForWorkspace(comp: *Compilation, workspace: i64, options: vm_mod.BuildOptionsSnapshot) ![]u8 {
+        const executable_name = if (options.output_executable_name.len != 0)
+            options.output_executable_name
+        else
+            try std.fmt.allocPrint(comp.allocator, "workspace_{d}", .{workspace});
+        defer if (options.output_executable_name.len == 0) comp.allocator.free(executable_name);
+        if (options.output_path.len == 0) {
+            return try std.fs.path.join(comp.allocator, &.{ "out", executable_name });
+        }
+        return try std.fs.path.join(comp.allocator, &.{ options.output_path, executable_name });
+    }
+
     pub fn compile(comp: *Compilation) !void {
         defer {
             for (comp.owned_run_result_strings.items) |value| comp.allocator.free(value);
@@ -92,6 +177,9 @@ pub const Compilation = struct {
             for (comp.pending_current_workspace_sources.items) |value| comp.allocator.free(value);
             comp.pending_current_workspace_sources.deinit(comp.allocator);
             comp.pending_current_workspace_sources = .empty;
+            comp.clearWorkspaceBuildState();
+            comp.workspace_sources.deinit(comp.allocator);
+            comp.workspace_build_options.deinit(comp.allocator);
         }
 
         var source = try comp.loadSourceWithLoads(comp.options.input_path);
@@ -132,6 +220,7 @@ pub const Compilation = struct {
 
             comp.next_workspace_id = 3;
             comp.clearPendingCurrentWorkspaceSources();
+            comp.clearWorkspaceBuildState();
             try comp.evaluateTopLevelRunInitializers(&ast, &typed, &resolved, diag);
             try comp.evaluateAllProcRunInitializers(&ast, &typed, &resolved, diag);
             try comp.evaluateAllNestedRunExpressions(&ast, &typed, &resolved, diag);
@@ -139,7 +228,9 @@ pub const Compilation = struct {
             if (try comp.applyPendingCurrentWorkspaceSources(&source, &applied_current_workspace_sources)) continue;
             try resolved.failIfUsedExplicitPlaceholders(diag);
 
+            try comp.compileTargetWorkspaces(diag);
             if (comp.options.check_only) return;
+            if (comp.currentWorkspaceOutputDisabled()) return;
             if (resolved.main_proc == null) return;
 
             var bytecode = try bytecode_gen.generate(comp.allocator, &ast, &typed, &resolved, diag);
@@ -432,6 +523,7 @@ pub const Compilation = struct {
             block_vm.command_line = comp.options.command_line;
             defer block_vm.deinit();
             const result = try comp.ownRunResult(try block_vm.runProc(block_program.main_proc.?, diag));
+            try comp.captureVMWorkspaceState(&block_vm);
             try comp.recordNoResetGlobals(ast, typed, &block_program, &block_vm, diag);
             return result;
         }
@@ -600,7 +692,9 @@ pub const Compilation = struct {
         vm.next_workspace_id = &comp.next_workspace_id;
         vm.command_line = comp.options.command_line;
         defer vm.deinit();
-        return try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
+        const result = try comp.ownRunResult(try vm.runProcWithArgs(run_program.main_proc.?, arg_values.items, diag));
+        try comp.captureVMWorkspaceState(&vm);
+        return result;
     }
 
     fn executeRunCommand(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, args: []const u32, diag: Diagnostic) !vm_mod.Value {
@@ -780,7 +874,10 @@ pub const Compilation = struct {
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
             .bool_literal => .{ .bool = ast.data(arg).lhs != 0 },
             .string_literal => blk: {
-                const decoded = try decodeRunString(comp.allocator, ast.stringTokenContents(ast.mainToken(arg)), diag, ast.tokens[ast.mainToken(arg)].start);
+                const decoded = if (isDirectiveStringLiteral(ast, arg))
+                    try comp.allocator.dupe(u8, ast.stringTokenContents(ast.mainToken(arg)))
+                else
+                    try decodeRunString(comp.allocator, ast.stringTokenContents(ast.mainToken(arg)), diag, ast.tokens[ast.mainToken(arg)].start);
                 errdefer comp.allocator.free(decoded);
                 try comp.owned_run_result_strings.append(comp.allocator, decoded);
                 break :blk .{ .string = decoded };
@@ -795,6 +892,12 @@ pub const Compilation = struct {
         errdefer comp.allocator.free(owned);
         try comp.owned_run_result_strings.append(comp.allocator, owned);
         return owned;
+    }
+
+    fn isDirectiveStringLiteral(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
+        return ast.tag(node) == .string_literal and
+            ast.data(node).lhs != @import("Ast.zig").null_node and
+            ast.tokens[ast.data(node).lhs].tag == .directive_string;
     }
 
     fn procParams(ast: *const @import("Ast.zig").Ast, proc_node: @import("Ast.zig").NodeIndex) ?[]const u32 {

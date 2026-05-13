@@ -1192,7 +1192,7 @@ const GenContext = struct {
             .float_literal => .{ .float = try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(expr))) },
             .bool_literal => .{ .bool = ast.data(expr).lhs != 2 and ast.data(expr).lhs != 0 },
             .string_literal => blk: {
-                const decoded = try decodeString(ctx.program.allocator, ast.stringTokenContents(ast.mainToken(expr)), diag, ast.tokens[ast.mainToken(expr)].start);
+                const decoded = try stringLiteralRuntimeValue(ctx.program.allocator, ast, expr, diag);
                 defer ctx.program.allocator.free(decoded);
                 const idx = try ctx.program.addByteArray(decoded);
                 break :blk .{ .string = ctx.program.byte_arrays.items[idx] };
@@ -2901,7 +2901,7 @@ const GenContext = struct {
                     const path = std.fs.path.dirname(source_path) orelse ".";
                     return try ctx.emitString(expr, path);
                 }
-                const decoded = try decodeString(program.allocator, ast.stringTokenContents(ast.mainToken(expr)), diag, ast.tokens[ast.mainToken(expr)].start);
+                const decoded = try stringLiteralRuntimeValue(program.allocator, ast, expr, diag);
                 defer program.allocator.free(decoded);
                 const string_idx = try program.addString(decoded);
                 const reg = proc.num_registers;
@@ -6231,7 +6231,7 @@ fn evalIntegerConstExpr(ctx: *GenContext, node: NodeIndex, diag: Diagnostic) !i6
             const field_name = ast.tokenSlice(ast.data(node).rhs);
             const base = ast.data(node).lhs;
             if (std.mem.eql(u8, field_name, "count") and base != @import("Ast.zig").null_node and ast.tag(base) == .string_literal) {
-                const decoded = try decodeString(ctx.program.allocator, ast.stringTokenContents(ast.mainToken(base)), diag, ast.tokens[ast.mainToken(base)].start);
+                const decoded = try stringLiteralRuntimeValue(ctx.program.allocator, ast, base, diag);
                 defer ctx.program.allocator.free(decoded);
                 break :blk @intCast(decoded.len);
             }
@@ -7233,6 +7233,18 @@ fn decodeString(allocator: std.mem.Allocator, raw: []const u8, diag: Diagnostic,
         } else try out.append(allocator, raw[i]);
     }
     return out.toOwnedSlice(allocator);
+}
+
+fn stringLiteralRuntimeValue(allocator: std.mem.Allocator, ast: *const Ast, node: NodeIndex, diag: Diagnostic) ![]u8 {
+    const raw = ast.stringTokenContents(ast.mainToken(node));
+    if (isDirectiveStringLiteral(ast, node)) return try allocator.dupe(u8, raw);
+    return try decodeString(allocator, raw, diag, ast.tokens[ast.mainToken(node)].start);
+}
+
+fn isDirectiveStringLiteral(ast: *const Ast, node: NodeIndex) bool {
+    return ast.tag(node) == .string_literal and
+        ast.data(node).lhs != @import("Ast.zig").null_node and
+        ast.tokens[ast.data(node).lhs].tag == .directive_string;
 }
 
 fn decodeUnicodeEscape(raw: []const u8, index: *usize, digits: usize, diag: Diagnostic, offset: usize) !u21 {
@@ -8716,7 +8728,7 @@ fn appendSpecializedRunPrintArg(ctx: *GenContext, output: *std.ArrayList(u8), ar
             }
         },
         .string_literal => {
-            const decoded = try decodeString(ctx.program.allocator, ast.stringTokenContents(ast.mainToken(arg_node)), diag, ast.tokens[ast.mainToken(arg_node)].start);
+            const decoded = try stringLiteralRuntimeValue(ctx.program.allocator, ast, arg_node, diag);
             defer ctx.program.allocator.free(decoded);
             try output.appendSlice(ctx.program.allocator, decoded);
             return;
