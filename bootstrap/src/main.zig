@@ -2,6 +2,8 @@ const std = @import("std");
 const Compilation = @import("Compilation.zig").Compilation;
 const Options = @import("Compilation.zig").Options;
 
+const version_text = "OpenJai 0.1.0\n";
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -22,12 +24,17 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !Opti
     defer raw_args.deinit(allocator);
     while (args.next()) |arg| try raw_args.append(allocator, arg);
 
+    if (raw_args.items.len == 2 and (std.mem.eql(u8, raw_args.items[1], "-version") or std.mem.eql(u8, raw_args.items[1], "--version"))) {
+        printVersion();
+        std.process.exit(0);
+    }
+
     if (raw_args.items.len < 2) {
         usage();
         return error.InvalidArguments;
     }
     const input_path = raw_args.items[1];
-    if (std.mem.eql(u8, input_path, "--help") or std.mem.eql(u8, input_path, "-h")) {
+    if (std.mem.eql(u8, input_path, "--help") or std.mem.eql(u8, input_path, "-h") or std.mem.eql(u8, input_path, "-?")) {
         usage();
         std.process.exit(0);
     }
@@ -82,7 +89,11 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !Opti
 }
 
 fn usage() void {
-    std.debug.print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o] [-- compile-time-args...]\n", .{});
+    std.debug.print("usage: openjai <input.jai> [--check] [-o output] [--runtime runtime.o] [-- compile-time-args...]\n       openjai -version\n", .{});
+}
+
+fn printVersion() void {
+    std.debug.print("{s}", .{version_text});
 }
 
 test "argument parser module loads" {

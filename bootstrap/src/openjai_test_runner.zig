@@ -366,6 +366,15 @@ fn runProcTest(ctx: *Context, proc_test: ProcTest) !TestOutcome {
             const result = try expectExampleAnnotations(ctx, full_path);
             if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
             if (result.message.len != 0) ctx.allocator.free(result.message);
+        } else if (std.mem.eql(u8, name, "expect_compiler_command_output")) {
+            asserts += 1;
+            const arg = try stringArg(ctx.allocator, ast, args, 0, expr);
+            defer ctx.allocator.free(arg);
+            const expected = try stringArg(ctx.allocator, ast, args, 1, expr);
+            defer ctx.allocator.free(expected);
+            const result = try expectCompilerCommandOutput(ctx, arg, expected);
+            if (!result.passed) try failures.print(ctx.allocator, "{s}", .{result.message});
+            if (result.message.len != 0) ctx.allocator.free(result.message);
         } else if (std.mem.eql(u8, name, "assert")) {
             asserts += 1;
             if (args.len == 0) {
@@ -474,6 +483,24 @@ fn extractExpectedAnnotations(source: []const u8, allocator: std.mem.Allocator, 
         if (std.mem.startsWith(u8, text, "(")) continue;
         try out.append(allocator, text);
     }
+}
+
+fn expectCompilerCommandOutput(ctx: *Context, arg: []const u8, expected: []const u8) !TestOutcome {
+    const result = try std.process.run(ctx.allocator, ctx.io, .{
+        .argv = &.{ ctx.compiler_path, arg },
+        .cwd = .{ .path = ctx.repo_root },
+    });
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
+    if (!termOk(result.term)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "compiler command '{s}' failed ({}):\n{s}{s}", .{ arg, result.term, result.stdout, result.stderr });
+        return .{ .passed = false, .asserts = 1, .message = msg };
+    }
+    const actual = try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ result.stdout, result.stderr });
+    defer ctx.allocator.free(actual);
+    if (std.mem.eql(u8, actual, expected)) return .{ .passed = true, .asserts = 1 };
+    const msg = try std.fmt.allocPrint(ctx.allocator, "compiler command output mismatch for '{s}'\nexpected: \"{s}\"\nactual:   \"{s}\"", .{ arg, expected, actual });
+    return .{ .passed = false, .asserts = 1, .message = msg };
 }
 
 fn expectCompileSuccess(ctx: *Context, path: []const u8) !TestOutcome {
