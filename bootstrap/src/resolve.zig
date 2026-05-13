@@ -737,6 +737,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.symbols.put(allocator, "has_feature", .builtin_check_feature);
                         try r.putRealSymbol("Feature", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("x86_Feature_Flag", .{ .const_value = @import("Ast.zig").null_node });
+                    } else if (std.mem.eql(u8, module_name, "Check")) {
+                        try r.putRealSymbol("do_error_checking", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         for (&[_][]const u8{
                             "Generate_Bindings_Options",
