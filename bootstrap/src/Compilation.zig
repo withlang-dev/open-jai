@@ -437,11 +437,13 @@ pub const Compilation = struct {
             const next_decl: @import("Ast.zig").NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
             if (procHasExpandModifier(ast, decl, next_decl)) continue;
             if (procHasPolymorphicParams(ast, decl)) continue;
-            try comp.evaluateRunInitializersInBlock(ast, typed, resolved, ast.data(decl).lhs, diag);
+            const body = ast.data(decl).lhs;
+            if (body != @import("Ast.zig").null_node) try comp.evaluateRunInitializersInBlock(ast, typed, resolved, body, diag);
         }
     }
 
     fn evaluateRunInitializersInBlock(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, block: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!void {
+        if (block == @import("Ast.zig").null_node) return;
         for (ast.extraSlice(ast.data(block).lhs)) |stmt_idx| {
             const stmt: @import("Ast.zig").NodeIndex = @intCast(stmt_idx);
             switch (ast.tag(stmt)) {

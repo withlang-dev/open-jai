@@ -177,7 +177,7 @@ const Parser = struct {
         if (p.match(.directive_type) != null) {
             while (p.matchDiscard(.comma)) _ = try p.expect(.identifier, "expected #type modifier after ','", .{});
             const value = try p.parseTypeExpr();
-            try p.consumeProcModifiers();
+            _ = try p.consumeProcModifiers();
             _ = p.matchDiscard(.semicolon);
             return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
         }
@@ -247,13 +247,16 @@ const Parser = struct {
         var named_returns = std.ArrayList(u32).empty;
         defer named_returns.deinit(p.allocator);
         const return_type = if (p.matchDiscard(.arrow)) try p.parseProcReturnSpec(&named_returns) else null_node;
-        try p.consumeProcModifiers();
-        var body = if (p.matchDiscard(.semicolon)) try p.emptyBlock(name_tok) else try p.parseBlock();
+        const modifiers = try p.consumeProcModifiers();
+        var body = if (p.matchDiscard(.semicolon)) blk: {
+            if (modifiers.compiler or modifiers.intrinsic) break :blk null_node;
+            break :blk try p.emptyBlock(name_tok);
+        } else try p.parseBlock();
         _ = p.matchDiscard(.semicolon);
         var notes = std.ArrayList(Token.Index).empty;
         defer notes.deinit(p.allocator);
         while (p.matchDiscard(.at)) try notes.append(p.allocator, try p.expect(.identifier, "expected attribute name after '@'", .{}));
-        if (named_returns.items.len != 0) body = try p.prependBlockDecls(body, named_returns.items);
+        if (named_returns.items.len != 0 and body != null_node) body = try p.prependBlockDecls(body, named_returns.items);
         const params_extra = try p.ast.addExtraSlice(params.items);
         const sig_values = [_]u32{ params_extra, return_type };
         const sig_extra = try p.ast.addExtraSlice(&sig_values);
@@ -322,10 +325,25 @@ const Parser = struct {
         return p.ast.addNode(.block, main_tok, .{ .lhs = extra, .rhs = 0 });
     }
 
-    fn consumeProcModifiers(p: *Parser) !void {
+    const ProcModifiers = struct {
+        compiler: bool = false,
+        intrinsic: bool = false,
+        foreign: bool = false,
+    };
+
+    fn consumeProcModifiers(p: *Parser) !ProcModifiers {
+        var modifiers = ProcModifiers{};
         while (true) {
             switch (p.peekTag(0)) {
                 .directive_must, .directive_expand, .directive_c_call, .directive_no_context, .directive_cpp_method, .directive_dump => p.index += 1,
+                .directive_compiler => {
+                    modifiers.compiler = true;
+                    p.index += 1;
+                },
+                .directive_intrinsic => {
+                    modifiers.intrinsic = true;
+                    p.index += 1;
+                },
                 .directive_modify => {
                     p.index += 1;
                     if (p.check(.l_brace)) {
@@ -343,10 +361,11 @@ const Parser = struct {
                     if (p.check(.identifier)) p.index += 1;
                 },
                 .directive_foreign, .directive_library, .directive_system_library, .directive_foreign_library => {
+                    modifiers.foreign = true;
                     p.index += 1;
                     while (p.check(.identifier) or p.check(.string_literal) or p.check(.comma)) p.index += 1;
                 },
-                else => return,
+                else => return modifiers,
             }
         }
     }
@@ -1117,7 +1136,7 @@ const Parser = struct {
         if (p.match(.directive_type) != null) {
             while (p.matchDiscard(.comma)) _ = try p.expect(.identifier, "expected #type modifier after ','", .{});
             const value = try p.parseTypeExpr();
-            try p.consumeProcModifiers();
+            _ = try p.consumeProcModifiers();
             _ = p.matchDiscard(.semicolon);
             return p.ast.addNode(.const_decl, name_tok, .{ .lhs = value });
         }
@@ -1328,7 +1347,7 @@ const Parser = struct {
             }
             _ = try p.expect(.r_paren, "expected ')' after procedure type parameters", .{});
             const ret = if (p.matchDiscard(.arrow)) try p.parseTypeExpr() else try p.ast.addNode(.type_expr, tok, .{});
-            try p.consumeProcModifiers();
+            _ = try p.consumeProcModifiers();
             const extra = try p.ast.addExtraSlice(params.items);
             return p.ast.addNode(.proc_type, tok, .{ .lhs = extra, .rhs = ret });
         }
@@ -1424,7 +1443,7 @@ const Parser = struct {
                 _ = try p.parseTypeExpr();
             }
         }
-        try p.consumeProcModifiers();
+        _ = try p.consumeProcModifiers();
         const empty = try p.ast.addExtraSlice(&[_]u32{});
         const ret = try p.ast.addNode(.type_expr, tok, .{});
         return p.ast.addNode(.proc_type, tok, .{ .lhs = empty, .rhs = ret });
@@ -2296,6 +2315,30 @@ test "parser accepts top-level assert and placeholder directives" {
     try std.testing.expectEqual(Node.Tag.run_expr, ast.tag(@intCast(decls[0])));
     try std.testing.expectEqual(Node.Tag.placeholder_decl, ast.tag(@intCast(decls[1])));
     try std.testing.expectEqualStrings("TRUTH", ast.tokenSlice(ast.mainToken(@intCast(decls[1]))));
+}
+
+test "parser accepts bodyless compiler and intrinsic procedure declarations" {
+    const lexer = @import("lexer.zig");
+    const source =
+        "compiler_get_code :: (root: *Code_Node) -> Code #compiler;\n" ++
+        "memset :: (dest: *void, value: u8, count: s64) #intrinsic;\n";
+    const diag = Diagnostic.init(std.testing.allocator, "bodyless_intrinsics.jai", source);
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const slice = tokens.slice();
+    var ast = try parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+    const decls = ast.extraSlice(ast.data(ast.root).lhs);
+    try std.testing.expectEqual(@as(usize, 2), decls.len);
+    const compiler_proc: NodeIndex = @intCast(decls[0]);
+    const intrinsic_proc: NodeIndex = @intCast(decls[1]);
+    try std.testing.expectEqual(Node.Tag.proc_decl, ast.tag(compiler_proc));
+    try std.testing.expectEqual(Node.Tag.proc_decl, ast.tag(intrinsic_proc));
+    try std.testing.expectEqual(@import("Ast.zig").null_node, ast.data(compiler_proc).lhs);
+    try std.testing.expectEqual(@import("Ast.zig").null_node, ast.data(intrinsic_proc).lhs);
 }
 
 test "parser accepts spaced directives and inline directive if branches" {

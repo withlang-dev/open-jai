@@ -36,6 +36,7 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
         if (procHasExpandModifier(ast, decl, next_decl)) continue;
         if (procHasForeignModifierLocal(ast, decl)) continue;
+        if (!procHasBody(ast, decl)) continue;
         if (procIsCompileTimeOnlyHost(ast, decl)) continue;
         if (procSignature(ast, decl)) |sig| if (procSignatureContainsPolymorphicTypeResolved(ast, resolved, sig)) continue;
         if (typed.main_proc != null and decl == typed.main_proc.?) continue;
@@ -110,6 +111,7 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
         const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
         if (procHasExpandModifier(ast, decl, next_decl) and decl != proc_node and !procHasReturnValue(ast, decl)) continue;
         if (procHasForeignModifierLocal(ast, decl)) continue;
+        if (!procHasBody(ast, decl) and decl != proc_node) continue;
         if (decl != proc_node) if (procSignature(ast, decl)) |sig| if (procSignatureContainsPolymorphicTypeResolved(ast, resolved, sig)) continue;
         if (typed) |t| if (t.main_proc != null and decl == t.main_proc.?) continue;
 
@@ -129,7 +131,11 @@ pub fn generateProcForCall(allocator: std.mem.Allocator, ast: *const Ast, resolv
         } else {
             try ctx.bindProcParams(decl, proc.param_count, diag);
         }
-        try ctx.genBlock(ast.data(decl).lhs, diag);
+        const body = ast.data(decl).lhs;
+        if (body == @import("Ast.zig").null_node) {
+            return diag.failAt(ast.tokens[ast.mainToken(decl)].start, "bodyless procedure '{s}' cannot be executed as ordinary compile-time Jai code", .{ast.tokenSlice(ast.mainToken(decl))});
+        }
+        try ctx.genBlock(body, diag);
         try proc.instructions.append(allocator, .{ .opcode = .ret_void, .source_node = decl });
         _ = try program.addProc(proc, decl);
         if (decl == proc_node) {
@@ -4950,11 +4956,16 @@ const GenContext = struct {
                 const callee = ast.data(expr).lhs;
                 if (ast.tag(callee) == .proc_decl) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
-                    if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
+                    const proc_name = ast.tokenSlice(ast.mainToken(callee));
+                    if (try ctx.genCompilerIntrinsicCall(proc_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
+                    if (std.mem.eql(u8, proc_name, "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
                     if (procHasForeignModifierLocal(ast, callee)) return try ctx.emitForeignProcCall(callee, args, expr, diag);
                     if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
                     if (!procIsCompileTimeOnlyHost(ast, callee) or procHasBody(ast, callee)) {
                         if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
+                    }
+                    if (!procHasBody(ast, callee)) {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "bodyless procedure '{s}' has no compiler intrinsic lowering", .{proc_name});
                     }
                     for (args) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
@@ -5981,10 +5992,15 @@ const GenContext = struct {
                     }
                     if (is_user_proc_call) {
                         if (ctx.resolveProcCallTarget(callee, name, args.len)) |target_proc| {
+                            const proc_name = ast.tokenSlice(ast.mainToken(target_proc));
+                            if (try ctx.genCompilerIntrinsicCall(proc_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
                             if (procHasForeignModifierLocal(ast, target_proc)) return try ctx.emitForeignProcCall(target_proc, args, expr, diag);
                             if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
                             if (!procIsCompileTimeOnlyHost(ast, target_proc) or procHasBody(ast, target_proc)) {
                                 if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
+                            }
+                            if (!procHasBody(ast, target_proc)) {
+                                return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "bodyless procedure '{s}' has no compiler intrinsic lowering", .{proc_name});
                             }
                         }
                         for (args) |arg_idx| {
@@ -9212,7 +9228,8 @@ fn addReachableProc(allocator: std.mem.Allocator, ast: *const Ast, resolved: *co
     if (proc_node == @import("Ast.zig").null_node or proc_node >= ast.node_tags.items.len or ast.tag(proc_node) != .proc_decl) return;
     if (set.contains(proc_node)) return;
     try set.put(allocator, proc_node, {});
-    try scanReachableProcCalls(allocator, ast, resolved, set, seen, ast.data(proc_node).lhs);
+    const body = ast.data(proc_node).lhs;
+    if (body != @import("Ast.zig").null_node) try scanReachableProcCalls(allocator, ast, resolved, set, seen, body);
 }
 
 fn scanReachableProcCalls(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, set: *std.AutoHashMapUnmanaged(NodeIndex, void), seen: *std.AutoHashMapUnmanaged(NodeIndex, void), node: NodeIndex) anyerror!void {
@@ -9310,8 +9327,7 @@ fn procHasExpandModifier(ast: *const Ast, proc: NodeIndex, next_decl: NodeIndex)
 fn procHasExpandModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
     const token_start = ast.tokens[ast.mainToken(proc)].start;
-    const body = ast.data(proc).lhs;
-    const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
+    const body_start = procHeaderEnd(ast, proc);
     const start = token_start;
     if (body_start <= start or body_start > ast.source.len) return false;
     return std.mem.indexOf(u8, ast.source[start..body_start], "#expand") != null;
@@ -9320,14 +9336,26 @@ fn procHasExpandModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
 fn procHasForeignModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
     const token_start = ast.tokens[ast.mainToken(proc)].start;
-    const body = ast.data(proc).lhs;
-    const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
+    const body_start = procHeaderEnd(ast, proc);
     const start = token_start;
     if (body_start <= start or body_start > ast.source.len) return false;
     const header = ast.source[start..body_start];
     return std.mem.indexOf(u8, header, "#foreign") != null or
         std.mem.indexOf(u8, header, "#system_library") != null or
         std.mem.indexOf(u8, header, "#library") != null;
+}
+
+fn procHeaderEnd(ast: *const Ast, proc: NodeIndex) usize {
+    const main_token = ast.mainToken(proc);
+    var tok = main_token;
+    while (tok < ast.tokens.len) : (tok += 1) {
+        switch (ast.tokens[tok].tag) {
+            .l_brace, .semicolon => return ast.tokens[tok].start,
+            .eof => return ast.source.len,
+            else => {},
+        }
+    }
+    return ast.source.len;
 }
 
 fn procHasReturnValue(ast: *const Ast, proc: NodeIndex) bool {
@@ -9410,9 +9438,11 @@ fn procHasBody(ast: *const Ast, proc: NodeIndex) bool {
 
 fn procContainsCompileTimeOnlyCompilerApi(ast: *const Ast, proc: NodeIndex) bool {
     if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
+    const body = ast.data(proc).lhs;
+    if (body == @import("Ast.zig").null_node) return false;
     var seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
     defer seen.deinit(ast.allocator);
-    return nodeContainsCompileTimeOnlyCompilerApi(ast, ast.data(proc).lhs, &seen);
+    return nodeContainsCompileTimeOnlyCompilerApi(ast, body, &seen);
 }
 
 fn procHasSourceLocationAbi(ast: *const Ast, proc: NodeIndex) bool {

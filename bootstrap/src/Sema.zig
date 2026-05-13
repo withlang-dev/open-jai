@@ -310,7 +310,8 @@ fn analyzeProc(ast: *const Ast, resolved: *const Resolved, typed: *Typed, proc: 
     if (std.mem.eql(u8, name, "main")) {
         // Parser only accepts an empty parameter list and no return type in Phase 1.
     }
-    try analyzeBlock(ast, resolved, typed, ast.data(proc).lhs, diag);
+    const body = ast.data(proc).lhs;
+    if (body != @import("Ast.zig").null_node) try analyzeBlock(ast, resolved, typed, body, diag);
 }
 
 fn analyzeBlock(ast: *const Ast, resolved: *const Resolved, typed: *Typed, block: NodeIndex, diag: Diagnostic) anyerror!void {

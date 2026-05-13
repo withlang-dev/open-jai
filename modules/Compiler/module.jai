@@ -129,31 +129,31 @@ Type_Info_Pointer :: struct {
     points_to: Type;
 }
 
-compiler_create_workspace :: () -> Workspace #foreign;
-get_current_workspace :: () -> Workspace #foreign;
-get_build_options :: (workspace: Workspace = 0) -> Build_Options #foreign;
-set_build_options :: (options: Build_Options, workspace: Workspace = 0) #foreign;
-set_build_options_dc :: (options: Build_Options) #foreign;
-set_optimization :: (options: *Build_Options, optimization: Optimization_Type, runtime_checks := false) #foreign;
+compiler_create_workspace :: () -> Workspace #compiler;
+get_current_workspace :: () -> Workspace #compiler;
+get_build_options :: (workspace: Workspace = 0) -> Build_Options #compiler;
+set_build_options :: (options: Build_Options, workspace: Workspace = 0) #compiler;
+set_build_options_dc :: (options: Build_Options) #compiler;
+set_optimization :: (options: *Build_Options, optimization: Optimization_Type, runtime_checks := false) #compiler;
 
-compiler_begin_intercept :: (workspace: Workspace) #foreign;
-compiler_wait_for_message :: () -> *Message #foreign;
-compiler_end_intercept :: (workspace: Workspace) #foreign;
-compiler_set_workspace_status :: (status: int, workspace: Workspace = 0) #foreign;
-compiler_custom_link_command_is_complete :: (workspace: Workspace = 0, exit_code := 0) #foreign;
+compiler_begin_intercept :: (workspace: Workspace) #compiler;
+compiler_wait_for_message :: () -> *Message #compiler;
+compiler_end_intercept :: (workspace: Workspace) #compiler;
+compiler_set_workspace_status :: (status: int, workspace: Workspace = 0) #compiler;
+compiler_custom_link_command_is_complete :: (workspace: Workspace = 0, exit_code := 0) #compiler;
 
-add_build_file :: (path: string, workspace: Workspace = 0) #foreign;
-add_build_string :: (source: string, workspace: Workspace = 0) #foreign;
-add_global_data :: (data: string, name := "") -> *void #foreign;
-run_command :: (command: string, args: ..string) -> int #foreign;
+add_build_file :: (path: string, workspace: Workspace = 0) #compiler;
+add_build_string :: (source: string, workspace: Workspace = 0) #compiler;
+add_global_data :: (data: string, name := "") -> *void #compiler;
+run_command :: (command: string, args: ..string) -> int #compiler;
 
-compiler_get_nodes :: (code: Code) -> *Code_Node, [] *Code_Node #foreign;
-compiler_get_code :: (root: *Code_Node) -> Code #foreign;
-print_expression :: (builder: *String_Builder, node: *Code_Node) #foreign;
-code_to_string :: (code: Code) -> string #foreign;
-make_location :: (node: *Code_Node) -> Source_Code_Location #foreign;
-compiler_report :: (message: string) #foreign;
-compiler_report :: (message: string, location: Source_Code_Location) #foreign;
+compiler_get_nodes :: (code: Code) -> *Code_Node, [] *Code_Node #compiler;
+compiler_get_code :: (root: *Code_Node) -> Code #compiler;
+print_expression :: (builder: *String_Builder, node: *Code_Node) #compiler;
+code_to_string :: (code: Code) -> string #compiler;
+make_location :: (node: *Code_Node) -> Source_Code_Location #compiler;
+compiler_report :: (message: string) #compiler;
+compiler_report :: (message: string, location: Source_Code_Location) #compiler;
 
 get_type_table :: () -> [] Type_Info #foreign;
 is_subclass_of :: (info: *Type_Info, name: string) -> bool #foreign;

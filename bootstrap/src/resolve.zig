@@ -517,7 +517,8 @@ fn resolveProc(ast: *const Ast, r: *Resolved, proc: NodeIndex, file_id: u32, dia
             if (ast.data(param).rhs == using_param_sentinel) try r.using_fallbacks.append(r.allocator, param);
         }
     }
-    try resolveBlock(ast, r, ast.data(proc).lhs, file_id, diag);
+    const body = ast.data(proc).lhs;
+    if (body != @import("Ast.zig").null_node) try resolveBlock(ast, r, body, file_id, diag);
     restoreBindings(r, restores.items);
 }
 
