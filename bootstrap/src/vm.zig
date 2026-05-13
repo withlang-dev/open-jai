@@ -24,6 +24,7 @@ pub const Value = union(enum) {
     code: CodeValue,
     source_location: SourceLocation,
     calendar: CalendarValue,
+    message: MessageSnapshot,
     build_options: BuildOptionsSnapshot,
     type_text: []const u8,
 };
@@ -112,6 +113,20 @@ const CompilerMessage = struct {
     declaration_count: usize = 0,
     dump_text: []const u8 = "",
     error_code: i64 = 0,
+};
+
+pub const MessageSnapshot = struct {
+    kind: []const u8 = "",
+    workspace: i64 = 0,
+    phase: []const u8 = "",
+    fully_pathed_filename: []const u8 = "",
+    module_name: []const u8 = "",
+    module_type: []const u8 = "",
+    executable_name: []const u8 = "",
+    executable_write_failed: bool = false,
+    linker_exit_code: i64 = 0,
+    error_code: i64 = 0,
+    dump_text: []const u8 = "",
 };
 
 pub const WorkspaceSourceSnapshot = struct {
@@ -294,6 +309,16 @@ pub const VM = struct {
         allocator.free(options.array_bounds_check);
         allocator.free(options.cast_bounds_check);
         allocator.free(options.null_pointer_check);
+    }
+
+    pub fn freeMessageSnapshot(allocator: std.mem.Allocator, message: MessageSnapshot) void {
+        allocator.free(message.kind);
+        allocator.free(message.phase);
+        allocator.free(message.fully_pathed_filename);
+        allocator.free(message.module_name);
+        allocator.free(message.module_type);
+        allocator.free(message.executable_name);
+        allocator.free(message.dump_text);
     }
 
     pub fn deinit(vm: *VM) void {
@@ -2889,6 +2914,42 @@ pub const VM = struct {
         return index;
     }
 
+    fn messageSnapshot(vm: *VM, allocator: std.mem.Allocator, index: usize, diag: Diagnostic) !MessageSnapshot {
+        if (index >= vm.compiler_messages.items.len) return diag.failAt(0, "VM Message handle out of range", .{});
+        const message = vm.compiler_messages.items[index];
+        return .{
+            .kind = try allocator.dupe(u8, message.kind),
+            .workspace = message.workspace,
+            .phase = try allocator.dupe(u8, message.phase),
+            .fully_pathed_filename = try allocator.dupe(u8, message.fully_pathed_filename),
+            .module_name = try allocator.dupe(u8, message.module_name),
+            .module_type = try allocator.dupe(u8, message.module_type),
+            .executable_name = try allocator.dupe(u8, message.executable_name),
+            .executable_write_failed = message.executable_write_failed,
+            .linker_exit_code = message.linker_exit_code,
+            .error_code = message.error_code,
+            .dump_text = try allocator.dupe(u8, message.dump_text),
+        };
+    }
+
+    fn messageFromSnapshot(vm: *VM, snapshot: MessageSnapshot) !usize {
+        const index = vm.compiler_messages.items.len;
+        try vm.compiler_messages.append(vm.allocator, .{
+            .kind = snapshot.kind,
+            .workspace = snapshot.workspace,
+            .phase = snapshot.phase,
+            .fully_pathed_filename = snapshot.fully_pathed_filename,
+            .module_name = snapshot.module_name,
+            .module_type = snapshot.module_type,
+            .executable_name = snapshot.executable_name,
+            .executable_write_failed = snapshot.executable_write_failed,
+            .linker_exit_code = snapshot.linker_exit_code,
+            .error_code = snapshot.error_code,
+            .dump_text = snapshot.dump_text,
+        });
+        return index;
+    }
+
     fn optimizationMode(vm: *VM, value: RegisterValue, diag: Diagnostic) !i64 {
         _ = vm;
         return switch (value) {
@@ -4952,7 +5013,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .type_info_member => diag.failAt(0, "expression-form #run cannot materialize Type_Info member values", .{}),
         .tuple => diag.failAt(0, "expression-form #run cannot materialize undestructured multi-return values", .{}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
-        .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
+        .message => |v| .{ .message = try vm.messageSnapshot(vm.allocator, v, diag) },
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
         .build_options => |v| .{ .build_options = try vm.buildOptionsSnapshot(vm.allocator, v) },
@@ -4970,6 +5031,7 @@ fn registerValueFromValue(vm: *VM, value: Value, diag: Diagnostic) !RegisterValu
         .code => |v| .{ .code = v },
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
+        .message => |v| .{ .message = try vm.messageFromSnapshot(v) },
         .build_options => |v| .{ .build_options = try vm.buildOptionsFromSnapshot(v) },
         .type_text => |v| .{ .type_text = v },
         .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),

@@ -344,6 +344,11 @@ pub const Compilation = struct {
                 try typed.putComptimeBuildOptions(value_node, build_options);
                 try typed.putComptimeBuildOptions(decl_node, build_options);
             },
+            .message => |message| {
+                const message_value = messageSnapshotToSema(message);
+                try typed.putComptimeMessage(value_node, message_value);
+                try typed.putComptimeMessage(decl_node, message_value);
+            },
             .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
@@ -452,7 +457,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -477,6 +482,7 @@ pub const Compilation = struct {
                         .time_zone = calendar.time_zone,
                     }),
                     .build_options => |options| try typed.putComptimeBuildOptions(node, buildOptionsSnapshotToSema(options)),
+                    .message => |message| try typed.putComptimeMessage(node, messageSnapshotToSema(message)),
                     .type_text => {},
                     .void => {},
                 }
@@ -693,6 +699,8 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
             } else if (typed.comptime_build_options.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+            } else if (typed.comptime_messages.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
@@ -733,6 +741,8 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
                 } else if (typed.comptime_build_options.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+                } else if (typed.comptime_messages.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
                 } else {
                     if (decl == @import("Ast.zig").null_node) {
                         return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument", .{});
@@ -762,6 +772,8 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
                     } else if (typed.comptime_build_options.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+                    } else if (typed.comptime_messages.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
                     } else {
                         const value = comp.executeRunConstExpr(ast, typed, resolved, initializer_node, diag) catch |err| {
                             if (target_is_expand) {
@@ -895,6 +907,7 @@ pub const Compilation = struct {
             .source_location => |v| std.debug.print("{s}:{d}", .{ v.fully_pathed_filename, v.line_number }),
             .calendar => |v| std.debug.print("{d}-{d}-{d} {d}:{d}:{d}.{d}", .{ v.year, v.month_starting_at_0 + 1, v.day_of_month_starting_at_0 + 1, v.hour, v.minute, v.second, v.millisecond }),
             .build_options => |v| std.debug.print("{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; }}", .{ v.output_type, v.backend, v.output_executable_name, v.output_path }),
+            .message => |v| std.debug.print("{{{s}, {d}}}", .{ v.kind, v.workspace }),
             .type_text => |v| std.debug.print("{s}", .{v}),
         }
     }
@@ -976,6 +989,11 @@ pub const Compilation = struct {
                 vm_mod.VM.freeBuildOptionsSnapshot(comp.allocator, options);
                 break :blk .{ .build_options = owned };
             },
+            .message => |message| blk: {
+                const owned = try comp.ownMessageSnapshot(message);
+                vm_mod.VM.freeMessageSnapshot(comp.allocator, message);
+                break :blk .{ .message = owned };
+            },
             else => value,
         };
     }
@@ -984,6 +1002,7 @@ pub const Compilation = struct {
         if (ast.tag(arg) == .field_access and ast.data(arg).lhs == @import("Ast.zig").null_node) return .{ .int = 0 };
         if (ast.tag(arg) == .field_access) {
             if (try comp.executeBuildOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
+            if (try comp.executeMessageSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
         }
         if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .keyword_xx) return comp.executeRunHostArg(ast, typed, resolved, ast.data(arg).lhs, diag);
         if (ast.tag(arg) == .call_expr) return try comp.executeRunCall(ast, typed, resolved, arg, arg, diag);
@@ -997,6 +1016,7 @@ pub const Compilation = struct {
         } };
         if (typed.comptime_calendars.get(arg)) |value| return .{ .calendar = comptimeCalendarToVm(value) };
         if (typed.comptime_build_options.get(arg)) |value| return .{ .build_options = buildOptionsSemaToVm(value) };
+        if (typed.comptime_messages.get(arg)) |value| return .{ .message = messageSemaToVm(value) };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
@@ -1030,6 +1050,7 @@ pub const Compilation = struct {
                     } };
                     if (typed.comptime_calendars.get(decl)) |value| break :blk .{ .calendar = comptimeCalendarToVm(value) };
                     if (typed.comptime_build_options.get(decl)) |value| break :blk .{ .build_options = buildOptionsSemaToVm(value) };
+                    if (typed.comptime_messages.get(decl)) |value| break :blk .{ .message = messageSemaToVm(value) };
                 }
                 break :blk .{ .string = name };
             },
@@ -1076,6 +1097,35 @@ pub const Compilation = struct {
         return null;
     }
 
+    fn executeMessageSnapshotField(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, base: @import("Ast.zig").NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        _ = comp;
+        const message = typed.comptime_messages.get(base) orelse blk: {
+            if (ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = resolved.local_values.get(base) orelse lookup_decl: {
+                if (resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node| break :lookup_decl node,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_messages.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "kind")) return .{ .string = message.kind };
+        if (std.mem.eql(u8, field_name, "workspace")) return .{ .int = message.workspace };
+        if (std.mem.eql(u8, field_name, "phase")) return .{ .string = message.phase };
+        if (std.mem.eql(u8, field_name, "fully_pathed_filename")) return .{ .string = message.fully_pathed_filename };
+        if (std.mem.eql(u8, field_name, "module_name")) return .{ .string = message.module_name };
+        if (std.mem.eql(u8, field_name, "module_type")) return .{ .string = message.module_type };
+        if (std.mem.eql(u8, field_name, "executable_name")) return .{ .string = message.executable_name };
+        if (std.mem.eql(u8, field_name, "executable_write_failed")) return .{ .bool = message.executable_write_failed };
+        if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
+        if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = message.error_code };
+        if (std.mem.eql(u8, field_name, "dump_text")) return .{ .string = message.dump_text };
+        return null;
+    }
+
     fn ownBuildOptionsSnapshot(comp: *Compilation, value: vm_mod.BuildOptionsSnapshot) !vm_mod.BuildOptionsSnapshot {
         return .{
             .output_executable_name = try comp.ownRunString(value.output_executable_name),
@@ -1093,6 +1143,22 @@ pub const Compilation = struct {
             .runtime_storageless_type_info = value.runtime_storageless_type_info,
             .use_custom_link_command = value.use_custom_link_command,
             .llvm_output_bitcode = value.llvm_output_bitcode,
+        };
+    }
+
+    fn ownMessageSnapshot(comp: *Compilation, value: vm_mod.MessageSnapshot) !vm_mod.MessageSnapshot {
+        return .{
+            .kind = try comp.ownRunString(value.kind),
+            .workspace = value.workspace,
+            .phase = try comp.ownRunString(value.phase),
+            .fully_pathed_filename = try comp.ownRunString(value.fully_pathed_filename),
+            .module_name = try comp.ownRunString(value.module_name),
+            .module_type = try comp.ownRunString(value.module_type),
+            .executable_name = try comp.ownRunString(value.executable_name),
+            .executable_write_failed = value.executable_write_failed,
+            .linker_exit_code = value.linker_exit_code,
+            .error_code = value.error_code,
+            .dump_text = try comp.ownRunString(value.dump_text),
         };
     }
 
@@ -1682,6 +1748,38 @@ fn buildOptionsSemaToVm(value: sema.BuildOptionsValue) vm_mod.BuildOptionsSnapsh
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
         .llvm_output_bitcode = value.llvm_output_bitcode,
+    };
+}
+
+fn messageSnapshotToSema(value: vm_mod.MessageSnapshot) sema.MessageValue {
+    return .{
+        .kind = value.kind,
+        .workspace = value.workspace,
+        .phase = value.phase,
+        .fully_pathed_filename = value.fully_pathed_filename,
+        .module_name = value.module_name,
+        .module_type = value.module_type,
+        .executable_name = value.executable_name,
+        .executable_write_failed = value.executable_write_failed,
+        .linker_exit_code = value.linker_exit_code,
+        .error_code = value.error_code,
+        .dump_text = value.dump_text,
+    };
+}
+
+fn messageSemaToVm(value: sema.MessageValue) vm_mod.MessageSnapshot {
+    return .{
+        .kind = value.kind,
+        .workspace = value.workspace,
+        .phase = value.phase,
+        .fully_pathed_filename = value.fully_pathed_filename,
+        .module_name = value.module_name,
+        .module_type = value.module_type,
+        .executable_name = value.executable_name,
+        .executable_write_failed = value.executable_write_failed,
+        .linker_exit_code = value.linker_exit_code,
+        .error_code = value.error_code,
+        .dump_text = value.dump_text,
     };
 }
 

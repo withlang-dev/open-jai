@@ -31,6 +31,8 @@ pub const Typed = struct {
     comptime_calendars: std.AutoHashMapUnmanaged(NodeIndex, CalendarValue) = .empty,
     comptime_build_options: std.AutoHashMapUnmanaged(NodeIndex, BuildOptionsValue) = .empty,
     owned_build_option_strings: std.ArrayList([]const u8) = .empty,
+    comptime_messages: std.AutoHashMapUnmanaged(NodeIndex, MessageValue) = .empty,
+    owned_message_strings: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -52,6 +54,9 @@ pub const Typed = struct {
         t.comptime_build_options.deinit(t.allocator);
         for (t.owned_build_option_strings.items) |value| t.allocator.free(value);
         t.owned_build_option_strings.deinit(t.allocator);
+        t.comptime_messages.deinit(t.allocator);
+        for (t.owned_message_strings.items) |value| t.allocator.free(value);
+        t.owned_message_strings.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
@@ -107,6 +112,25 @@ pub const Typed = struct {
         try t.owned_build_option_strings.append(t.allocator, owned);
         return owned;
     }
+
+    pub fn putComptimeMessage(t: *Typed, node: NodeIndex, value: MessageValue) !void {
+        var owned = value;
+        owned.kind = try t.ownMessageString(value.kind);
+        owned.phase = try t.ownMessageString(value.phase);
+        owned.fully_pathed_filename = try t.ownMessageString(value.fully_pathed_filename);
+        owned.module_name = try t.ownMessageString(value.module_name);
+        owned.module_type = try t.ownMessageString(value.module_type);
+        owned.executable_name = try t.ownMessageString(value.executable_name);
+        owned.dump_text = try t.ownMessageString(value.dump_text);
+        try t.comptime_messages.put(t.allocator, node, owned);
+    }
+
+    fn ownMessageString(t: *Typed, value: []const u8) ![]const u8 {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_message_strings.append(t.allocator, owned);
+        return owned;
+    }
 };
 
 pub const SourceLocationValue = struct {
@@ -142,6 +166,20 @@ pub const BuildOptionsValue = struct {
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
+};
+
+pub const MessageValue = struct {
+    kind: []const u8 = "",
+    workspace: i64 = 0,
+    phase: []const u8 = "",
+    fully_pathed_filename: []const u8 = "",
+    module_name: []const u8 = "",
+    module_type: []const u8 = "",
+    executable_name: []const u8 = "",
+    executable_write_failed: bool = false,
+    linker_exit_code: i64 = 0,
+    error_code: i64 = 0,
+    dump_text: []const u8 = "",
 };
 
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, ip: *InternPool, diag: Diagnostic) !Typed {

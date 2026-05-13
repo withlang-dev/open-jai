@@ -18,6 +18,10 @@ compiler_intercept_messages_are_real_values :: () {
     expect_compile_output("test/examples/workspace/message_loop_value.jai", "IMPORT:3\nFILE:3\nPHASE:3\nphase:ALL_SOURCE_CODE_PARSED\nPHASE:3\nphase:TYPECHECKED_ALL_WE_CAN\nTYPECHECKED:3\nchecked:1\nPHASE:3\nphase:ALL_TARGET_CODE_BUILT\nPHASE:3\nphase:PRE_WRITE_EXECUTABLE\nPHASE:3\nphase:POST_WRITE_EXECUTABLE\nCOMPLETE:3\n");
 } @TestProcedure
 
+expression_form_run_message_is_materialized :: () {
+    expect_compile_output("test/examples/workspace/message_run_value.jai", "message:IMPORT:3\n");
+} @TestProcedure
+
 compiler_report_uses_code_declaration_locations :: () {
     expect_compile_output_contains("test/examples/workspace/compiler_report_location.jai", "test/examples/workspace/report_target.jai:3: declaration was reported\n");
 } @TestProcedure
