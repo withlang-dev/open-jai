@@ -176,11 +176,11 @@ fn effectiveCallParamCount(ast: *const Ast, proc_node: NodeIndex, arg_count: usi
     return params.len;
 }
 
-pub fn generateBlockProc(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, block: NodeIndex, diag: Diagnostic) !Bytecode.Program {
+pub fn generateBlockProc(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, typed: ?*const Typed, block: NodeIndex, diag: Diagnostic) !Bytecode.Program {
     var program = Bytecode.Program.init(allocator);
     errdefer program.deinit();
     var proc = Bytecode.ProcBytecode{ .name = "#run_block" };
-    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .compile_time_host = true, .current_proc_node = @import("Ast.zig").null_node, .current_proc_index = 0 };
+    var ctx = GenContext{ .ast = ast, .resolved = resolved, .program = &program, .proc = &proc, .typed = typed, .compile_time_host = true, .current_proc_node = @import("Ast.zig").null_node, .current_proc_index = 0 };
     defer ctx.deinit();
     try ctx.genBlock(block, diag);
     try proc.instructions.append(allocator, .{ .opcode = .ret_void, .source_node = block });
@@ -1474,6 +1474,7 @@ const GenContext = struct {
                 .line_number = value.line_number,
             } };
             if (typed.comptime_calendars.get(expr)) |value| return .{ .calendar = comptimeCalendarToVm(value) };
+            if (typed.comptime_build_options.get(expr)) |value| return .{ .build_options = buildOptionsSemaToVm(value) };
         }
         return switch (ast.tag(expr)) {
             .run_expr => try ctx.executeRunValue(ast.data(expr).lhs, bindings, diag),
@@ -1504,6 +1505,7 @@ const GenContext = struct {
                         }
                     }
                 }
+                if (try ctx.executeBuildOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "unsupported #run field access", .{});
             },
             .identifier => blk: {
@@ -1535,6 +1537,7 @@ const GenContext = struct {
                         .line_number = value.line_number,
                     } };
                     if (typed.comptime_calendars.get(decl)) |value| break :blk .{ .calendar = comptimeCalendarToVm(value) };
+                    if (typed.comptime_build_options.get(decl)) |value| break :blk .{ .build_options = buildOptionsSemaToVm(value) };
                 }
                 if (ast.tag(decl) == .const_decl or ast.tag(decl) == .var_decl) {
                     const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
@@ -1544,6 +1547,39 @@ const GenContext = struct {
             },
             else => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "unsupported #run argument kind {s}", .{@tagName(ast.tag(expr))}),
         };
+    }
+
+    fn executeBuildOptionsSnapshotField(ctx: *GenContext, base: NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        const typed = ctx.typed orelse return null;
+        const ast = ctx.ast;
+        const options = typed.comptime_build_options.get(base) orelse blk: {
+            if (base == @import("Ast.zig").null_node or ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = ctx.resolved.local_values.get(base) orelse lookup_decl: {
+                if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node| break :lookup_decl node,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_build_options.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "output_executable_name")) return .{ .string = options.output_executable_name };
+        if (std.mem.eql(u8, field_name, "output_path")) return .{ .string = options.output_path };
+        if (std.mem.eql(u8, field_name, "intermediate_path")) return .{ .string = options.intermediate_path };
+        if (std.mem.eql(u8, field_name, "output_type")) return .{ .string = options.output_type };
+        if (std.mem.eql(u8, field_name, "backend")) return .{ .string = options.backend };
+        if (std.mem.eql(u8, field_name, "write_added_strings")) return .{ .bool = options.write_added_strings };
+        if (std.mem.eql(u8, field_name, "stack_trace")) return .{ .bool = options.stack_trace };
+        if (std.mem.eql(u8, field_name, "backtrace_on_crash")) return .{ .string = options.backtrace_on_crash };
+        if (std.mem.eql(u8, field_name, "array_bounds_check")) return .{ .string = options.array_bounds_check };
+        if (std.mem.eql(u8, field_name, "cast_bounds_check")) return .{ .string = options.cast_bounds_check };
+        if (std.mem.eql(u8, field_name, "null_pointer_check")) return .{ .string = options.null_pointer_check };
+        if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
+        if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
+        if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        return null;
     }
 
     fn executeRunCallValue(ctx: *GenContext, call: NodeIndex, bindings: []const MacroCodeBinding, diag: Diagnostic) anyerror!vm_mod.Value {
@@ -1598,6 +1634,16 @@ const GenContext = struct {
             try values.append(ctx.program.allocator, value);
         }
         var vm = vm_mod.VM.init(ctx.program.allocator, &program);
+        var fallback_workspace_sources = std.ArrayList([]const u8).empty;
+        defer {
+            for (fallback_workspace_sources.items) |source| {
+                ctx.program.allocator.free(source);
+            }
+            fallback_workspace_sources.deinit(ctx.program.allocator);
+        }
+        var fallback_next_workspace_id: i64 = 3;
+        vm.current_workspace_build_strings = &fallback_workspace_sources;
+        vm.next_workspace_id = &fallback_next_workspace_id;
         defer vm.deinit();
         return try ctx.copyRunValue(try vm.runProcWithArgs(program.main_proc.?, values.items, diag));
     }
@@ -2971,6 +3017,11 @@ const GenContext = struct {
                     if (ast.tag(init) == .meta_expr and ast.tokens[ast.mainToken(init)].tag == .directive_code) {
                         try ctx.rememberLocalCode(stmt, try ctx.codeTextForMacroArg(init, &[_]MacroCodeBinding{}, diag));
                     }
+                    if (ctx.typed) |typed| {
+                        if (typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init)) {
+                            return;
+                        }
+                    }
                     if (try ctx.tryEmitStaticArrayLiteralDeclaration(stmt, init, diag)) return;
                     const reg = try ctx.genExpr(init, diag);
                     const ty = if (ctx.typed) |typed| typed.typeOf(stmt) else Type.init(InternPool.well_known.any_type);
@@ -3853,6 +3904,9 @@ const GenContext = struct {
                     if (typed.comptime_calendars.get(expr)) |value| {
                         return try ctx.emitCalendarValue(expr, value);
                     }
+                    if (typed.comptime_build_options.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options #run values are compile-time only; access their fields during #run", .{});
+                    }
                 }
                 const value = try ctx.executeRunValue(expr, &[_]MacroCodeBinding{}, diag);
                 switch (value) {
@@ -3882,6 +3936,7 @@ const GenContext = struct {
                         .millisecond = calendar.millisecond,
                         .time_zone = calendar.time_zone,
                     }),
+                    .build_options => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options #run values are compile-time only; access their fields during #run", .{}),
                     .bytes => |bytes_value| {
                         const idx = try program.addByteArray(bytes_value);
                         const reg = proc.num_registers;
@@ -4046,6 +4101,9 @@ const GenContext = struct {
                             const reg = try ctx.emitCalendarValue(expr, value);
                             try ctx.decl_registers.put(program.allocator, decl, reg);
                             return reg;
+                        }
+                        if (typed.comptime_build_options.contains(decl)) {
+                            return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options values are compile-time only; access their fields during #run", .{});
                         }
                     }
                     if (ctx.isTopLevelVarDecl(decl)) {
@@ -4328,6 +4386,12 @@ const GenContext = struct {
                         if (!std.mem.eql(u8, field_name, "low")) return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Apollo_Time field '{s}'", .{field_name});
                         return try ctx.genExpr(lhs_call, diag);
                     }
+                }
+                if (try ctx.executeBuildOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| {
+                    if (!ctx.compile_time_host) {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options fields from #run values are compile-time only", .{});
+                    }
+                    return try ctx.emitCompileTimeValue(expr, value, diag);
                 }
                 const base_reg = try ctx.genExpr(ast.data(expr).lhs, diag);
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
@@ -6465,6 +6529,35 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitCompileTimeValue(ctx: *GenContext, source_node: NodeIndex, value: vm_mod.Value, diag: Diagnostic) !Bytecode.Register {
+        return switch (value) {
+            .int => |v| try ctx.emitInt(source_node, v),
+            .float => |v| try ctx.emitFloat(source_node, v),
+            .bool => |v| try ctx.emitBool(source_node, v),
+            .string => |v| try ctx.emitString(source_node, v),
+            .bytes => |v| try ctx.emitString(source_node, v),
+            .source_location => |v| try ctx.emitSourceLocationValue(source_node, .{
+                .fully_pathed_filename = v.fully_pathed_filename,
+                .line_number = v.line_number,
+            }, diag),
+            .calendar => |v| try ctx.emitCalendarValue(source_node, .{
+                .year = v.year,
+                .month_starting_at_0 = v.month_starting_at_0,
+                .day_of_month_starting_at_0 = v.day_of_month_starting_at_0,
+                .day_of_week_starting_at_0 = v.day_of_week_starting_at_0,
+                .hour = v.hour,
+                .minute = v.minute,
+                .second = v.second,
+                .millisecond = v.millisecond,
+                .time_zone = v.time_zone,
+            }),
+            .code => |v| try ctx.emitCodeValue(source_node, v),
+            .type_text => |v| try ctx.emitString(source_node, v),
+            .void => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "compile-time value has no runtime representation", .{}),
+            .build_options => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Build_Options values are compile-time only; access their fields during #run", .{}),
+        };
+    }
+
     fn emitCode(ctx: *GenContext, source_node: NodeIndex, location_node: NodeIndex, value: []const u8, diag: Diagnostic) !Bytecode.Register {
         const tok = ctx.ast.mainToken(location_node);
         const line = sourceLineNumber(ctx.ast.source, ctx.ast.tokens[tok].start);
@@ -7541,6 +7634,26 @@ fn comptimeCalendarToVm(value: @import("Sema.zig").CalendarValue) vm_mod.Calenda
     };
 }
 
+fn buildOptionsSemaToVm(value: @import("Sema.zig").BuildOptionsValue) vm_mod.BuildOptionsSnapshot {
+    return .{
+        .output_executable_name = value.output_executable_name,
+        .output_path = value.output_path,
+        .intermediate_path = value.intermediate_path,
+        .output_type = value.output_type,
+        .backend = value.backend,
+        .write_added_strings = value.write_added_strings,
+        .stack_trace = value.stack_trace,
+        .backtrace_on_crash = value.backtrace_on_crash,
+        .array_bounds_check = value.array_bounds_check,
+        .cast_bounds_check = value.cast_bounds_check,
+        .null_pointer_check = value.null_pointer_check,
+        .enable_bytecode_inliner = value.enable_bytecode_inliner,
+        .runtime_storageless_type_info = value.runtime_storageless_type_info,
+        .use_custom_link_command = value.use_custom_link_command,
+        .llvm_output_bitcode = value.llvm_output_bitcode,
+    };
+}
+
 fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
     const ast = ctx.ast;
     if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
@@ -7559,6 +7672,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
         if (typed.comptime_strings.contains(expr) or typed.comptime_bytes.contains(expr)) return "string";
         if (typed.comptime_source_locations.contains(expr)) return "Source_Code_Location";
         if (typed.comptime_calendars.contains(expr)) return "Calendar";
+        if (typed.comptime_build_options.contains(expr)) return "Build_Options";
     }
     switch (ast.tag(expr)) {
         .string_literal => return "string",
@@ -7603,6 +7717,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
                 if (typed.comptime_source_locations.contains(decl)) return "Source_Code_Location";
                 if (typed.comptime_calendars.contains(decl)) return "Calendar";
+                if (typed.comptime_build_options.contains(decl)) return "Build_Options";
             }
             if (ast.tag(decl) == .var_decl or ast.tag(decl) == .const_decl) {
                 const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else @import("Ast.zig").null_node;

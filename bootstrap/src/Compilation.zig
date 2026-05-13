@@ -339,6 +339,11 @@ pub const Compilation = struct {
                 try typed.putComptimeCalendar(value_node, calendar_value);
                 try typed.putComptimeCalendar(decl_node, calendar_value);
             },
+            .build_options => |options| {
+                const build_options = buildOptionsSnapshotToSema(options);
+                try typed.putComptimeBuildOptions(value_node, build_options);
+                try typed.putComptimeBuildOptions(decl_node, build_options);
+            },
             .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
@@ -447,7 +452,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -471,6 +476,7 @@ pub const Compilation = struct {
                         .millisecond = calendar.millisecond,
                         .time_zone = calendar.time_zone,
                     }),
+                    .build_options => |options| try typed.putComptimeBuildOptions(node, buildOptionsSnapshotToSema(options)),
                     .type_text => {},
                     .void => {},
                 }
@@ -572,7 +578,7 @@ pub const Compilation = struct {
             return diag.failAt(ast.tokens[ast.mainToken(run_node)].start, "compile-time execution received a null expression operand", .{});
         }
         if (ast.tag(expr) == .block) {
-            var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, expr, diag);
+            var block_program = try bytecode_gen.generateBlockProc(comp.allocator, ast, resolved, typed, expr, diag);
             defer block_program.deinit();
             var block_vm = vm_mod.VM.initWithContext(comp.allocator, &block_program, comp.io, comp.sourceBaseDir());
             block_vm.current_workspace_build_strings = &comp.pending_current_workspace_sources;
@@ -685,6 +691,8 @@ pub const Compilation = struct {
                 } });
             } else if (typed.comptime_calendars.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
+            } else if (typed.comptime_build_options.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
@@ -723,6 +731,8 @@ pub const Compilation = struct {
                     } });
                 } else if (typed.comptime_calendars.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
+                } else if (typed.comptime_build_options.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
                 } else {
                     if (decl == @import("Ast.zig").null_node) {
                         return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument", .{});
@@ -750,6 +760,8 @@ pub const Compilation = struct {
                         } });
                     } else if (typed.comptime_calendars.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
+                    } else if (typed.comptime_build_options.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
                     } else {
                         const value = comp.executeRunConstExpr(ast, typed, resolved, initializer_node, diag) catch |err| {
                             if (target_is_expand) {
@@ -882,6 +894,7 @@ pub const Compilation = struct {
             .code => |v| std.debug.print("{s}", .{v.text}),
             .source_location => |v| std.debug.print("{s}:{d}", .{ v.fully_pathed_filename, v.line_number }),
             .calendar => |v| std.debug.print("{d}-{d}-{d} {d}:{d}:{d}.{d}", .{ v.year, v.month_starting_at_0 + 1, v.day_of_month_starting_at_0 + 1, v.hour, v.minute, v.second, v.millisecond }),
+            .build_options => |v| std.debug.print("{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; }}", .{ v.output_type, v.backend, v.output_executable_name, v.output_path }),
             .type_text => |v| std.debug.print("{s}", .{v}),
         }
     }
@@ -958,12 +971,20 @@ pub const Compilation = struct {
                 const owned_path = try comp.ownRunString(loc.fully_pathed_filename);
                 break :blk .{ .source_location = .{ .fully_pathed_filename = owned_path, .line_number = loc.line_number } };
             },
+            .build_options => |options| blk: {
+                const owned = try comp.ownBuildOptionsSnapshot(options);
+                vm_mod.VM.freeBuildOptionsSnapshot(comp.allocator, options);
+                break :blk .{ .build_options = owned };
+            },
             else => value,
         };
     }
 
     fn executeRunHostArg(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, arg: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
         if (ast.tag(arg) == .field_access and ast.data(arg).lhs == @import("Ast.zig").null_node) return .{ .int = 0 };
+        if (ast.tag(arg) == .field_access) {
+            if (try comp.executeBuildOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
+        }
         if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .keyword_xx) return comp.executeRunHostArg(ast, typed, resolved, ast.data(arg).lhs, diag);
         if (ast.tag(arg) == .call_expr) return try comp.executeRunCall(ast, typed, resolved, arg, arg, diag);
         if (typed.comptime_ints.get(arg)) |value| return .{ .int = value };
@@ -975,6 +996,7 @@ pub const Compilation = struct {
             .line_number = value.line_number,
         } };
         if (typed.comptime_calendars.get(arg)) |value| return .{ .calendar = comptimeCalendarToVm(value) };
+        if (typed.comptime_build_options.get(arg)) |value| return .{ .build_options = buildOptionsSemaToVm(value) };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
@@ -1007,6 +1029,7 @@ pub const Compilation = struct {
                         .line_number = value.line_number,
                     } };
                     if (typed.comptime_calendars.get(decl)) |value| break :blk .{ .calendar = comptimeCalendarToVm(value) };
+                    if (typed.comptime_build_options.get(decl)) |value| break :blk .{ .build_options = buildOptionsSemaToVm(value) };
                 }
                 break :blk .{ .string = name };
             },
@@ -1019,6 +1042,58 @@ pub const Compilation = struct {
         errdefer comp.allocator.free(owned);
         try comp.owned_run_result_strings.append(comp.allocator, owned);
         return owned;
+    }
+
+    fn executeBuildOptionsSnapshotField(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, base: @import("Ast.zig").NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        _ = comp;
+        const options = typed.comptime_build_options.get(base) orelse blk: {
+            if (ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = resolved.local_values.get(base) orelse lookup_decl: {
+                if (resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node| break :lookup_decl node,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_build_options.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "output_executable_name")) return .{ .string = options.output_executable_name };
+        if (std.mem.eql(u8, field_name, "output_path")) return .{ .string = options.output_path };
+        if (std.mem.eql(u8, field_name, "intermediate_path")) return .{ .string = options.intermediate_path };
+        if (std.mem.eql(u8, field_name, "output_type")) return .{ .string = options.output_type };
+        if (std.mem.eql(u8, field_name, "backend")) return .{ .string = options.backend };
+        if (std.mem.eql(u8, field_name, "write_added_strings")) return .{ .bool = options.write_added_strings };
+        if (std.mem.eql(u8, field_name, "stack_trace")) return .{ .bool = options.stack_trace };
+        if (std.mem.eql(u8, field_name, "backtrace_on_crash")) return .{ .string = options.backtrace_on_crash };
+        if (std.mem.eql(u8, field_name, "array_bounds_check")) return .{ .string = options.array_bounds_check };
+        if (std.mem.eql(u8, field_name, "cast_bounds_check")) return .{ .string = options.cast_bounds_check };
+        if (std.mem.eql(u8, field_name, "null_pointer_check")) return .{ .string = options.null_pointer_check };
+        if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
+        if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
+        if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        return null;
+    }
+
+    fn ownBuildOptionsSnapshot(comp: *Compilation, value: vm_mod.BuildOptionsSnapshot) !vm_mod.BuildOptionsSnapshot {
+        return .{
+            .output_executable_name = try comp.ownRunString(value.output_executable_name),
+            .output_path = try comp.ownRunString(value.output_path),
+            .intermediate_path = try comp.ownRunString(value.intermediate_path),
+            .output_type = try comp.ownRunString(value.output_type),
+            .backend = try comp.ownRunString(value.backend),
+            .write_added_strings = value.write_added_strings,
+            .stack_trace = value.stack_trace,
+            .backtrace_on_crash = try comp.ownRunString(value.backtrace_on_crash),
+            .array_bounds_check = try comp.ownRunString(value.array_bounds_check),
+            .cast_bounds_check = try comp.ownRunString(value.cast_bounds_check),
+            .null_pointer_check = try comp.ownRunString(value.null_pointer_check),
+            .enable_bytecode_inliner = value.enable_bytecode_inliner,
+            .runtime_storageless_type_info = value.runtime_storageless_type_info,
+            .use_custom_link_command = value.use_custom_link_command,
+            .llvm_output_bitcode = value.llvm_output_bitcode,
+        };
     }
 
     fn isDirectiveStringLiteral(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
@@ -1567,6 +1642,46 @@ fn comptimeCalendarToVm(value: sema.CalendarValue) vm_mod.CalendarValue {
         .second = value.second,
         .millisecond = value.millisecond,
         .time_zone = value.time_zone,
+    };
+}
+
+fn buildOptionsSnapshotToSema(value: vm_mod.BuildOptionsSnapshot) sema.BuildOptionsValue {
+    return .{
+        .output_executable_name = value.output_executable_name,
+        .output_path = value.output_path,
+        .intermediate_path = value.intermediate_path,
+        .output_type = value.output_type,
+        .backend = value.backend,
+        .write_added_strings = value.write_added_strings,
+        .stack_trace = value.stack_trace,
+        .backtrace_on_crash = value.backtrace_on_crash,
+        .array_bounds_check = value.array_bounds_check,
+        .cast_bounds_check = value.cast_bounds_check,
+        .null_pointer_check = value.null_pointer_check,
+        .enable_bytecode_inliner = value.enable_bytecode_inliner,
+        .runtime_storageless_type_info = value.runtime_storageless_type_info,
+        .use_custom_link_command = value.use_custom_link_command,
+        .llvm_output_bitcode = value.llvm_output_bitcode,
+    };
+}
+
+fn buildOptionsSemaToVm(value: sema.BuildOptionsValue) vm_mod.BuildOptionsSnapshot {
+    return .{
+        .output_executable_name = value.output_executable_name,
+        .output_path = value.output_path,
+        .intermediate_path = value.intermediate_path,
+        .output_type = value.output_type,
+        .backend = value.backend,
+        .write_added_strings = value.write_added_strings,
+        .stack_trace = value.stack_trace,
+        .backtrace_on_crash = value.backtrace_on_crash,
+        .array_bounds_check = value.array_bounds_check,
+        .cast_bounds_check = value.cast_bounds_check,
+        .null_pointer_check = value.null_pointer_check,
+        .enable_bytecode_inliner = value.enable_bytecode_inliner,
+        .runtime_storageless_type_info = value.runtime_storageless_type_info,
+        .use_custom_link_command = value.use_custom_link_command,
+        .llvm_output_bitcode = value.llvm_output_bitcode,
     };
 }
 

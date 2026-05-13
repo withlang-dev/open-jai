@@ -6,6 +6,10 @@ build_options_are_real_comptime_values :: () {
     expect_program_output("test/examples/workspace/build_options_value.jai", "12345\n");
 } @TestProcedure
 
+expression_form_run_build_options_is_materialized :: () {
+    expect_compile_output("test/examples/workspace/build_options_run_value.jai", "snapshot:snapshot-app ./out/build-options-snapshot false OFF\n");
+} @TestProcedure
+
 global_data_handles_embed_bytes :: () {
     expect_program_output("examples/30/30.15_global_data.jai", "43\n43\n");
 } @TestProcedure

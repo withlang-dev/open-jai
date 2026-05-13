@@ -24,6 +24,7 @@ pub const Value = union(enum) {
     code: CodeValue,
     source_location: SourceLocation,
     calendar: CalendarValue,
+    build_options: BuildOptionsSnapshot,
     type_text: []const u8,
 };
 
@@ -122,8 +123,18 @@ pub const WorkspaceSourceSnapshot = struct {
 pub const BuildOptionsSnapshot = struct {
     output_executable_name: []const u8 = "",
     output_path: []const u8 = "",
+    intermediate_path: []const u8 = ".build/",
     output_type: []const u8 = "EXECUTABLE",
     backend: []const u8 = "LLVM",
+    write_added_strings: bool = true,
+    stack_trace: bool = true,
+    backtrace_on_crash: []const u8 = "ON",
+    array_bounds_check: []const u8 = "ON",
+    cast_bounds_check: []const u8 = "NONFATAL",
+    null_pointer_check: []const u8 = "ON",
+    enable_bytecode_inliner: bool = false,
+    runtime_storageless_type_info: bool = false,
+    use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
 };
 
@@ -276,8 +287,13 @@ pub const VM = struct {
     pub fn freeBuildOptionsSnapshot(allocator: std.mem.Allocator, options: BuildOptionsSnapshot) void {
         allocator.free(options.output_executable_name);
         allocator.free(options.output_path);
+        allocator.free(options.intermediate_path);
         allocator.free(options.output_type);
         allocator.free(options.backend);
+        allocator.free(options.backtrace_on_crash);
+        allocator.free(options.array_bounds_check);
+        allocator.free(options.cast_bounds_check);
+        allocator.free(options.null_pointer_check);
     }
 
     pub fn deinit(vm: *VM) void {
@@ -326,7 +342,7 @@ pub const VM = struct {
     pub fn runProcWithArgs(vm: *VM, proc_index: u32, args: []const Value, diag: Diagnostic) !Value {
         const call_args = try vm.allocator.alloc(RegisterValue, args.len);
         defer vm.allocator.free(call_args);
-        for (args, 0..) |arg, i| call_args[i] = try registerValueFromValue(arg, diag);
+        for (args, 0..) |arg, i| call_args[i] = try registerValueFromValue(vm, arg, diag);
         const result = try vm.runProcWithRegisterArgs(proc_index, call_args, diag);
         return try registerValueToRunValue(vm, result, diag);
     }
@@ -2835,10 +2851,42 @@ pub const VM = struct {
         return .{
             .output_executable_name = try allocator.dupe(u8, options.output_executable_name),
             .output_path = try allocator.dupe(u8, options.output_path),
+            .intermediate_path = try allocator.dupe(u8, options.intermediate_path),
             .output_type = try allocator.dupe(u8, options.output_type),
             .backend = try allocator.dupe(u8, options.backend),
+            .write_added_strings = options.write_added_strings,
+            .stack_trace = options.stack_trace,
+            .backtrace_on_crash = try allocator.dupe(u8, options.backtrace_on_crash),
+            .array_bounds_check = try allocator.dupe(u8, options.array_bounds_check),
+            .cast_bounds_check = try allocator.dupe(u8, options.cast_bounds_check),
+            .null_pointer_check = try allocator.dupe(u8, options.null_pointer_check),
+            .enable_bytecode_inliner = options.enable_bytecode_inliner,
+            .runtime_storageless_type_info = options.runtime_storageless_type_info,
+            .use_custom_link_command = options.use_custom_link_command,
             .llvm_output_bitcode = options.llvm_output_bitcode,
         };
+    }
+
+    fn buildOptionsFromSnapshot(vm: *VM, snapshot: BuildOptionsSnapshot) !usize {
+        const index = vm.build_options.items.len;
+        try vm.build_options.append(vm.allocator, .{
+            .output_executable_name = snapshot.output_executable_name,
+            .output_path = snapshot.output_path,
+            .intermediate_path = snapshot.intermediate_path,
+            .output_type = snapshot.output_type,
+            .backend = snapshot.backend,
+            .write_added_strings = snapshot.write_added_strings,
+            .stack_trace = snapshot.stack_trace,
+            .backtrace_on_crash = snapshot.backtrace_on_crash,
+            .array_bounds_check = snapshot.array_bounds_check,
+            .cast_bounds_check = snapshot.cast_bounds_check,
+            .null_pointer_check = snapshot.null_pointer_check,
+            .enable_bytecode_inliner = snapshot.enable_bytecode_inliner,
+            .runtime_storageless_type_info = snapshot.runtime_storageless_type_info,
+            .use_custom_link_command = snapshot.use_custom_link_command,
+            .llvm_output_bitcode = snapshot.llvm_output_bitcode,
+        });
+        return index;
     }
 
     fn optimizationMode(vm: *VM, value: RegisterValue, diag: Diagnostic) !i64 {
@@ -4882,7 +4930,8 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
-        .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
+        .build_options => diag.failAt(0, "VM cannot pass Build_Options across this boundary without an active VM", .{}),
+        .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options_LLVM_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
     };
@@ -4906,11 +4955,12 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
-        .build_options, .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options values", .{}),
+        .build_options => |v| .{ .build_options = try vm.buildOptionsSnapshot(vm.allocator, v) },
+        .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options_LLVM_Options values", .{}),
     };
 }
 
-fn registerValueFromValue(value: Value, diag: Diagnostic) !RegisterValue {
+fn registerValueFromValue(vm: *VM, value: Value, diag: Diagnostic) !RegisterValue {
     return switch (value) {
         .int => |v| .{ .int = v },
         .float => |v| .{ .float = v },
@@ -4920,6 +4970,7 @@ fn registerValueFromValue(value: Value, diag: Diagnostic) !RegisterValue {
         .code => |v| .{ .code = v },
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
+        .build_options => |v| .{ .build_options = try vm.buildOptionsFromSnapshot(v) },
         .type_text => |v| .{ .type_text = v },
         .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),
     };

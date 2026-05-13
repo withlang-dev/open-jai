@@ -29,6 +29,8 @@ pub const Typed = struct {
     comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
     owned_source_location_paths: std.ArrayList([]const u8) = .empty,
     comptime_calendars: std.AutoHashMapUnmanaged(NodeIndex, CalendarValue) = .empty,
+    comptime_build_options: std.AutoHashMapUnmanaged(NodeIndex, BuildOptionsValue) = .empty,
+    owned_build_option_strings: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -47,6 +49,9 @@ pub const Typed = struct {
         for (t.owned_source_location_paths.items) |value| t.allocator.free(value);
         t.owned_source_location_paths.deinit(t.allocator);
         t.comptime_calendars.deinit(t.allocator);
+        t.comptime_build_options.deinit(t.allocator);
+        for (t.owned_build_option_strings.items) |value| t.allocator.free(value);
+        t.owned_build_option_strings.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
@@ -81,6 +86,27 @@ pub const Typed = struct {
     pub fn putComptimeCalendar(t: *Typed, node: NodeIndex, value: CalendarValue) !void {
         try t.comptime_calendars.put(t.allocator, node, value);
     }
+
+    pub fn putComptimeBuildOptions(t: *Typed, node: NodeIndex, value: BuildOptionsValue) !void {
+        var owned = value;
+        owned.output_executable_name = try t.ownBuildOptionString(value.output_executable_name);
+        owned.output_path = try t.ownBuildOptionString(value.output_path);
+        owned.intermediate_path = try t.ownBuildOptionString(value.intermediate_path);
+        owned.output_type = try t.ownBuildOptionString(value.output_type);
+        owned.backend = try t.ownBuildOptionString(value.backend);
+        owned.backtrace_on_crash = try t.ownBuildOptionString(value.backtrace_on_crash);
+        owned.array_bounds_check = try t.ownBuildOptionString(value.array_bounds_check);
+        owned.cast_bounds_check = try t.ownBuildOptionString(value.cast_bounds_check);
+        owned.null_pointer_check = try t.ownBuildOptionString(value.null_pointer_check);
+        try t.comptime_build_options.put(t.allocator, node, owned);
+    }
+
+    fn ownBuildOptionString(t: *Typed, value: []const u8) ![]const u8 {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_build_option_strings.append(t.allocator, owned);
+        return owned;
+    }
 };
 
 pub const SourceLocationValue = struct {
@@ -98,6 +124,24 @@ pub const CalendarValue = struct {
     second: i64,
     millisecond: i64,
     time_zone: i64,
+};
+
+pub const BuildOptionsValue = struct {
+    output_executable_name: []const u8 = "",
+    output_path: []const u8 = "",
+    intermediate_path: []const u8 = ".build/",
+    output_type: []const u8 = "EXECUTABLE",
+    backend: []const u8 = "LLVM",
+    write_added_strings: bool = true,
+    stack_trace: bool = true,
+    backtrace_on_crash: []const u8 = "ON",
+    array_bounds_check: []const u8 = "ON",
+    cast_bounds_check: []const u8 = "NONFATAL",
+    null_pointer_check: []const u8 = "ON",
+    enable_bytecode_inliner: bool = false,
+    runtime_storageless_type_info: bool = false,
+    use_custom_link_command: bool = false,
+    llvm_output_bitcode: bool = false,
 };
 
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, ip: *InternPool, diag: Diagnostic) !Typed {
