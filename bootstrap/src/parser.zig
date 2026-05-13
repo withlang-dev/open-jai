@@ -519,7 +519,7 @@ const Parser = struct {
                 p.index += 2;
                 const type_expr = try p.parseTypeExpr();
                 _ = try p.expect(.semicolon, "expected semicolon after using declaration", .{});
-                return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = null_node });
+                return p.ast.addNode(.var_decl, name_tok, .{ .lhs = type_expr, .rhs = using_param_sentinel });
             }
             const expr = try p.parseExpr();
             _ = try p.expect(.semicolon, "expected semicolon after using statement", .{});

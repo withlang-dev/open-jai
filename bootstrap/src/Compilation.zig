@@ -11,6 +11,7 @@ const vm_mod = @import("vm.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const InternPool = @import("InternPool.zig").InternPool;
 const Tag = @import("Token.zig").Tag;
+const using_param_sentinel: u32 = 0xfffffffe;
 
 pub const Options = struct {
     input_path: []const u8,
@@ -400,7 +401,7 @@ pub const Compilation = struct {
     }
 
     fn evaluateRunExpressionsInNode(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, node: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!void {
-        if (node == @import("Ast.zig").null_node) return;
+        if (node == @import("Ast.zig").null_node or node == using_param_sentinel or node >= ast.node_tags.items.len) return;
         switch (ast.tag(node)) {
             .meta_expr => {
                 if (ast.tokens[ast.mainToken(node)].tag == .directive_insert) return;
@@ -445,7 +446,7 @@ pub const Compilation = struct {
             },
             .var_decl => {
                 try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).lhs, diag);
-                try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).rhs, diag);
+                if (ast.data(node).rhs != using_param_sentinel) try comp.evaluateRunExpressionsInNode(ast, typed, resolved, ast.data(node).rhs, diag);
             },
             .expr_stmt => {
                 const lhs = ast.data(node).lhs;
@@ -969,7 +970,7 @@ pub const Compilation = struct {
     }
 
     fn isExecutableRun(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex) bool {
-        if (node == @import("Ast.zig").null_node or ast.tag(node) != .run_expr) return false;
+        if (node == @import("Ast.zig").null_node or node == using_param_sentinel or node >= ast.node_tags.items.len or ast.tag(node) != .run_expr) return false;
         return switch (ast.tokens[ast.mainToken(node)].tag) {
             .directive_run, .directive_assert, .keyword_push_context => true,
             else => false,

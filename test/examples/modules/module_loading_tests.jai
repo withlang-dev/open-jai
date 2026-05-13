@@ -101,3 +101,7 @@ gl_module_import_loads_real_source_and_tracks_state :: () {
 sound_modules_import_real_source_and_track_streams :: () {
     expect_compile_output("test/examples/modules/sound_module_import_value.jai", "sound:1 true true true true 1 4 2\n");
 } @TestProcedure
+
+bindings_generator_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/bindings_generator_module_import_value.jai", "bindings:true true 31 1 1 1 1 2 true\n");
+} @TestProcedure

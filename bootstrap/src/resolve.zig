@@ -605,23 +605,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
-                        for (&[_][]const u8{
-                            "Generate_Bindings_Options",
-                            "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH",
-                            "generate_bindings",
-                            "copy_file",
-                            "libpaths",
-                            "libnames",
-                            "include_paths",
-                            "source_files",
-                            "system_include_paths",
-                            "extra_clang_arguments",
-                            "strip_flags",
-                            "header",
-                        }) |name| {
-                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                        }
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
             .load_decl => {
@@ -816,10 +799,11 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                             if (predeclared_nodes.contains(child)) {
                                 if (ast.tag(child) == .var_decl) {
                                     if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
-                                    if (ast.data(child).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
+                                    if (ast.data(child).rhs != @import("Ast.zig").null_node and ast.data(child).rhs != using_param_sentinel) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
                                 } else {
                                     try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
                                 }
+                                if (isUsingVarDecl(ast, child)) try r.using_fallbacks.append(r.allocator, child);
                                 continue;
                             }
                             if (containsName(declared.items, name)) {
@@ -835,13 +819,14 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                             }
                             if (ast.tag(child) == .var_decl) {
                                 if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
-                                if (ast.data(child).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
+                                if (ast.data(child).rhs != @import("Ast.zig").null_node and ast.data(child).rhs != using_param_sentinel) try resolveNode(ast, r, ast.data(child).rhs, file_id, diag);
                             } else {
                                 try resolveNode(ast, r, ast.data(child).lhs, file_id, diag);
                             }
                             const old = try r.symbols.fetchPut(r.allocator, name, .{ .const_value = if (ast.tag(child) == .var_decl) child else ast.data(child).lhs });
                             try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
                             try declared.append(r.allocator, name);
+                            if (isUsingVarDecl(ast, child)) try r.using_fallbacks.append(r.allocator, child);
                         },
                         .proc_decl => try resolveProc(ast, r, child, file_id, diag),
                         else => try resolveNode(ast, r, child, file_id, diag),
@@ -853,10 +838,11 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                 if (predeclared_nodes.contains(stmt)) {
                     if (ast.tag(stmt) == .var_decl) {
                         if (ast.data(stmt).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
-                        if (ast.data(stmt).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
+                        if (ast.data(stmt).rhs != @import("Ast.zig").null_node and ast.data(stmt).rhs != using_param_sentinel) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
                     } else {
                         try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
                     }
+                    if (isUsingVarDecl(ast, stmt)) try r.using_fallbacks.append(r.allocator, stmt);
                     continue;
                 }
                 if (containsName(declared.items, name)) {
@@ -872,13 +858,14 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                 }
                 if (ast.tag(stmt) == .var_decl) {
                     if (ast.data(stmt).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
-                    if (ast.data(stmt).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
+                    if (ast.data(stmt).rhs != @import("Ast.zig").null_node and ast.data(stmt).rhs != using_param_sentinel) try resolveNode(ast, r, ast.data(stmt).rhs, file_id, diag);
                 } else {
                     try resolveNode(ast, r, ast.data(stmt).lhs, file_id, diag);
                 }
                 const old = try r.symbols.fetchPut(r.allocator, name, .{ .const_value = if (ast.tag(stmt) == .var_decl) stmt else ast.data(stmt).lhs });
                 try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
                 try declared.append(r.allocator, name);
+                if (isUsingVarDecl(ast, stmt)) try r.using_fallbacks.append(r.allocator, stmt);
             },
             .proc_decl => try resolveProc(ast, r, stmt, file_id, diag),
             else => try resolveNode(ast, r, stmt, file_id, diag),
@@ -892,6 +879,10 @@ const BindingRestore = struct {
     old: Symbol,
     had_old: bool,
 };
+
+fn isUsingVarDecl(ast: *const Ast, node: NodeIndex) bool {
+    return ast.tag(node) == .var_decl and ast.data(node).rhs == using_param_sentinel;
+}
 
 fn containsName(names: []const []const u8, needle: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, needle)) return true;
@@ -928,7 +919,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         },
         .var_decl => {
             if (ast.data(node).lhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(node).lhs, file_id, diag);
-            if (ast.data(node).rhs != @import("Ast.zig").null_node) try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
+            if (ast.data(node).rhs != @import("Ast.zig").null_node and ast.data(node).rhs != using_param_sentinel) try resolveNode(ast, r, ast.data(node).rhs, file_id, diag);
         },
         .const_decl => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .assign_stmt => {

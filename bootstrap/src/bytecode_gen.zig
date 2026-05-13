@@ -913,7 +913,7 @@ const GenContext = struct {
         if (ast.tag(decl) != .const_decl and ast.tag(decl) != .var_decl) return;
 
         const value = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
-        if (value == @import("Ast.zig").null_node) return;
+        if (value == @import("Ast.zig").null_node or value == using_param_sentinel or value >= ast.node_tags.items.len) return;
         switch (ast.tag(value)) {
             .struct_type, .union_type, .enum_type, .array_type, .type_expr, .identifier => {
                 try ctx.local_type_decls.put(ctx.program.allocator, ast.tokenSlice(ast.mainToken(decl)), value);
@@ -7153,14 +7153,14 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
 
 fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
     const ast = ctx.ast;
-    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len) return null;
+    if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
     if (ast.tag(expr) == .identifier) {
         if (ctx.resolved.local_values.get(expr)) |decl| {
             if (decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len) {
                 if (ast.tag(decl) == .meta_expr and ast.tokens[ast.mainToken(decl)].tag == .directive_code) return "Code";
                 if (ast.tag(decl) == .const_decl or ast.tag(decl) == .var_decl) {
                     const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
-                    if (init != @import("Ast.zig").null_node and ast.tag(init) == .meta_expr and ast.tokens[ast.mainToken(init)].tag == .directive_code) return "Code";
+                    if (init != @import("Ast.zig").null_node and init != using_param_sentinel and init < ast.node_tags.items.len and ast.tag(init) == .meta_expr and ast.tokens[ast.mainToken(init)].tag == .directive_code) return "Code";
                 }
             }
         }
@@ -7214,7 +7214,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else @import("Ast.zig").null_node;
                 if (type_node != @import("Ast.zig").null_node) return ctx.nodeSource(type_node);
                 if (ast.tag(decl) == .const_decl and ast.data(decl).rhs != 0) return ast.tokenSlice(ast.data(decl).rhs);
-                if (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node) {
+                if (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and ast.data(decl).rhs != using_param_sentinel) {
                     return typeTextForExpr(ctx, ast.data(decl).rhs, diag);
                 }
                 if (ast.tag(decl) == .const_decl and ast.data(decl).lhs != @import("Ast.zig").null_node) {
