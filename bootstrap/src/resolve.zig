@@ -602,8 +602,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "Windows") or
-                    std.mem.eql(u8, module_name, "Input") or
+                } else if (std.mem.eql(u8, module_name, "Input") or
                     std.mem.eql(u8, module_name, "Window_Creation") or
                     std.mem.eql(u8, module_name, "Windows_Resources") or
                     std.mem.eql(u8, module_name, "Simp") or
@@ -623,13 +622,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Windows")) {
-                        try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.symbols.put(allocator, "GetStdHandle", .builtin_get_std_handle);
-                        try r.putRealSymbol("STD_INPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "Input")) {
+                    if (std.mem.eql(u8, module_name, "Input")) {
                         try putExternalSymbols(&r, &.{
                             "events_this_frame",          "update_window_events",
                             "SDL_INIT_VIDEO",             "SDL_Init",

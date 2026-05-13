@@ -57,3 +57,7 @@ debug_module_import_loads_real_source :: () {
 debug_module_alias_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/debug_module_alias_import_value.jai", "debug:alias\n");
 } @TestProcedure
+
+windows_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/windows_module_import_value.jai", "windows:0 -10 -11 -12\n");
+} @TestProcedure
