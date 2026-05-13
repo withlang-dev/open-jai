@@ -213,6 +213,14 @@ pub const VM = struct {
     }
 
     pub fn runProcWithArgs(vm: *VM, proc_index: u32, args: []const Value, diag: Diagnostic) !Value {
+        const call_args = try vm.allocator.alloc(RegisterValue, args.len);
+        defer vm.allocator.free(call_args);
+        for (args, 0..) |arg, i| call_args[i] = try registerValueFromValue(arg, diag);
+        const result = try vm.runProcWithRegisterArgs(proc_index, call_args, diag);
+        return try registerValueToRunValue(vm, result, diag);
+    }
+
+    fn runProcWithRegisterArgs(vm: *VM, proc_index: u32, args: []const RegisterValue, diag: Diagnostic) !RegisterValue {
         if (proc_index >= vm.program.procs.items.len) return diag.failAt(0, "#run target procedure index out of range", .{});
         const proc = &vm.program.procs.items[proc_index];
         var regs = try vm.allocator.alloc(RegisterValue, proc.num_registers);
@@ -222,18 +230,7 @@ pub const VM = struct {
         defer vm.allocator.free(local_ptrs);
         @memset(local_ptrs, null);
         if (args.len > regs.len) return diag.failAt(0, "VM #run argument count exceeds register file", .{});
-        for (args, 0..) |arg, i| {
-            regs[i] = switch (arg) {
-                .int => |v| .{ .int = v },
-                .float => |v| .{ .float = v },
-                .bool => |v| .{ .bool = v },
-                .string => |v| .{ .string = v },
-                .bytes => |v| .{ .bytes = v },
-                .code => |v| .{ .code = v },
-                .type_text => |v| .{ .type_text = v },
-                .void => return diag.failAt(0, "VM #run arguments cannot be void", .{}),
-            };
-        }
+        for (args, 0..) |arg, i| regs[i] = arg;
         var ip: usize = 0;
         while (ip < proc.instructions.items.len) {
             const inst = proc.instructions.items[ip];
@@ -579,17 +576,18 @@ pub const VM = struct {
                 .call => {
                     if (inst.arg1 >= vm.program.procs.items.len) return diag.failAt(0, "VM call target procedure index out of range", .{});
                     if (inst.arg3 + inst.arg2 > vm.program.call_args.items.len) return diag.failAt(0, "VM call argument table out of range", .{});
-                    const call_args = try vm.allocator.alloc(Value, inst.arg2);
+                    const call_args = try vm.allocator.alloc(RegisterValue, inst.arg2);
                     defer vm.allocator.free(call_args);
                     for (call_args, 0..) |*arg, arg_index| {
                         const reg_index = vm.program.call_args.items[inst.arg3 + arg_index];
                         if (reg_index >= regs.len) return diag.failAt(0, "VM call argument register out of range", .{});
-                        arg.* = try registerValueToValue(regs[reg_index], diag);
+                        if (regs[reg_index] == .empty) return diag.failAt(0, "VM call argument register was not initialized", .{});
+                        arg.* = regs[reg_index];
                     }
-                    const result = try vm.runProcWithArgs(inst.arg1, call_args, diag);
-                    if (result != .void) {
+                    const result = try vm.runProcWithRegisterArgs(inst.arg1, call_args, diag);
+                    if (result != .empty) {
                         if (inst.dest >= regs.len) return diag.failAt(0, "VM call result register out of range", .{});
-                        regs[inst.dest] = registerValueFromValue(result);
+                        regs[inst.dest] = result;
                     }
                 },
                 .format_print => {
@@ -615,14 +613,8 @@ pub const VM = struct {
                 .ret => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM return register out of range", .{});
                     return switch (regs[inst.arg1]) {
-                        .int => |value| .{ .int = value },
-                        .float => |value| .{ .float = value },
-                        .bool => |value| .{ .bool = value },
-                        .string => |value| .{ .string = value },
-                        .bytes => |value| .{ .bytes = value },
-                        .code => |value| .{ .code = value },
-                        .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
-                        else => diag.failAt(0, "VM #run return register was not initialized", .{}),
+                        .empty => diag.failAt(0, "VM #run return register was not initialized", .{}),
+                        else => regs[inst.arg1],
                     };
                 },
                 .assert_true => {
@@ -631,8 +623,8 @@ pub const VM = struct {
                         return diag.failAt(inst.source_node, "compile-time assert failed", .{});
                     }
                 },
-                .ret_void => return .void,
-                .exit_process => return .void,
+                .ret_void => return .empty,
+                .exit_process => return .empty,
                 .alloc_heap => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
                     regs[inst.dest] = .{ .ptr = try vm.allocBlock(@max(inst.arg1, 1)) };
@@ -1320,7 +1312,7 @@ pub const VM = struct {
                 else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
             }
         }
-        return .void;
+        return .empty;
     }
 
     fn allocBlock(vm: *VM, size: usize) !Pointer {
@@ -3839,7 +3831,27 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
     };
 }
 
-fn registerValueFromValue(value: Value) RegisterValue {
+fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Value {
+    return switch (value) {
+        .empty => .void,
+        .int => |v| .{ .int = v },
+        .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
+        .string => |v| .{ .string = v },
+        .bytes => |v| .{ .bytes = v },
+        .code => |v| .{ .code = v },
+        .type_id => |v| .{ .type_text = typeName(v) },
+        .type_text => |v| .{ .type_text = v },
+        .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
+        .type_info_member => diag.failAt(0, "expression-form #run cannot materialize Type_Info member values", .{}),
+        .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
+        .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
+        .source_location => diag.failAt(0, "expression-form #run cannot materialize Source_Code_Location values", .{}),
+        .build_options, .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options values", .{}),
+    };
+}
+
+fn registerValueFromValue(value: Value, diag: Diagnostic) !RegisterValue {
     return switch (value) {
         .int => |v| .{ .int = v },
         .float => |v| .{ .float = v },
@@ -3848,7 +3860,7 @@ fn registerValueFromValue(value: Value) RegisterValue {
         .bytes => |v| .{ .bytes = v },
         .code => |v| .{ .code = v },
         .type_text => |v| .{ .type_text = v },
-        .void => .empty,
+        .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),
     };
 }
 

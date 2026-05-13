@@ -1,6 +1,14 @@
 #import "Basic";
 #import "Compiler";
 
+round_trip_options :: (options: Build_Options) -> Build_Options {
+    return options;
+}
+
+option_executable_name :: (options: Build_Options) -> string {
+    return options.output_executable_name;
+}
+
 validate_build_options :: () -> int {
     w := compiler_create_workspace();
     options := get_build_options(w);
@@ -38,6 +46,12 @@ validate_build_options :: () -> int {
     assert(options.import_path.count == 2);
     assert(options.import_path[0] == "modules");
     assert(options.import_path[1] == "local_modules");
+    assert(option_executable_name(options) == "openjai_program");
+
+    round_tripped := round_trip_options(options);
+    assert(round_tripped.output_path == "./out/test-build-options");
+    assert(round_tripped.import_path.count == 2);
+    assert(round_tripped.import_path[1] == "local_modules");
 
     return 12345;
 }
