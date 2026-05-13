@@ -69,3 +69,7 @@ machine_x64_module_import_loads_real_source :: () {
 windows_resources_module_import_loads_real_source_from_local_alias :: () {
     expect_compile_output("test/examples/modules/windows_resources_module_import_value.jai", "windows-resources:0\n");
 } @TestProcedure
+
+mail_module_import_loads_real_source_from_local_alias :: () {
+    expect_compile_output("test/examples/modules/mail_module_import_value.jai", "mail:true false\n");
+} @TestProcedure

@@ -607,7 +607,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Simp") or
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
-                    std.mem.eql(u8, module_name, "Mail") or
                     std.mem.eql(u8, module_name, "Sort") or
                     std.mem.eql(u8, module_name, "Hash_Table") or
                     std.mem.eql(u8, module_name, "Pool") or
