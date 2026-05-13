@@ -121,6 +121,10 @@ struct_parameters_output :: () {
     expect_program_output("examples/12/12.9_struct_parameters.jai", "a is: {5, \"Hello\"}\na.x is: 5\na.param is: Hello\nb is: {5, \"Sailor!\"}\n");
 } @TestProcedure
 
+struct_parameters_type_output :: () {
+    expect_program_output("examples/12/12.10_struct_parameters_type.jai", "type_of(x) is Entity(Payload=(anonymous struct))\nx is {{\"Volodimir\", false}}\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure

@@ -1045,7 +1045,8 @@ const GenContext = struct {
                 typeTextForExpr(ctx, source, diag);
             const should_override_param_type = param_type == @import("Ast.zig").null_node or
                 std.mem.eql(u8, param_type_text, "Code") or
-                typeNodeContainsPolymorph(ctx, param_type);
+                typeNodeContainsPolymorph(ctx, param_type) or
+                (inline_type != null and try unspecializedContainerParamAcceptsActual(ctx, param_type_text, inline_type.?, diag));
             if (should_override_param_type) if (inline_type) |actual_type| {
                 try type_restores.append(allocator, .{
                     .decl = param,
@@ -3847,6 +3848,14 @@ const GenContext = struct {
 
     fn emitContainerGeneratedInitializers(ctx: *GenContext, dest: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
         const type_name = firstTypeWord(stripPointerText(raw_type));
+        if (ctx.polymorph_types.get(type_name)) |actual_type| {
+            try ctx.emitContainerGeneratedInitializers(dest, actual_type, source_node, diag);
+            return;
+        }
+        if (anonymousContainerBodyText(raw_type)) |body| {
+            try ctx.emitContainerDeclaredInitializers(dest, raw_type, body, source_node, diag);
+            return;
+        }
         const type_node = try structTypeNodeByName(ctx, type_name) orelse return;
         const body = containerBodySource(ctx.ast, type_node) orelse return;
         var restores = try bindContainerTypeArgs(ctx, raw_type, type_node);
@@ -4190,7 +4199,7 @@ const GenContext = struct {
                     const clean_type = std.mem.trim(u8, type_text, " \t\r\n");
                     const type_name = firstTypeWord(stripPointerText(clean_type));
                     if (!isBuiltinTypeName(type_name) and (try structTypeNodeByName(ctx, type_name)) != null) {
-                        return try ctx.emitTypeText(expr, clean_type, diag);
+                        return try ctx.emitTypeText(expr, try displayTypeTextForTypeOf(ctx, clean_type, diag), diag);
                     }
                 }
                 const type_id = if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |type_text| typeIdFromTypeText(type_text) else try ctx.phase2TypeId(ast.data(expr).lhs, diag);
@@ -8065,6 +8074,57 @@ fn typeTextsEquivalent(lhs_raw: []const u8, rhs_raw: []const u8) bool {
         (std.mem.eql(u8, lhs, "s64") and std.mem.eql(u8, rhs, "int"));
 }
 
+fn unspecializedContainerParamAcceptsActual(ctx: *GenContext, param_raw: []const u8, actual_raw: []const u8, diag: Diagnostic) !bool {
+    const param = std.mem.trim(u8, stripPointerText(param_raw), " \t\r\n");
+    const actual = std.mem.trim(u8, stripPointerText(actual_raw), " \t\r\n");
+    if (param.len == 0 or actual.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, param, '(') != null) return false;
+    const actual_open = std.mem.indexOfScalar(u8, actual, '(') orelse return false;
+    const param_name = firstTypeWord(param);
+    if (param_name.len == 0 or !std.mem.eql(u8, param_name, firstTypeWord(actual))) return false;
+    const type_node = try structTypeNodeByName(ctx, param_name) orelse return false;
+    _ = diag;
+    return containerTypeParameterText(ctx.ast, type_node) != null and matchingParenIndex(actual, actual_open) != null;
+}
+
+fn displayTypeTextForTypeOf(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) ![]const u8 {
+    const clean = std.mem.trim(u8, raw_type, " \t\r\n");
+    const open = std.mem.indexOfScalar(u8, clean, '(') orelse return clean;
+    const close = matchingParenIndex(clean, open) orelse return clean;
+    const type_name = firstTypeWord(clean);
+    const type_node = try structTypeNodeByName(ctx, type_name) orelse return clean;
+    const params_text = containerTypeParameterText(ctx.ast, type_node) orelse return clean;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(ctx.program.allocator);
+    try out.appendSlice(ctx.program.allocator, type_name);
+    try out.append(ctx.program.allocator, '(');
+    var first = true;
+    var param_index: usize = 0;
+    var param_cursor: usize = 0;
+    const args_text = clean[open + 1 .. close];
+    while (nextTopLevelCommaSegment(params_text, &param_cursor)) |raw_param| : (param_index += 1) {
+        const param = parseContainerParam(raw_param) orelse continue;
+        if (param.name.len == 0) continue;
+        if (!first) try out.appendSlice(ctx.program.allocator, ", ");
+        first = false;
+        try out.appendSlice(ctx.program.allocator, param.name);
+        try out.append(ctx.program.allocator, '=');
+        const value = explicitContainerArgValue(args_text, param.name, param_index) orelse param.default_text;
+        try out.appendSlice(ctx.program.allocator, displayTypeArgumentValue(value));
+    }
+    try out.append(ctx.program.allocator, ')');
+    const text = try out.toOwnedSlice(ctx.program.allocator);
+    try ctx.owned_type_texts.append(ctx.program.allocator, text);
+    _ = diag;
+    return text;
+}
+
+fn displayTypeArgumentValue(raw_value: []const u8) []const u8 {
+    const clean = std.mem.trim(u8, raw_value, " \t\r\n");
+    if (anonymousContainerBodyText(clean) != null) return "(anonymous struct)";
+    return clean;
+}
+
 fn asFieldInfoForConversion(ctx: *GenContext, source_type: []const u8, target_type: []const u8, diag: Diagnostic) !?FieldInfo {
     const type_name = firstTypeWord(stripPointerText(source_type));
     if (type_name.len == 0) return null;
@@ -9105,6 +9165,8 @@ fn isIntegerTypeText(raw: []const u8) bool {
 fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return null;
+    if (ctx.polymorph_types.get(type_name)) |actual_type| return try fieldInfoFromTypeText(ctx, actual_type, field_name, diag);
+    if (anonymousContainerBodyText(raw_type)) |body| return try containerFieldInfoFromBody(ctx, body, field_name, diag);
     if (std.mem.eql(u8, type_name, "Allocator")) {
         if (std.mem.eql(u8, field_name, "proc")) return .{ .offset = 0, .type_text = "s64" };
         if (std.mem.eql(u8, field_name, "data")) return .{ .offset = 8, .type_text = "*void" };
@@ -9131,6 +9193,8 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
 fn typeTextIsStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !bool {
     const type_name = firstTypeWord(stripPointerText(raw_type));
     if (type_name.len == 0) return false;
+    if (ctx.polymorph_types.get(type_name)) |actual_type| return try typeTextIsStruct(ctx, actual_type, diag);
+    if (anonymousContainerBodyText(raw_type) != null) return true;
     if (std.mem.eql(u8, type_name, "Allocator") or std.mem.eql(u8, type_name, "Pool") or std.mem.eql(u8, type_name, "Flat_Pool")) return true;
     if (ctx.type_context_parent) |parent| {
         if (try typeTextIsStruct(parent, raw_type, diag)) return true;
@@ -10083,6 +10147,7 @@ fn structSizeByName(ctx: *GenContext, name: []const u8, diag: Diagnostic) anyerr
 }
 
 fn structSizeFromTypeText(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerror!?u64 {
+    if (anonymousContainerBodyText(raw_type)) |body| return try containerSizeFromBody(ctx, body, diag);
     const type_name = firstTypeWord(stripPointerText(raw_type));
     const type_node = try structTypeNodeByName(ctx, type_name) orelse {
         if (ctx.type_context_parent) |parent| return try structSizeFromTypeText(parent, raw_type, diag);
@@ -10155,6 +10220,16 @@ fn containerSizeFromBody(ctx: *GenContext, body: []const u8, diag: Diagnostic) a
         }
     }
     return if (total == 0) 0 else alignForward(total, max_align);
+}
+
+fn containerAlignFromBody(ctx: *GenContext, body: []const u8, diag: Diagnostic) anyerror!u64 {
+    var max_align: u64 = 1;
+    var it = FieldSegmentIterator{ .source = body };
+    while (it.next()) |segment| {
+        const parsed = parseFieldSegment(segment) orelse continue;
+        max_align = @max(max_align, try typeTextAlign(ctx, try parsedFieldTypeText(ctx, parsed, diag), diag));
+    }
+    return max_align;
 }
 
 fn bindContainerTypeArgs(ctx: *GenContext, raw_type: []const u8, type_node: NodeIndex) !std.ArrayList(TypeArgRestore) {
@@ -10284,6 +10359,45 @@ fn matchingParenIndex(text: []const u8, open: usize) ?usize {
         }
     }
     return null;
+}
+
+fn matchingBraceIndex(text: []const u8, open: usize) ?usize {
+    if (open >= text.len or text[open] != '{') return null;
+    var depth: usize = 0;
+    var i = open;
+    var in_string = false;
+    var escaped = false;
+    while (i < text.len) : (i += 1) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (text[i] == '\\') {
+                escaped = true;
+            } else if (text[i] == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (text[i]) {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn anonymousContainerBodyText(raw_type: []const u8) ?[]const u8 {
+    const clean = std.mem.trim(u8, stripPointerText(raw_type), " \t\r\n");
+    const name = firstTypeWord(clean);
+    if (!std.mem.eql(u8, name, "struct") and !std.mem.eql(u8, name, "union")) return null;
+    const open = std.mem.indexOfScalar(u8, clean, '{') orelse return null;
+    const close = matchingBraceIndex(clean, open) orelse return null;
+    return clean[open + 1 .. close];
 }
 
 fn nextTopLevelCommaSegment(text: []const u8, cursor: *usize) ?[]const u8 {
@@ -10557,6 +10671,10 @@ fn containerFieldOffsetFromSource(ctx: *GenContext, type_node: NodeIndex, field_
 
 fn containerFieldInfoFromSource(ctx: *GenContext, type_node: NodeIndex, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
     const body = containerBodySource(ctx.ast, type_node) orelse return null;
+    return try containerFieldInfoFromBody(ctx, body, field_name, diag);
+}
+
+fn containerFieldInfoFromBody(ctx: *GenContext, body: []const u8, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
     var offset: u64 = 0;
     var it = FieldSegmentIterator{ .source = body };
     while (it.next()) |segment| {
@@ -10744,7 +10862,11 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
 }
 
 fn parsedFieldTypeText(ctx: *GenContext, parsed: ParsedFieldSegment, diag: Diagnostic) ![]const u8 {
-    if (!parsed.is_inferred) return parsed.type_text;
+    if (!parsed.is_inferred) {
+        const type_name = firstTypeWord(std.mem.trim(u8, parsed.type_text, " \t\r\n"));
+        if (ctx.polymorph_types.get(type_name)) |actual_type| return actual_type;
+        return parsed.type_text;
+    }
     return try inferFieldTypeTextFromDefault(ctx, parsed.inferred_default_text, diag);
 }
 
@@ -10946,6 +11068,7 @@ fn typeTextSize(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerr
         };
         return count * try typeTextSize(ctx, ty[close + 1 ..], diag);
     }
+    if (anonymousContainerBodyText(ty)) |body| return try containerSizeFromBody(ctx, body, diag);
     const name = firstTypeWord(ty);
     if (ctx.polymorph_types.get(name)) |actual_type| return try typeTextSize(ctx, actual_type, diag);
     if (std.mem.eql(u8, name, "Allocator")) return 16;
@@ -10972,7 +11095,9 @@ fn typeTextAlign(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyer
         const close = std.mem.indexOfScalar(u8, ty, ']') orelse return 8;
         return try typeTextAlign(ctx, ty[close + 1 ..], diag);
     }
+    if (anonymousContainerBodyText(ty)) |body| return try containerAlignFromBody(ctx, body, diag);
     const name = firstTypeWord(ty);
+    if (ctx.polymorph_types.get(name)) |actual_type| return try typeTextAlign(ctx, actual_type, diag);
     if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "bool")) return 1;
     if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 2;
     if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u32")) return 4;
@@ -11390,6 +11515,14 @@ fn emitFormattedStructValue(ctx: *GenContext, base_reg: Bytecode.Register, raw_t
 
 fn emitFormattedStructValueWithOptions(ctx: *GenContext, base_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, options: FormatStructPrintOptions, diag: Diagnostic) anyerror!void {
     const type_name = firstTypeWord(stripPointerText(raw_type));
+    if (ctx.polymorph_types.get(type_name)) |actual_type| {
+        try emitFormattedStructValueWithOptions(ctx, base_reg, actual_type, source_node, options, diag);
+        return;
+    }
+    if (anonymousContainerBodyText(raw_type)) |body| {
+        try emitFormattedStructBodyValue(ctx, base_reg, body, source_node, options, diag);
+        return;
+    }
     const type_node = try structTypeNodeByName(ctx, type_name) orelse {
         if (ctx.type_context_parent) |parent| {
             try emitFormattedStructValueWithOptions(parent, base_reg, raw_type, source_node, options, diag);
@@ -11407,7 +11540,10 @@ fn emitFormattedStructValueWithOptions(ctx: *GenContext, base_reg: Bytecode.Regi
         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = base_reg, .source_node = source_node });
         return;
     };
+    try emitFormattedStructBodyValue(ctx, base_reg, body, source_node, options, diag);
+}
 
+fn emitFormattedStructBodyValue(ctx: *GenContext, base_reg: Bytecode.Register, body: []const u8, source_node: NodeIndex, options: FormatStructPrintOptions, diag: Diagnostic) anyerror!void {
     try emitLiteralPrint(ctx.program, ctx.proc, "{", source_node);
     const field_count = containerFieldCount(body);
     const use_long = field_count > options.long_threshold;
