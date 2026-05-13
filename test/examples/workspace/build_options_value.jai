@@ -31,11 +31,37 @@ validate_build_options :: () -> int {
     options.import_path = import_path;
     set_build_options(options, w);
 
+    stored := get_build_options(w);
+    assert(stored.output_executable_name == "openjai_program");
+    assert(stored.output_path == "./out/test-build-options");
+    assert(stored.import_path.count == 2);
+    assert(stored.import_path[1] == "local_modules");
+
+    options.output_path = "./out/should-not-alias";
+    stored_again := get_build_options(w);
+    assert(stored_again.output_path == "./out/test-build-options");
+
+    set_optimization(*stored_again, Optimization_Type.OPTIMIZED);
+    assert(stored_again.stack_trace == false);
+    assert(stored_again.backtrace_on_crash == "OFF");
+    assert(stored_again.array_bounds_check == "OFF");
+    assert(stored_again.cast_bounds_check == "OFF");
+    assert(stored_again.null_pointer_check == "OFF");
+    assert(stored_again.enable_bytecode_inliner == true);
+
+    set_optimization(*stored_again, Optimization_Type.DEBUG, true);
+    assert(stored_again.stack_trace == true);
+    assert(stored_again.backtrace_on_crash == "ON");
+    assert(stored_again.array_bounds_check == "ON");
+    assert(stored_again.cast_bounds_check == "NONFATAL");
+    assert(stored_again.null_pointer_check == "ON");
+    assert(stored_again.enable_bytecode_inliner == false);
+
     assert(w == 3);
     assert(options.backend == "LLVM");
     assert(options.output_type == "EXECUTABLE");
     assert(options.output_executable_name == "openjai_program");
-    assert(options.output_path == "./out/test-build-options");
+    assert(options.output_path == "./out/should-not-alias");
     assert(options.stack_trace == false);
     assert(options.backtrace_on_crash == "OFF");
     assert(options.array_bounds_check == "ON");
@@ -49,7 +75,7 @@ validate_build_options :: () -> int {
     assert(option_executable_name(options) == "openjai_program");
 
     round_tripped := round_trip_options(options);
-    assert(round_tripped.output_path == "./out/test-build-options");
+    assert(round_tripped.output_path == "./out/should-not-alias");
     assert(round_tripped.import_path.count == 2);
     assert(round_tripped.import_path[1] == "local_modules");
 

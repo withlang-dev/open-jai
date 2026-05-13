@@ -1815,6 +1815,8 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 _ = c.LLVMBuildCall2(env.builder, env.proc_void_ty, env.proc_functions[inst.arg1], null, 0, "");
             },
             .load_build_options,
+            .host_set_build_options,
+            .host_set_optimization,
             .build_options_get_field,
             .build_options_set_field,
             .host_compiler_create_workspace,

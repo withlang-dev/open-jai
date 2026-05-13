@@ -151,6 +151,8 @@ pub const Opcode = enum(u8) {
     host_compiler_wait_for_message,
     message_get_field,
     load_build_options,
+    host_set_build_options,
+    host_set_optimization,
     build_options_get_field,
     build_options_set_field,
     type_info_field,

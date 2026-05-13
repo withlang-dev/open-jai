@@ -262,7 +262,7 @@ pub const VM = struct {
                 },
                 .load_int => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM load_int register out of range", .{});
-                    regs[inst.dest] = .{ .int = @intCast(inst.arg1) };
+                    regs[inst.dest] = .{ .int = @as(i64, @as(i32, @bitCast(inst.arg1))) };
                 },
                 .load_float => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM load_float register out of range", .{});
@@ -1161,6 +1161,28 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .build_options = try vm.buildOptionsForWorkspace(workspace, diag) };
                 },
+                .host_set_build_options => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM set_build_options register out of range", .{});
+                    const source_index = switch (regs[inst.arg1]) {
+                        .build_options => |v| v,
+                        else => return diag.failAt(0, "VM set_build_options requires a Build_Options value", .{}),
+                    };
+                    const workspace_arg = try registerInt(regs[inst.arg2], diag, "set_build_options workspace");
+                    const workspace = if (workspace_arg == -1) vm.hostGetCurrentWorkspace() else workspace_arg;
+                    try vm.setBuildOptionsForWorkspace(workspace, source_index, diag);
+                    regs[inst.dest] = .{ .bool = true };
+                },
+                .host_set_optimization => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM set_optimization register out of range", .{});
+                    const options_index = switch (regs[inst.arg1]) {
+                        .build_options => |v| v,
+                        else => return diag.failAt(0, "VM set_optimization requires a Build_Options value", .{}),
+                    };
+                    const mode = try vm.optimizationMode(regs[inst.arg2], diag);
+                    const keep_runtime_checks = try registerTruthy(regs[inst.arg3], diag, "set_optimization runtime-check flag");
+                    try vm.applyOptimization(options_index, mode, keep_runtime_checks, diag);
+                    regs[inst.dest] = .{ .bool = true };
+                },
                 .build_options_get_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Build_Options field access out of range", .{});
                     const index = switch (regs[inst.arg1]) {
@@ -1944,12 +1966,74 @@ pub const VM = struct {
     }
 
     fn buildOptionsForWorkspace(vm: *VM, workspace: i64, diag: Diagnostic) !usize {
-        _ = diag;
+        if (workspace <= 0) return diag.failAt(0, "VM workspace handle must be positive, got {d}", .{workspace});
         if (vm.workspace_build_options.get(workspace)) |index| return index;
         const index = vm.build_options.items.len;
         try vm.build_options.append(vm.allocator, .{});
         try vm.workspace_build_options.put(vm.allocator, workspace, index);
         return index;
+    }
+
+    fn setBuildOptionsForWorkspace(vm: *VM, workspace: i64, source_index: usize, diag: Diagnostic) !void {
+        if (workspace <= 0) return diag.failAt(0, "VM workspace handle must be positive, got {d}", .{workspace});
+        if (source_index >= vm.build_options.items.len) return diag.failAt(0, "VM set_build_options source handle out of range", .{});
+        const cloned_index = try vm.cloneBuildOptions(source_index, diag);
+        try vm.workspace_build_options.put(vm.allocator, workspace, cloned_index);
+    }
+
+    fn cloneBuildOptions(vm: *VM, source_index: usize, diag: Diagnostic) !usize {
+        if (source_index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options source handle out of range", .{});
+        var cloned = vm.build_options.items[source_index];
+        if (cloned.import_path) |array_index| cloned.import_path = try vm.cloneDynamicArray(array_index, diag);
+        if (cloned.compile_time_command_line) |array_index| cloned.compile_time_command_line = try vm.cloneDynamicArray(array_index, diag);
+        const index = vm.build_options.items.len;
+        try vm.build_options.append(vm.allocator, cloned);
+        return index;
+    }
+
+    fn cloneDynamicArray(vm: *VM, source_index: usize, diag: Diagnostic) !usize {
+        if (source_index >= vm.dynamic_arrays.items.len) return diag.failAt(0, "VM dynamic array handle out of range while cloning Build_Options", .{});
+        const source = vm.dynamic_arrays.items[source_index];
+        const header = try vm.newDynamicArray(0, source.elem_size, diag);
+        const cloned_index = vm.dynamicArrayIndexForPointer(header) orelse return diag.failAt(0, "VM dynamic array clone allocation failed", .{});
+        for (source.elems.items) |item| _ = try vm.dynamicArrayAdd(header, item, source.elem_size, diag);
+        return cloned_index;
+    }
+
+    fn optimizationMode(vm: *VM, value: RegisterValue, diag: Diagnostic) !i64 {
+        _ = vm;
+        return switch (value) {
+            .int => |mode| mode,
+            .string => |name| optimizationModeByName(name) orelse diag.failAt(0, "VM unsupported Optimization_Type value '{s}'", .{name}),
+            .bytes => |name| optimizationModeByName(name) orelse diag.failAt(0, "VM unsupported Optimization_Type value '{s}'", .{name}),
+            else => diag.failAt(0, "VM set_optimization requires an Optimization_Type value", .{}),
+        };
+    }
+
+    fn applyOptimization(vm: *VM, index: usize, mode: i64, keep_runtime_checks: bool, diag: Diagnostic) !void {
+        if (index >= vm.build_options.items.len) return diag.failAt(0, "VM set_optimization Build_Options handle out of range", .{});
+        const options = &vm.build_options.items[index];
+        switch (mode) {
+            0, 1 => {
+                options.stack_trace = true;
+                options.backtrace_on_crash = "ON";
+                options.array_bounds_check = "ON";
+                options.cast_bounds_check = "NONFATAL";
+                options.null_pointer_check = "ON";
+                options.enable_bytecode_inliner = false;
+            },
+            2, 3, 4, 5 => {
+                options.stack_trace = false;
+                options.backtrace_on_crash = "OFF";
+                if (!keep_runtime_checks) {
+                    options.array_bounds_check = "OFF";
+                    options.cast_bounds_check = "OFF";
+                    options.null_pointer_check = "OFF";
+                }
+                options.enable_bytecode_inliner = true;
+            },
+            else => return diag.failAt(0, "VM unsupported Optimization_Type value {d}", .{mode}),
+        }
     }
 
     fn buildOptionsGetField(vm: *VM, index: usize, field_name: []const u8, diag: Diagnostic) !RegisterValue {
@@ -3975,6 +4059,16 @@ fn buildOptionsEnumText(value: RegisterValue, field_name: []const u8, diag: Diag
         .int => |int_value| buildOptionsEnumTextFromInt(field_name, int_value),
         else => diag.failAt(0, "VM Build_Options.{s} requires an enum-like value", .{field_name}),
     };
+}
+
+fn optimizationModeByName(name: []const u8) ?i64 {
+    if (std.mem.eql(u8, name, "DEBUG")) return 0;
+    if (std.mem.eql(u8, name, "VERY_DEBUG")) return 1;
+    if (std.mem.eql(u8, name, "OPTIMIZED")) return 2;
+    if (std.mem.eql(u8, name, "VERY_OPTIMIZED")) return 3;
+    if (std.mem.eql(u8, name, "OPTIMIZED_SMALL")) return 4;
+    if (std.mem.eql(u8, name, "OPTIMIZED_VERY_SMALL")) return 5;
+    return null;
 }
 
 fn buildOptionsEnumTextFromInt(field_name: []const u8, value: i64) []const u8 {

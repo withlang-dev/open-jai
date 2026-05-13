@@ -3468,6 +3468,10 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = value, .source_node = expr });
                     return reg;
                 }
+                if (ast.data(expr).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "Optimization_Type")) {
+                    const value = optimizationTypeValue(field_name) orelse return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Optimization_Type value '{s}'", .{field_name});
+                    return try ctx.emitInt(expr, value);
+                }
                 if (ast.data(expr).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(expr).lhs) == .call_expr) {
                     const lhs_call = ast.data(expr).lhs;
                     const callee = ast.data(lhs_call).lhs;
@@ -5037,13 +5041,54 @@ const GenContext = struct {
             });
             return reg;
         }
-        if (std.mem.eql(u8, name, "set_build_options") or
-            std.mem.eql(u8, name, "set_build_options_dc") or
-            std.mem.eql(u8, name, "set_optimization") or
-            std.mem.eql(u8, name, "compiler_set_workspace_status"))
-        {
+        if (std.mem.eql(u8, name, "set_build_options_dc")) {
+            if (args.len > 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "set_build_options_dc expects at most one options argument", .{});
+            const options = blk: {
+                const reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_build_options, .dest = reg, .arg1 = std.math.maxInt(u32), .source_node = expr });
+                break :blk reg;
+            };
+            if (args.len == 1) {
+                const config: NodeIndex = @intCast(args[0]);
+                if (ast.tag(config) == .aggregate_literal or ast.tag(config) == .typed_aggregate_literal) {
+                    try ctx.emitBuildOptionsDeltaAssignments(options, config, expr, diag);
+                } else {
+                    const source = try ctx.genBuildOptionsArgument(config, diag);
+                    const workspace = try ctx.emitInt(expr, -1);
+                    const reg = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_set_build_options, .dest = reg, .arg1 = source, .arg2 = workspace, .source_node = expr });
+                    return reg;
+                }
+            }
+            return try ctx.emitBool(expr, true);
+        }
+        if (std.mem.eql(u8, name, "set_build_options")) {
+            if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "set_build_options expects Build_Options and optional workspace", .{});
+            const options = try ctx.genBuildOptionsArgument(@intCast(args[0]), diag);
+            const workspace = if (args.len >= 2)
+                try ctx.genExpr(@intCast(args[1]), diag)
+            else
+                try ctx.emitInt(expr, -1);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_set_build_options, .dest = reg, .arg1 = options, .arg2 = workspace, .source_node = expr });
+            return reg;
+        }
+        if (std.mem.eql(u8, name, "set_optimization")) {
+            if (args.len < 2 or args.len > 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "set_optimization expects Build_Options pointer, optimization type, and optional runtime-check flag", .{});
+            const options = try ctx.genBuildOptionsArgument(@intCast(args[0]), diag);
+            const optimization = try ctx.genExpr(@intCast(args[1]), diag);
+            const runtime_checks = if (args.len >= 3) try ctx.genExpr(@intCast(args[2]), diag) else try ctx.emitBool(expr, false);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_set_optimization, .dest = reg, .arg1 = options, .arg2 = optimization, .arg3 = runtime_checks, .source_node = expr });
+            return reg;
+        }
+        if (std.mem.eql(u8, name, "compiler_set_workspace_status")) {
             for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.emitInt(expr, 0);
+            return try ctx.emitBool(expr, true);
         }
         if (std.mem.eql(u8, name, "compiler_report")) {
             if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_report expects a message and optional Source_Code_Location", .{});
@@ -5244,6 +5289,50 @@ const GenContext = struct {
         return null;
     }
 
+    fn genBuildOptionsArgument(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const ast = ctx.ast;
+        if (arg != @import("Ast.zig").null_node and ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .star) {
+            const operand = ast.data(arg).lhs;
+            if (typeTextForExpr(ctx, operand, diag)) |ty| {
+                if (isBuildOptionsValueType(ty)) return try ctx.genExpr(operand, diag);
+            }
+        }
+        return try ctx.genExpr(arg, diag);
+    }
+
+    fn emitBuildOptionsDeltaAssignments(ctx: *GenContext, options: Bytecode.Register, aggregate: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !void {
+        const ast = ctx.ast;
+        const children: []const u32 = switch (ast.tag(aggregate)) {
+            .aggregate_literal => ast.extraSlice(ast.data(aggregate).lhs),
+            .typed_aggregate_literal => blk: {
+                const payload = ast.extraSlice(ast.data(aggregate).lhs);
+                if (payload.len < 2) return diag.failAt(ast.tokens[ast.mainToken(aggregate)].start, "malformed set_build_options_dc aggregate", .{});
+                break :blk ast.extraSlice(payload[1]);
+            },
+            else => return diag.failAt(ast.tokens[ast.mainToken(aggregate)].start, "set_build_options_dc requires a Build_Options value or named aggregate", .{}),
+        };
+        for (children) |child_idx| {
+            const child: NodeIndex = @intCast(child_idx);
+            if (ast.tag(child) != .assign_stmt or ast.tag(ast.data(child).lhs) != .identifier) {
+                return diag.failAt(ast.tokens[ast.mainToken(child)].start, "set_build_options_dc aggregate entries must be named fields", .{});
+            }
+            const raw_field_name = ast.tokenSlice(ast.mainToken(ast.data(child).lhs));
+            const field_name = if (std.mem.eql(u8, raw_field_name, "do_output")) "output_type" else raw_field_name;
+            const rhs = if (std.mem.eql(u8, raw_field_name, "do_output")) blk: {
+                const rhs_node = ast.data(child).rhs;
+                if (ast.tag(rhs_node) == .bool_literal and ast.data(rhs_node).lhs == 0) {
+                    break :blk try ctx.emitString(rhs_node, "NO_OUTPUT");
+                }
+                if (ast.tag(rhs_node) == .bool_literal and ast.data(rhs_node).lhs != 0) {
+                    break :blk try ctx.emitString(rhs_node, "EXECUTABLE");
+                }
+                return diag.failAt(ast.tokens[ast.mainToken(rhs_node)].start, "set_build_options_dc.do_output requires a bool literal", .{});
+            } else try ctx.genBuildOptionsFieldAssignmentValue(field_name, ast.data(child).rhs, diag);
+            const field_index = try ctx.program.addString(field_name);
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .build_options_set_field, .dest = options, .arg1 = options, .arg2 = field_index, .arg3 = rhs, .source_node = source_node });
+        }
+    }
+
     fn genStringBuildResult(ctx: *GenContext, name: []const u8, expr: NodeIndex, args: []const u32, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
         if (std.mem.eql(u8, name, "join")) {
@@ -5323,7 +5412,11 @@ const GenContext = struct {
     fn emitInt(ctx: *GenContext, source_node: NodeIndex, value: i64) !Bytecode.Register {
         const reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
-        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = @intCast(value), .source_node = source_node });
+        const encoded: u32 = if (value < 0)
+            @bitCast(@as(i32, @intCast(value)))
+        else
+            @intCast(value);
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = encoded, .source_node = source_node });
         return reg;
     }
 
@@ -6910,6 +7003,16 @@ fn buildOptionsLlvmFieldType(name: []const u8) ?[]const u8 {
 fn isBuildOptionsValueType(type_text: []const u8) bool {
     const first = firstTypeWord(type_text);
     return std.mem.eql(u8, first, "Build_Options") or std.mem.eql(u8, first, "Build_Options_LLVM_Options");
+}
+
+fn optimizationTypeValue(name: []const u8) ?i64 {
+    if (std.mem.eql(u8, name, "DEBUG")) return 0;
+    if (std.mem.eql(u8, name, "VERY_DEBUG")) return 1;
+    if (std.mem.eql(u8, name, "OPTIMIZED")) return 2;
+    if (std.mem.eql(u8, name, "VERY_OPTIMIZED")) return 3;
+    if (std.mem.eql(u8, name, "OPTIMIZED_SMALL")) return 4;
+    if (std.mem.eql(u8, name, "OPTIMIZED_VERY_SMALL")) return 5;
+    return null;
 }
 
 fn isCompilerMessageTypeText(raw: []const u8) bool {
