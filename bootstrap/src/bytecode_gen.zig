@@ -648,7 +648,8 @@ const GenContext = struct {
 
     fn tryInlineProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         const ast = ctx.ast;
-        if (procHasExpandModifierLocal(ast, proc_node) and !procHasReturnValue(ast, proc_node)) return null;
+        const target_is_expand = procHasExpandModifierLocal(ast, proc_node);
+        if (target_is_expand and !procHasReturnValue(ast, proc_node)) return null;
         for (ctx.inline_stack.items) |active_proc| if (active_proc == proc_node) return null;
         try ctx.inline_stack.append(ctx.program.allocator, proc_node);
         defer _ = ctx.inline_stack.pop();
@@ -756,12 +757,12 @@ const GenContext = struct {
                 return null;
             const param_type = ast.data(param).lhs;
             const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
-            const captures_syntax = std.mem.eql(u8, param_type_text, "Code") or isCallerCodeExpr(ast, source);
+            const captures_syntax = ((target_is_expand or paramNameHasDollar(ast, param)) and std.mem.eql(u8, param_type_text, "Code")) or isCallerCodeExpr(ast, source);
             const code = if (captures_syntax and !(ast.tag(source) == .meta_expr and ast.tokens[ast.mainToken(source)].tag == .directive_code))
                 ctx.nodeSource(source)
             else
                 try ctx.codeTextForMacroArg(source, &[_]MacroCodeBinding{}, diag);
-            try ctx.rememberLocalCode(param, code);
+            if (captures_syntax) try ctx.rememberLocalCode(param, code);
             const arg_reg = if (param_args[i] == @import("Ast.zig").null_node and isCallerLocationExpr(ast, source))
                 try ctx.emitSourceLocation(call_expr, call_expr, diag)
             else if (captures_syntax)
@@ -6449,6 +6450,22 @@ fn isCallerCodeExpr(ast: *const Ast, node: NodeIndex) bool {
     return node != @import("Ast.zig").null_node and
         ast.tag(node) == .meta_expr and
         ast.tokens[ast.mainToken(node)].tag == .directive_caller_code;
+}
+
+fn paramNameHasDollar(ast: *const Ast, param: NodeIndex) bool {
+    if (param == @import("Ast.zig").null_node or param >= ast.node_tags.items.len or ast.tag(param) != .var_decl) return false;
+    const token_start = ast.tokens[ast.mainToken(param)].start;
+    if (token_start == 0) return false;
+    var i = token_start;
+    while (i > 0) {
+        i -= 1;
+        switch (ast.source[i]) {
+            ' ', '\t', '\r', '\n' => continue,
+            '$' => return true,
+            else => return false,
+        }
+    }
+    return false;
 }
 
 fn stmtInitOrAssignRhs(ast: *const Ast, stmt: NodeIndex) ?NodeIndex {

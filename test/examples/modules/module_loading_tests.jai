@@ -37,3 +37,7 @@ posix_module_import_loads_real_source :: () {
 system_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/system_module_import_value.jai", "system:true true\n");
 } @TestProcedure
+
+program_print_module_import_loads_real_source_from_local_alias :: () {
+    expect_compile_output("test/examples/modules/program_print_local_alias_value.jai", "program-print:value :: 42\n");
+} @TestProcedure

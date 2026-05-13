@@ -616,7 +616,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Pool") or
                     std.mem.eql(u8, module_name, "Flat_Pool") or
                     std.mem.eql(u8, module_name, "rpmalloc") or
-                    std.mem.eql(u8, module_name, "Program_Print") or
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "TestScope") or
                     std.mem.eql(u8, module_name, "Machine_X64") or

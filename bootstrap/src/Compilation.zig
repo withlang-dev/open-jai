@@ -1164,6 +1164,58 @@ pub const Compilation = struct {
         _ = source_path;
     }
 
+    fn isTopLevelImportPosition(source: []const u8, offset: usize) bool {
+        var depth: usize = 0;
+        var i: usize = 0;
+        while (i < offset and i < source.len) {
+            const c = source[i];
+            if (c == '/' and i + 1 < offset and source[i + 1] == '/') {
+                i += 2;
+                while (i < offset and source[i] != '\n') i += 1;
+                continue;
+            }
+            if (c == '/' and i + 1 < offset and source[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < offset and !(source[i] == '*' and source[i + 1] == '/')) i += 1;
+                if (i + 1 < offset) i += 2;
+                continue;
+            }
+            if (c == '"') {
+                i += 1;
+                while (i < offset) : (i += 1) {
+                    if (source[i] == '\\') {
+                        if (i + 1 < offset) i += 1;
+                        continue;
+                    }
+                    if (source[i] == '"') {
+                        i += 1;
+                        break;
+                    }
+                }
+                continue;
+            }
+            if (c == '\'') {
+                i += 1;
+                while (i < offset) : (i += 1) {
+                    if (source[i] == '\\') {
+                        if (i + 1 < offset) i += 1;
+                        continue;
+                    }
+                    if (source[i] == '\'') {
+                        i += 1;
+                        break;
+                    }
+                }
+                continue;
+            }
+            if (c == '{') depth += 1 else if (c == '}') {
+                if (depth > 0) depth -= 1;
+            }
+            i += 1;
+        }
+        return depth == 0;
+    }
+
     fn loadSourceWithLoads(comp: *Compilation, path: []const u8) anyerror![]u8 {
         const raw_source = std.Io.Dir.cwd().readFileAlloc(comp.io, path, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
             std.debug.print("{s}: error: unable to read source file: {s}\n", .{ path, @errorName(err) });
@@ -1172,11 +1224,14 @@ pub const Compilation = struct {
         defer comp.allocator.free(raw_source);
         const source = try comp.normalizeSpacedDirectives(raw_source);
         defer comp.allocator.free(source);
+        var module_prelude = std.ArrayList(u8).empty;
+        defer module_prelude.deinit(comp.allocator);
         var out = std.ArrayList(u8).empty;
         defer out.deinit(comp.allocator);
         const dir = std.fs.path.dirname(path) orelse ".";
         var rest = source;
         while (try comp.nextDirectiveIndex(path, rest, .directive_import)) |idx| {
+            const absolute_idx = source.len - rest.len + idx;
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
             const line = rest[idx .. idx + line_end];
             const name_start = idx + "#import \"".len;
@@ -1223,7 +1278,10 @@ pub const Compilation = struct {
                 if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
                 if (comp.findModule(module_name, path)) |module_path| {
                     defer comp.allocator.free(module_path);
-                    try comp.appendLoadedModule(&out, module_path, path);
+                    if (isTopLevelImportPosition(source, absolute_idx))
+                        try comp.appendLoadedModule(&out, module_path, path)
+                    else
+                        try comp.appendLoadedModule(&module_prelude, module_path, path);
                 } else |_| {}
                 rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                 continue;
@@ -1266,7 +1324,13 @@ pub const Compilation = struct {
             rest = if (after < rest.len) rest[after + 1 ..] else rest[after..];
         }
         try out.appendSlice(comp.allocator, rest);
-        return try out.toOwnedSlice(comp.allocator);
+        if (module_prelude.items.len == 0) return try out.toOwnedSlice(comp.allocator);
+        var combined = std.ArrayList(u8).empty;
+        defer combined.deinit(comp.allocator);
+        try combined.appendSlice(comp.allocator, module_prelude.items);
+        if (combined.items.len != 0 and combined.items[combined.items.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+        try combined.appendSlice(comp.allocator, out.items);
+        return try combined.toOwnedSlice(comp.allocator);
     }
 
     fn nextDirectiveIndex(comp: *Compilation, path: []const u8, source: []const u8, tag: Tag) !?usize {
