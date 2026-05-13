@@ -604,7 +604,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putCompilerModuleSymbols(&r);
                 } else if (std.mem.eql(u8, module_name, "Input") or
                     std.mem.eql(u8, module_name, "Window_Creation") or
-                    std.mem.eql(u8, module_name, "Windows_Resources") or
                     std.mem.eql(u8, module_name, "Simp") or
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
@@ -630,8 +629,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         });
                     } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
                         try putExternalSymbols(&r, &.{ "create_window", "get_render_dimensions" });
-                    } else if (std.mem.eql(u8, module_name, "Windows_Resources")) {
-                        try putExternalSymbols(&r, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putExternalSymbols(&r, &.{
                             "get_font_at_size",  "texture_load_from_file", "gl_load",               "DrawTexturePro",  "immediate_quad",  "gl",

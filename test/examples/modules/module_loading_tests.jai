@@ -65,3 +65,7 @@ windows_module_import_loads_real_source :: () {
 machine_x64_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/machine_x64_module_import_value.jai", "machine-x64:false false\n");
 } @TestProcedure
+
+windows_resources_module_import_loads_real_source_from_local_alias :: () {
+    expect_compile_output("test/examples/modules/windows_resources_module_import_value.jai", "windows-resources:0\n");
+} @TestProcedure
