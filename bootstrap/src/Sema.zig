@@ -577,10 +577,10 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                     break :blk Type.init(InternPool.well_known.any_type);
                 }
-                if (ast.tag(decl) == .proc_decl) {
+                if (isValidNode(ast, decl) and ast.tag(decl) == .proc_decl) {
                     return try analyzeProcCall(ast, resolved, typed, decl, args, diag, node);
                 }
-                if (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).rhs) == .proc_decl) {
+                if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).rhs) and ast.tag(ast.data(decl).rhs) == .proc_decl) {
                     return try analyzeProcCall(ast, resolved, typed, ast.data(decl).rhs, args, diag, node);
                 }
             }
@@ -590,7 +590,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.any_type);
                     }
-                    if (ast.tag(decl) == .var_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).lhs) == .proc_type) {
+                    if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).lhs) and ast.tag(ast.data(decl).lhs) == .proc_type) {
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.s64_type);
                     }
@@ -1490,6 +1490,10 @@ fn internPointerType(ast: *const Ast, child: Type, diag: Diagnostic) !@import("I
     const ip = active_ip orelse return diag.failAt(0, "internal error: pointer type interning without InternPool", .{});
     _ = ast;
     return ip.internPointerType(child.index);
+}
+
+fn isValidNode(ast: *const Ast, node: NodeIndex) bool {
+    return node != @import("Ast.zig").null_node and node < ast.node_tags.items.len;
 }
 
 fn internProcType(ast: *const Ast, proc_type: NodeIndex, diag: Diagnostic) !@import("InternPool.zig").Index {
