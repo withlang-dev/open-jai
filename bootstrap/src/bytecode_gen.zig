@@ -3089,6 +3089,20 @@ const GenContext = struct {
         return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "assignment target '{s}' is unresolved", .{lhs_name});
     }
 
+    fn tryEmitPointerAggregateAssignment(ctx: *GenContext, lhs: NodeIndex, rhs_node: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        if (lhs == @import("Ast.zig").null_node or lhs >= ast.node_tags.items.len or ast.tag(lhs) != .unary_expr) return false;
+        const op = ast.tokens[ast.mainToken(lhs)].tag;
+        if (op != .shift_left and op != .dot_star) return false;
+        if (rhs_node == @import("Ast.zig").null_node or rhs_node >= ast.node_tags.items.len) return false;
+        if (ast.tag(rhs_node) != .aggregate_literal and ast.tag(rhs_node) != .typed_aggregate_literal) return false;
+        const lhs_type = typeTextForExpr(ctx, lhs, diag) orelse return false;
+        if (!try typeTextIsEmbeddedStruct(ctx, lhs_type, diag)) return false;
+        const ptr = try ctx.genExpr(ast.data(lhs).lhs, diag);
+        try ctx.emitAggregateToStruct(rhs_node, ptr, lhs_type, source_node, diag);
+        return true;
+    }
+
     fn genStmt(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !void {
         const ast = ctx.ast;
         switch (ast.tag(stmt)) {
@@ -3139,6 +3153,7 @@ const GenContext = struct {
                 if (try ctx.tryEmitAssignCompound(lhs, rhs_node, stmt, diag)) |_| return;
                 if (try ctx.tryEmitSelfBinaryAssignment(lhs, rhs_node, stmt, diag)) |_| return;
                 if (try ctx.tryEmitStaticArrayLiteralAssignment(lhs, rhs_node, stmt, diag)) return;
+                if (try ctx.tryEmitPointerAggregateAssignment(lhs, rhs_node, stmt, diag)) return;
                 if (ast.tag(lhs) == .field_access) {
                     if (typeTextForExpr(ctx, ast.data(lhs).lhs, diag)) |base_text| {
                         if (isBuildOptionsValueType(base_text)) {
@@ -4372,6 +4387,10 @@ const GenContext = struct {
                 if (op == .shift_left or op == .dot_star) {
                     if (typeTextForExpr(ctx, operand, diag)) |operand_ty| {
                         if (isCompilerMessageTypeText(operand_ty)) return operand_reg;
+                        if (std.mem.startsWith(u8, std.mem.trim(u8, operand_ty, " \t\r\n"), "*")) {
+                            const pointee_type = std.mem.trim(u8, stripPointerText(operand_ty), " \t\r\n");
+                            if (try typeTextIsEmbeddedStruct(ctx, pointee_type, diag)) return operand_reg;
+                        }
                     }
                     const operand_source_is_pointer = if (typeTextForExpr(ctx, operand, diag)) |operand_ty|
                         std.mem.startsWith(u8, std.mem.trim(u8, operand_ty, " \t\r\n"), "*")
@@ -8022,6 +8041,11 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             }
             return addr;
         },
+        .unary_expr => {
+            const op = ast.tokens[ast.mainToken(expr)].tag;
+            if (op == .shift_left or op == .dot_star) return try ctx.genExpr(ast.data(expr).lhs, diag);
+            return ctx.genTypedPlaceholderValue(expr, diag);
+        },
         .field_access => {
             const base = ast.data(expr).lhs;
             const base_reg = try ctx.genExpr(base, diag);
@@ -8372,7 +8396,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 const target_ty: NodeIndex = @intCast(ast.data(expr).rhs & 0x7fffffff);
                 if (target_ty != @import("Ast.zig").null_node and target_ty < ast.node_tags.items.len) return ctx.nodeSource(target_ty);
             }
-            if (op == .star) {
+            if (op == .star or op == .shift_left or op == .dot_star) {
                 const operand_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
                 return std.mem.trim(u8, stripPointerText(operand_ty), " \t\r\n");
             }
@@ -10857,6 +10881,10 @@ fn emitFormatStructPrintArg(ctx: *GenContext, arg_node: NodeIndex, diag: Diagnos
 fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, quote_strings: bool, diag: Diagnostic) anyerror!void {
     const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
     if (std.mem.eql(u8, firstTypeWord(clean_type), "Build_Options") or std.mem.eql(u8, firstTypeWord(clean_type), "Build_Options_LLVM_Options")) {
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+        return;
+    }
+    if (isCompilerMessageTypeText(clean_type)) {
         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
         return;
     }
