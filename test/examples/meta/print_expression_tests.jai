@@ -20,6 +20,10 @@ code_node_type_reflects_expression_types :: () {
     expect_compile_output("test/examples/meta/code_node_type_value.jai", "expression count: 10\nformat type: string\nvalue type: int\nlhs type: int\nrhs type: int\ncomparison type: bool\nlogical type: bool\n");
 } @TestProcedure
 
+expression_form_run_code_node_is_materialized :: () {
+    expect_compile_output("test/examples/meta/code_node_run_value.jai", "root:ROOT flags:0 type:\n");
+} @TestProcedure
+
 code_declaration_nodes_expose_name_and_type :: () {
     expect_compile_output("test/examples/meta/code_declaration_type_value.jai", "explicit root kind: ROOT\nexplicit decl name: answer\nexplicit decl type: int\nexplicit expr kind: LITERAL\nexplicit expr value: 42\ninferred root kind: ROOT\ninferred decl name: greeting\ninferred decl type: string\ninferred expr kind: LITERAL\ninferred expr value: hello\n");
 } @TestProcedure

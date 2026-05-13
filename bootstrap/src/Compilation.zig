@@ -27,6 +27,9 @@ pub const Compilation = struct {
     options: Options,
     owned_run_result_strings: std.ArrayList([]const u8) = .empty,
     owned_run_result_bytes: std.ArrayList([]const u8) = .empty,
+    owned_run_result_code_node_arrays: std.ArrayList([]const vm_mod.CodeNode) = .empty,
+    owned_run_result_code_note_arrays: std.ArrayList([]const vm_mod.CodeNote) = .empty,
+    owned_run_result_code_arg_arrays: std.ArrayList([]const vm_mod.CodeArgument) = .empty,
     pending_current_workspace_sources: std.ArrayList([]const u8) = .empty,
     workspace_sources: std.ArrayList(vm_mod.WorkspaceSourceSnapshot) = .empty,
     workspace_build_options: std.AutoHashMapUnmanaged(i64, vm_mod.BuildOptionsSnapshot) = .empty,
@@ -183,6 +186,15 @@ pub const Compilation = struct {
             for (comp.owned_run_result_bytes.items) |value| comp.allocator.free(value);
             comp.owned_run_result_bytes.deinit(comp.allocator);
             comp.owned_run_result_bytes = .empty;
+            for (comp.owned_run_result_code_node_arrays.items) |value| comp.allocator.free(value);
+            comp.owned_run_result_code_node_arrays.deinit(comp.allocator);
+            comp.owned_run_result_code_node_arrays = .empty;
+            for (comp.owned_run_result_code_note_arrays.items) |value| comp.allocator.free(value);
+            comp.owned_run_result_code_note_arrays.deinit(comp.allocator);
+            comp.owned_run_result_code_note_arrays = .empty;
+            for (comp.owned_run_result_code_arg_arrays.items) |value| comp.allocator.free(value);
+            comp.owned_run_result_code_arg_arrays.deinit(comp.allocator);
+            comp.owned_run_result_code_arg_arrays = .empty;
             for (comp.pending_current_workspace_sources.items) |value| comp.allocator.free(value);
             comp.pending_current_workspace_sources.deinit(comp.allocator);
             comp.pending_current_workspace_sources = .empty;
@@ -311,6 +323,30 @@ pub const Compilation = struct {
             .bytes => |bytes_value| {
                 try typed.putComptimeBytes(value_node, bytes_value);
                 try typed.putComptimeBytes(decl_node, bytes_value);
+            },
+            .code_node => |node_value| {
+                try typed.putComptimeCodeNode(value_node, node_value);
+                try typed.putComptimeCodeNode(decl_node, node_value);
+            },
+            .code_nodes => |nodes| {
+                try typed.putComptimeCodeNodeArray(value_node, nodes);
+                try typed.putComptimeCodeNodeArray(decl_node, nodes);
+            },
+            .code_note => |note| {
+                try typed.putComptimeCodeNote(value_node, note);
+                try typed.putComptimeCodeNote(decl_node, note);
+            },
+            .code_notes => |notes| {
+                try typed.putComptimeCodeNoteArray(value_node, notes);
+                try typed.putComptimeCodeNoteArray(decl_node, notes);
+            },
+            .code_arg => |arg| {
+                try typed.putComptimeCodeArgument(value_node, arg);
+                try typed.putComptimeCodeArgument(decl_node, arg);
+            },
+            .code_args => |args| {
+                try typed.putComptimeCodeArgumentArray(value_node, args);
+                try typed.putComptimeCodeArgumentArray(decl_node, args);
             },
             .code => |code_value| {
                 try typed.putComptimeString(value_node, code_value.text);
@@ -470,7 +506,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_type_info_members.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_build_llvm_options.contains(node) or typed.comptime_messages.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_type_info_members.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_code_nodes.contains(node) or typed.comptime_code_node_arrays.contains(node) or typed.comptime_code_notes.contains(node) or typed.comptime_code_note_arrays.contains(node) or typed.comptime_code_args.contains(node) or typed.comptime_code_arg_arrays.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_build_llvm_options.contains(node) or typed.comptime_messages.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -479,6 +515,12 @@ pub const Compilation = struct {
                     .string => |string_value| try typed.putComptimeString(node, string_value),
                     .type_text => |type_text| try typed.putComptimeTypeText(node, type_text),
                     .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
+                    .code_node => |code_node| try typed.putComptimeCodeNode(node, code_node),
+                    .code_nodes => |code_nodes| try typed.putComptimeCodeNodeArray(node, code_nodes),
+                    .code_note => |code_note| try typed.putComptimeCodeNote(node, code_note),
+                    .code_notes => |code_notes| try typed.putComptimeCodeNoteArray(node, code_notes),
+                    .code_arg => |code_arg| try typed.putComptimeCodeArgument(node, code_arg),
+                    .code_args => |code_args| try typed.putComptimeCodeArgumentArray(node, code_args),
                     .code => |code_value| try typed.putComptimeString(node, code_value.text),
                     .source_location => |loc| try typed.putComptimeSourceLocation(node, .{
                         .fully_pathed_filename = loc.fully_pathed_filename,
@@ -937,6 +979,12 @@ pub const Compilation = struct {
             .string => |v| std.debug.print("{s}", .{v}),
             .bytes => |v| std.debug.print("{s}", .{v}),
             .code => |v| std.debug.print("{s}", .{v.text}),
+            .code_node => |v| std.debug.print("{s}", .{v.text}),
+            .code_nodes => |v| std.debug.print("{d} Code_Node values", .{v.len}),
+            .code_note => |v| std.debug.print("@{s}", .{v.text}),
+            .code_notes => |v| std.debug.print("{d} Code_Note values", .{v.len}),
+            .code_arg => std.debug.print("Code_Argument", .{}),
+            .code_args => |v| std.debug.print("{d} Code_Argument values", .{v.len}),
             .source_location => |v| std.debug.print("{s}:{d}", .{ v.fully_pathed_filename, v.line_number }),
             .calendar => |v| std.debug.print("{d}-{d}-{d} {d}:{d}:{d}.{d}", .{ v.year, v.month_starting_at_0 + 1, v.day_of_month_starting_at_0 + 1, v.hour, v.minute, v.second, v.millisecond }),
             .build_options => |v| std.debug.print("{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; }}", .{ v.output_type, v.backend, v.output_executable_name, v.output_path }),
@@ -1015,6 +1063,12 @@ pub const Compilation = struct {
                 const owned_path = try comp.ownRunString(code_value.path);
                 break :blk .{ .code = .{ .text = owned_text, .path = owned_path, .line_number = code_value.line_number } };
             },
+            .code_node => |node| .{ .code_node = try comp.ownCodeNode(node) },
+            .code_nodes => |nodes| .{ .code_nodes = try comp.ownCodeNodes(nodes) },
+            .code_note => |note| .{ .code_note = try comp.ownCodeNote(note) },
+            .code_notes => |notes| .{ .code_notes = try comp.ownCodeNotes(notes) },
+            .code_arg => |arg| .{ .code_arg = arg },
+            .code_args => |args| .{ .code_args = try comp.ownCodeArgs(args) },
             .type_text => |type_text| blk: {
                 const owned = try comp.ownRunString(type_text);
                 break :blk .{ .type_text = owned };
@@ -1043,9 +1097,50 @@ pub const Compilation = struct {
         };
     }
 
+    fn ownCodeNode(comp: *Compilation, node: vm_mod.CodeNode) !vm_mod.CodeNode {
+        var owned = node;
+        owned.kind = try comp.ownRunString(node.kind);
+        owned.flags = try comp.ownRunString(node.flags);
+        owned.text = try comp.ownRunString(node.text);
+        owned.name = try comp.ownRunString(node.name);
+        owned.path = try comp.ownRunString(node.path);
+        owned.type_text = try comp.ownRunString(node.type_text);
+        if (node.string_value) |value| owned.string_value = try comp.ownRunString(value);
+        return owned;
+    }
+
+    fn ownCodeNodes(comp: *Compilation, nodes: []const vm_mod.CodeNode) ![]const vm_mod.CodeNode {
+        const owned = try comp.allocator.alloc(vm_mod.CodeNode, nodes.len);
+        errdefer comp.allocator.free(owned);
+        for (nodes, 0..) |node, i| owned[i] = try comp.ownCodeNode(node);
+        try comp.owned_run_result_code_node_arrays.append(comp.allocator, owned);
+        return owned;
+    }
+
+    fn ownCodeNote(comp: *Compilation, note: vm_mod.CodeNote) !vm_mod.CodeNote {
+        return .{ .text = try comp.ownRunString(note.text) };
+    }
+
+    fn ownCodeNotes(comp: *Compilation, notes: []const vm_mod.CodeNote) ![]const vm_mod.CodeNote {
+        const owned = try comp.allocator.alloc(vm_mod.CodeNote, notes.len);
+        errdefer comp.allocator.free(owned);
+        for (notes, 0..) |note, i| owned[i] = try comp.ownCodeNote(note);
+        try comp.owned_run_result_code_note_arrays.append(comp.allocator, owned);
+        return owned;
+    }
+
+    fn ownCodeArgs(comp: *Compilation, args: []const vm_mod.CodeArgument) ![]const vm_mod.CodeArgument {
+        const owned = try comp.allocator.alloc(vm_mod.CodeArgument, args.len);
+        errdefer comp.allocator.free(owned);
+        @memcpy(owned, args);
+        try comp.owned_run_result_code_arg_arrays.append(comp.allocator, owned);
+        return owned;
+    }
+
     fn executeRunHostArg(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, arg: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
         if (ast.tag(arg) == .field_access and ast.data(arg).lhs == @import("Ast.zig").null_node) return .{ .int = 0 };
         if (ast.tag(arg) == .field_access) {
+            if (try comp.executeCodeNodeSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeBuildOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeBuildLlvmOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeMessageSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
@@ -1059,6 +1154,12 @@ pub const Compilation = struct {
         if (typed.comptime_type_texts.get(arg)) |value| return .{ .type_text = value };
         if (typed.comptime_type_info_members.get(arg)) |value| return .{ .type_info_member = typeInfoMemberSemaToVm(value) };
         if (typed.comptime_bytes.get(arg)) |value| return .{ .bytes = value };
+        if (typed.comptime_code_nodes.get(arg)) |value| return .{ .code_node = value };
+        if (typed.comptime_code_node_arrays.get(arg)) |value| return .{ .code_nodes = value };
+        if (typed.comptime_code_notes.get(arg)) |value| return .{ .code_note = value };
+        if (typed.comptime_code_note_arrays.get(arg)) |value| return .{ .code_notes = value };
+        if (typed.comptime_code_args.get(arg)) |value| return .{ .code_arg = value };
+        if (typed.comptime_code_arg_arrays.get(arg)) |value| return .{ .code_args = value };
         if (typed.comptime_source_locations.get(arg)) |value| return .{ .source_location = .{
             .fully_pathed_filename = value.fully_pathed_filename,
             .line_number = value.line_number,
@@ -1096,6 +1197,12 @@ pub const Compilation = struct {
                     if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
                     if (typed.comptime_type_info_members.get(decl)) |value| break :blk .{ .type_info_member = typeInfoMemberSemaToVm(value) };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
+                    if (typed.comptime_code_nodes.get(decl)) |value| break :blk .{ .code_node = value };
+                    if (typed.comptime_code_node_arrays.get(decl)) |value| break :blk .{ .code_nodes = value };
+                    if (typed.comptime_code_notes.get(decl)) |value| break :blk .{ .code_note = value };
+                    if (typed.comptime_code_note_arrays.get(decl)) |value| break :blk .{ .code_notes = value };
+                    if (typed.comptime_code_args.get(decl)) |value| break :blk .{ .code_arg = value };
+                    if (typed.comptime_code_arg_arrays.get(decl)) |value| break :blk .{ .code_args = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
                         .line_number = value.line_number,
@@ -1152,6 +1259,28 @@ pub const Compilation = struct {
             .output_bitcode = options.llvm_output_bitcode,
             .output_llvm_ir = options.llvm_output_ir,
         } };
+        return null;
+    }
+
+    fn executeCodeNodeSnapshotField(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, base: @import("Ast.zig").NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        _ = comp;
+        const node = typed.comptime_code_nodes.get(base) orelse blk: {
+            if (base == @import("Ast.zig").null_node or ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = resolved.local_values.get(base) orelse lookup_decl: {
+                if (resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node_decl| break :lookup_decl node_decl,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_code_nodes.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "kind")) return .{ .string = node.kind };
+        if (std.mem.eql(u8, field_name, "node_flags")) return .{ .string = node.flags };
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = node.name };
+        if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = node.type_text };
         return null;
     }
 

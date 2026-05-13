@@ -30,6 +30,12 @@ pub const Typed = struct {
     owned_type_info_member_strings: std.ArrayList([]const u8) = .empty,
     comptime_bytes: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
+    comptime_code_nodes: std.AutoHashMapUnmanaged(NodeIndex, CodeNodeValue) = .empty,
+    comptime_code_node_arrays: std.AutoHashMapUnmanaged(NodeIndex, []const CodeNodeValue) = .empty,
+    comptime_code_notes: std.AutoHashMapUnmanaged(NodeIndex, CodeNoteValue) = .empty,
+    comptime_code_note_arrays: std.AutoHashMapUnmanaged(NodeIndex, []const CodeNoteValue) = .empty,
+    comptime_code_args: std.AutoHashMapUnmanaged(NodeIndex, CodeArgumentValue) = .empty,
+    comptime_code_arg_arrays: std.AutoHashMapUnmanaged(NodeIndex, []const CodeArgumentValue) = .empty,
     comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
     owned_source_location_paths: std.ArrayList([]const u8) = .empty,
     comptime_calendars: std.AutoHashMapUnmanaged(NodeIndex, CalendarValue) = .empty,
@@ -58,6 +64,12 @@ pub const Typed = struct {
         t.comptime_bytes.deinit(t.allocator);
         for (t.owned_comptime_bytes.items) |value| t.allocator.free(value);
         t.owned_comptime_bytes.deinit(t.allocator);
+        t.comptime_code_nodes.deinit(t.allocator);
+        t.comptime_code_node_arrays.deinit(t.allocator);
+        t.comptime_code_notes.deinit(t.allocator);
+        t.comptime_code_note_arrays.deinit(t.allocator);
+        t.comptime_code_args.deinit(t.allocator);
+        t.comptime_code_arg_arrays.deinit(t.allocator);
         t.comptime_source_locations.deinit(t.allocator);
         for (t.owned_source_location_paths.items) |value| t.allocator.free(value);
         t.owned_source_location_paths.deinit(t.allocator);
@@ -102,6 +114,30 @@ pub const Typed = struct {
         owned.name = try t.ownTypeInfoMemberString(value.name);
         owned.type_name = try t.ownTypeInfoMemberString(value.type_name);
         try t.comptime_type_info_members.put(t.allocator, node, owned);
+    }
+
+    pub fn putComptimeCodeNode(t: *Typed, node: NodeIndex, value: CodeNodeValue) !void {
+        try t.comptime_code_nodes.put(t.allocator, node, value);
+    }
+
+    pub fn putComptimeCodeNodeArray(t: *Typed, node: NodeIndex, value: []const CodeNodeValue) !void {
+        try t.comptime_code_node_arrays.put(t.allocator, node, value);
+    }
+
+    pub fn putComptimeCodeNote(t: *Typed, node: NodeIndex, value: CodeNoteValue) !void {
+        try t.comptime_code_notes.put(t.allocator, node, value);
+    }
+
+    pub fn putComptimeCodeNoteArray(t: *Typed, node: NodeIndex, value: []const CodeNoteValue) !void {
+        try t.comptime_code_note_arrays.put(t.allocator, node, value);
+    }
+
+    pub fn putComptimeCodeArgument(t: *Typed, node: NodeIndex, value: CodeArgumentValue) !void {
+        try t.comptime_code_args.put(t.allocator, node, value);
+    }
+
+    pub fn putComptimeCodeArgumentArray(t: *Typed, node: NodeIndex, value: []const CodeArgumentValue) !void {
+        try t.comptime_code_arg_arrays.put(t.allocator, node, value);
     }
 
     fn ownTypeInfoMemberString(t: *Typed, value: []const u8) ![]const u8 {
@@ -180,6 +216,10 @@ pub const TypeInfoMemberValue = struct {
     type_name: []const u8,
     flags: i64 = 0,
 };
+
+pub const CodeNodeValue = @import("vm.zig").CodeNode;
+pub const CodeNoteValue = @import("vm.zig").CodeNote;
+pub const CodeArgumentValue = @import("vm.zig").CodeArgument;
 
 pub const CalendarValue = struct {
     year: i64,

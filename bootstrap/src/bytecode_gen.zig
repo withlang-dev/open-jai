@@ -1474,6 +1474,12 @@ const GenContext = struct {
             if (typed.comptime_type_texts.get(expr)) |value| return .{ .type_text = value };
             if (ctx.comptimeTypeInfoMemberForExpr(expr)) |value| return .{ .type_info_member = typeInfoMemberSemaToVm(value) };
             if (typed.comptime_bytes.get(expr)) |value| return .{ .bytes = value };
+            if (typed.comptime_code_nodes.get(expr)) |value| return .{ .code_node = value };
+            if (typed.comptime_code_node_arrays.get(expr)) |value| return .{ .code_nodes = value };
+            if (typed.comptime_code_notes.get(expr)) |value| return .{ .code_note = value };
+            if (typed.comptime_code_note_arrays.get(expr)) |value| return .{ .code_notes = value };
+            if (typed.comptime_code_args.get(expr)) |value| return .{ .code_arg = value };
+            if (typed.comptime_code_arg_arrays.get(expr)) |value| return .{ .code_args = value };
             if (typed.comptime_source_locations.get(expr)) |value| return .{ .source_location = .{
                 .fully_pathed_filename = value.fully_pathed_filename,
                 .line_number = value.line_number,
@@ -1512,6 +1518,7 @@ const GenContext = struct {
                         }
                     }
                 }
+                if (try ctx.executeCodeNodeSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 if (try ctx.executeBuildOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 if (try ctx.executeBuildLlvmOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 if (try ctx.executeMessageSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
@@ -1544,6 +1551,12 @@ const GenContext = struct {
                     if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
                     if (ctx.comptimeTypeInfoMemberForExpr(decl)) |value| break :blk .{ .type_info_member = typeInfoMemberSemaToVm(value) };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
+                    if (typed.comptime_code_nodes.get(decl)) |value| break :blk .{ .code_node = value };
+                    if (typed.comptime_code_node_arrays.get(decl)) |value| break :blk .{ .code_nodes = value };
+                    if (typed.comptime_code_notes.get(decl)) |value| break :blk .{ .code_note = value };
+                    if (typed.comptime_code_note_arrays.get(decl)) |value| break :blk .{ .code_notes = value };
+                    if (typed.comptime_code_args.get(decl)) |value| break :blk .{ .code_arg = value };
+                    if (typed.comptime_code_arg_arrays.get(decl)) |value| break :blk .{ .code_args = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
                         .line_number = value.line_number,
@@ -1598,6 +1611,29 @@ const GenContext = struct {
             .output_bitcode = options.llvm_output_bitcode,
             .output_llvm_ir = options.llvm_output_ir,
         } };
+        return null;
+    }
+
+    fn executeCodeNodeSnapshotField(ctx: *GenContext, base: NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        const typed = ctx.typed orelse return null;
+        const ast = ctx.ast;
+        const node = typed.comptime_code_nodes.get(base) orelse blk: {
+            if (base == @import("Ast.zig").null_node or ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = ctx.resolved.local_values.get(base) orelse lookup_decl: {
+                if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node_decl| break :lookup_decl node_decl,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_code_nodes.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "kind")) return .{ .string = node.kind };
+        if (std.mem.eql(u8, field_name, "node_flags")) return .{ .string = node.flags };
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = node.name };
+        if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = node.type_text };
         return null;
     }
 
@@ -3125,7 +3161,7 @@ const GenContext = struct {
                         try ctx.rememberLocalCode(stmt, try ctx.codeTextForMacroArg(init, &[_]MacroCodeBinding{}, diag));
                     }
                     if (ctx.typed) |typed| {
-                        if (typed.comptime_type_texts.contains(stmt) or typed.comptime_type_texts.contains(init) or typed.comptime_type_info_members.contains(stmt) or typed.comptime_type_info_members.contains(init) or typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_build_llvm_options.contains(stmt) or typed.comptime_build_llvm_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init)) {
+                        if (typed.comptime_type_texts.contains(stmt) or typed.comptime_type_texts.contains(init) or typed.comptime_type_info_members.contains(stmt) or typed.comptime_type_info_members.contains(init) or typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_build_llvm_options.contains(stmt) or typed.comptime_build_llvm_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init) or typed.comptime_code_nodes.contains(stmt) or typed.comptime_code_nodes.contains(init) or typed.comptime_code_node_arrays.contains(stmt) or typed.comptime_code_node_arrays.contains(init) or typed.comptime_code_notes.contains(stmt) or typed.comptime_code_notes.contains(init) or typed.comptime_code_note_arrays.contains(stmt) or typed.comptime_code_note_arrays.contains(init) or typed.comptime_code_args.contains(stmt) or typed.comptime_code_args.contains(init) or typed.comptime_code_arg_arrays.contains(stmt) or typed.comptime_code_arg_arrays.contains(init)) {
                             return;
                         }
                     }
@@ -4044,6 +4080,24 @@ const GenContext = struct {
                     if (typed.comptime_messages.get(expr)) |_| {
                         return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Message #run values are compile-time only; access their fields during #run", .{});
                     }
+                    if (typed.comptime_code_nodes.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Node #run values are compile-time only; access their fields during #run", .{});
+                    }
+                    if (typed.comptime_code_node_arrays.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Node #run values are compile-time only; index them during #run", .{});
+                    }
+                    if (typed.comptime_code_notes.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Note #run values are compile-time only; access their fields during #run", .{});
+                    }
+                    if (typed.comptime_code_note_arrays.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Note #run values are compile-time only; index them during #run", .{});
+                    }
+                    if (typed.comptime_code_args.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Argument #run values are compile-time only; access their fields during #run", .{});
+                    }
+                    if (typed.comptime_code_arg_arrays.get(expr)) |_| {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Argument #run values are compile-time only; index them during #run", .{});
+                    }
                 }
                 const value = try ctx.executeRunValue(expr, &[_]MacroCodeBinding{}, diag);
                 switch (value) {
@@ -4076,6 +4130,12 @@ const GenContext = struct {
                     .build_options => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options #run values are compile-time only; access their fields during #run", .{}),
                     .build_llvm_options => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options_LLVM_Options #run values are compile-time only; access their fields during #run", .{}),
                     .message => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Message #run values are compile-time only; access their fields during #run", .{}),
+                    .code_node => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Node #run values are compile-time only; access their fields during #run", .{}),
+                    .code_nodes => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Node #run values are compile-time only; index them during #run", .{}),
+                    .code_note => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Note #run values are compile-time only; access their fields during #run", .{}),
+                    .code_notes => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Note #run values are compile-time only; index them during #run", .{}),
+                    .code_arg => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Argument #run values are compile-time only; access their fields during #run", .{}),
+                    .code_args => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "[] Code_Argument #run values are compile-time only; index them during #run", .{}),
                     .type_info_member => |member| {
                         if (!ctx.compile_time_host) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Type_Info_Struct_Member #run values are compile-time only; access their fields during #run", .{});
                         return try ctx.emitTypeInfoMemberValue(expr, .{ .name = member.name, .type_name = member.type_name, .flags = member.flags });
@@ -4546,6 +4606,12 @@ const GenContext = struct {
                         if (!std.mem.eql(u8, field_name, "low")) return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Apollo_Time field '{s}'", .{field_name});
                         return try ctx.genExpr(lhs_call, diag);
                     }
+                }
+                if (try ctx.executeCodeNodeSnapshotField(ast.data(expr).lhs, field_name)) |value| {
+                    if (!ctx.compile_time_host) {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Code_Node fields from #run values are compile-time only", .{});
+                    }
+                    return try ctx.emitCompileTimeValue(expr, value, diag);
                 }
                 if (try ctx.executeBuildOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| {
                     if (!ctx.compile_time_host) {
@@ -6727,6 +6793,12 @@ const GenContext = struct {
             .build_options => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Build_Options values are compile-time only; access their fields during #run", .{}),
             .build_llvm_options => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Build_Options_LLVM_Options values are compile-time only; access their fields during #run", .{}),
             .message => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Message values are compile-time only; access their fields during #run", .{}),
+            .code_node => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code_Node values are compile-time only; access their fields during #run", .{}),
+            .code_nodes => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "[] Code_Node values are compile-time only; index them during #run", .{}),
+            .code_note => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code_Note values are compile-time only; access their fields during #run", .{}),
+            .code_notes => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "[] Code_Note values are compile-time only; index them during #run", .{}),
+            .code_arg => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Code_Argument values are compile-time only; access their fields during #run", .{}),
+            .code_args => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "[] Code_Argument values are compile-time only; index them during #run", .{}),
         };
     }
 
@@ -7882,6 +7954,22 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
         if (typed.comptime_build_options.contains(expr)) return "Build_Options";
         if (typed.comptime_build_llvm_options.contains(expr)) return "Build_Options_LLVM_Options";
         if (typed.comptime_messages.contains(expr)) return "Message";
+        if (typed.comptime_code_nodes.contains(expr)) return "Code_Node";
+        if (typed.comptime_code_node_arrays.contains(expr)) return "[] Code_Node";
+        if (typed.comptime_code_notes.contains(expr)) return "Code_Note";
+        if (typed.comptime_code_note_arrays.contains(expr)) return "[] Code_Note";
+        if (typed.comptime_code_args.contains(expr)) return "Code_Argument";
+        if (typed.comptime_code_arg_arrays.contains(expr)) return "[] Code_Argument";
+        if (ast.tag(expr) == .identifier) {
+            if (ctx.resolved.local_values.get(expr)) |decl| {
+                if (typed.comptime_code_nodes.contains(decl)) return "Code_Node";
+                if (typed.comptime_code_node_arrays.contains(decl)) return "[] Code_Node";
+                if (typed.comptime_code_notes.contains(decl)) return "Code_Note";
+                if (typed.comptime_code_note_arrays.contains(decl)) return "[] Code_Note";
+                if (typed.comptime_code_args.contains(decl)) return "Code_Argument";
+                if (typed.comptime_code_arg_arrays.contains(decl)) return "[] Code_Argument";
+            }
+        }
     }
     switch (ast.tag(expr)) {
         .string_literal => return "string",

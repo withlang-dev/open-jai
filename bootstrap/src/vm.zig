@@ -22,6 +22,12 @@ pub const Value = union(enum) {
     string: []const u8,
     bytes: []const u8,
     code: CodeValue,
+    code_node: CodeNode,
+    code_nodes: []const CodeNode,
+    code_note: CodeNote,
+    code_notes: []const CodeNote,
+    code_arg: CodeArgument,
+    code_args: []const CodeArgument,
     type_info_member: TypeInfoMemberValue,
     source_location: SourceLocation,
     calendar: CalendarValue,
@@ -41,7 +47,7 @@ const allocator_proc_pool: u32 = 2;
 const allocator_proc_flat_pool: u32 = 3;
 const allocator_proc_rpmalloc: u32 = 4;
 
-const CodeNode = struct {
+pub const CodeNode = struct {
     tree: u32 = std.math.maxInt(u32),
     index: u32 = std.math.maxInt(u32),
     kind: []const u8,
@@ -64,12 +70,12 @@ const CodeNode = struct {
     expression_index: ?u32 = null,
 };
 
-const CodeArgument = struct {
+pub const CodeArgument = struct {
     tree: u32 = std.math.maxInt(u32),
     expression_index: u32 = std.math.maxInt(u32),
 };
 
-const CodeNote = struct {
+pub const CodeNote = struct {
     text: []const u8,
 };
 
@@ -5041,7 +5047,12 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .type_id => |v| .{ .type_text = typeName(v) },
         .type_text => |v| .{ .type_text = v },
         .type_info_member => |v| .{ .type_info_member = typeInfoMemberValue(v) },
-        .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
+        .code_node => |v| .{ .code_node = v },
+        .code_nodes => |v| .{ .code_nodes = v },
+        .code_note => |v| .{ .code_note = v },
+        .code_notes => |v| .{ .code_notes = v },
+        .code_arg => |v| .{ .code_arg = v },
+        .code_args => |v| .{ .code_args = v },
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
@@ -5066,7 +5077,12 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
         .type_info_member => |v| .{ .type_info_member = typeInfoMemberValue(v) },
         .tuple => diag.failAt(0, "expression-form #run cannot materialize undestructured multi-return values", .{}),
-        .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
+        .code_node => |v| .{ .code_node = v },
+        .code_nodes => |v| .{ .code_nodes = v },
+        .code_note => |v| .{ .code_note = v },
+        .code_notes => |v| .{ .code_notes = v },
+        .code_arg => |v| .{ .code_arg = v },
+        .code_args => |v| .{ .code_args = v },
         .message => |v| .{ .message = try vm.messageSnapshot(vm.allocator, v, diag) },
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
@@ -5083,6 +5099,12 @@ fn registerValueFromValue(vm: *VM, value: Value, diag: Diagnostic) !RegisterValu
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
         .code => |v| .{ .code = v },
+        .code_node => |v| .{ .code_node = v },
+        .code_nodes => |v| .{ .code_nodes = v },
+        .code_note => |v| .{ .code_note = v },
+        .code_notes => |v| .{ .code_notes = v },
+        .code_arg => |v| .{ .code_arg = v },
+        .code_args => |v| .{ .code_args = v },
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
         .message => |v| .{ .message = try vm.messageFromSnapshot(v) },
