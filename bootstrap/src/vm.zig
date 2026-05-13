@@ -1475,12 +1475,6 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM get_path_of_running_executable register out of range", .{});
                     regs[inst.dest] = .{ .string = try vm.hostGetExecutablePath(diag) };
                 },
-                .host_copy_file => {
-                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM copy_file register out of range", .{});
-                    const src = try vm.registerText(regs[inst.arg1], diag, "copy_file source");
-                    const dest = try vm.registerText(regs[inst.arg2], diag, "copy_file destination");
-                    regs[inst.dest] = .{ .bool = try vm.hostCopyFile(src, dest, diag) };
-                },
                 .host_run_command => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM run_command register out of range", .{});
                     const command = try vm.registerText(regs[inst.arg1], diag, "run_command command");
@@ -2301,23 +2295,6 @@ pub const VM = struct {
         errdefer vm.allocator.free(result);
         try vm.rendered_code_strings.append(vm.allocator, result);
         return result;
-    }
-
-    fn hostCopyFile(vm: *VM, src: []const u8, dest: []const u8, diag: Diagnostic) !bool {
-        const io = try vm.requireIo(diag, "copy_file");
-        const full_src = try vm.resolvedHostPath(src);
-        defer vm.allocator.free(full_src);
-        const full_dest = try vm.resolvedHostPath(dest);
-        defer vm.allocator.free(full_dest);
-        const contents = std.Io.Dir.cwd().readFileAlloc(io, full_src, vm.allocator, .limited(256 * 1024 * 1024)) catch |err| {
-            return diag.failAt(0, "VM copy_file failed reading '{s}': {s}", .{ full_src, @errorName(err) });
-        };
-        defer vm.allocator.free(contents);
-        try vm.ensureHostParentDir(io, full_dest);
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = full_dest, .data = contents }) catch |err| {
-            return diag.failAt(0, "VM copy_file failed writing '{s}': {s}", .{ full_dest, @errorName(err) });
-        };
-        return true;
     }
 
     fn hostRunCommand(vm: *VM, command: []const u8, diag: Diagnostic) !i64 {

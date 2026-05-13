@@ -146,7 +146,6 @@ pub const Opcode = enum(u8) {
     get_path_of_running_executable,
     host_run_command,
     host_run_command_capture,
-    host_copy_file,
     host_build_cpp_dynamic_lib,
     host_generate_bindings,
     host_add_build_string,
