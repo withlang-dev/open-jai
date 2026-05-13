@@ -344,6 +344,11 @@ pub const Compilation = struct {
                 try typed.putComptimeBuildOptions(value_node, build_options);
                 try typed.putComptimeBuildOptions(decl_node, build_options);
             },
+            .build_llvm_options => |options| {
+                const llvm_options = buildLlvmOptionsSnapshotToSema(options);
+                try typed.putComptimeBuildLlvmOptions(value_node, llvm_options);
+                try typed.putComptimeBuildLlvmOptions(decl_node, llvm_options);
+            },
             .message => |message| {
                 const message_value = messageSnapshotToSema(message);
                 try typed.putComptimeMessage(value_node, message_value);
@@ -465,7 +470,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_type_info_members.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_type_info_members.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_build_llvm_options.contains(node) or typed.comptime_messages.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -491,6 +496,7 @@ pub const Compilation = struct {
                         .time_zone = calendar.time_zone,
                     }),
                     .build_options => |options| try typed.putComptimeBuildOptions(node, buildOptionsSnapshotToSema(options)),
+                    .build_llvm_options => |options| try typed.putComptimeBuildLlvmOptions(node, buildLlvmOptionsSnapshotToSema(options)),
                     .message => |message| try typed.putComptimeMessage(node, messageSnapshotToSema(message)),
                     .type_info_member => |member| try typed.putComptimeTypeInfoMember(node, typeInfoMemberVmToSema(member)),
                     .void => {},
@@ -712,6 +718,8 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
             } else if (typed.comptime_build_options.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+            } else if (typed.comptime_build_llvm_options.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .build_llvm_options = buildLlvmOptionsSemaToVm(value) });
             } else if (typed.comptime_messages.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
@@ -758,6 +766,8 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
                 } else if (typed.comptime_build_options.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+                } else if (typed.comptime_build_llvm_options.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .build_llvm_options = buildLlvmOptionsSemaToVm(value) });
                 } else if (typed.comptime_messages.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
                 } else {
@@ -793,6 +803,8 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .calendar = comptimeCalendarToVm(value) });
                     } else if (typed.comptime_build_options.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .build_options = buildOptionsSemaToVm(value) });
+                    } else if (typed.comptime_build_llvm_options.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .build_llvm_options = buildLlvmOptionsSemaToVm(value) });
                     } else if (typed.comptime_messages.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .message = messageSemaToVm(value) });
                     } else {
@@ -928,6 +940,7 @@ pub const Compilation = struct {
             .source_location => |v| std.debug.print("{s}:{d}", .{ v.fully_pathed_filename, v.line_number }),
             .calendar => |v| std.debug.print("{d}-{d}-{d} {d}:{d}:{d}.{d}", .{ v.year, v.month_starting_at_0 + 1, v.day_of_month_starting_at_0 + 1, v.hour, v.minute, v.second, v.millisecond }),
             .build_options => |v| std.debug.print("{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; }}", .{ v.output_type, v.backend, v.output_executable_name, v.output_path }),
+            .build_llvm_options => |v| std.debug.print("{{ output_bitcode = {s}; output_llvm_ir = {s}; }}", .{ if (v.output_bitcode) "true" else "false", if (v.output_llvm_ir) "true" else "false" }),
             .message => |v| std.debug.print("{{{s}, {d}}}", .{ v.kind, v.workspace }),
             .type_text => |v| std.debug.print("{s}", .{v}),
             .type_info_member => |v| std.debug.print("{{name = \"{s}\"; type = {s}; flags = {d};}}", .{ v.name, v.type_name, v.flags }),
@@ -1020,6 +1033,7 @@ pub const Compilation = struct {
                 vm_mod.VM.freeBuildOptionsSnapshot(comp.allocator, options);
                 break :blk .{ .build_options = owned };
             },
+            .build_llvm_options => value,
             .message => |message| blk: {
                 const owned = try comp.ownMessageSnapshot(message);
                 vm_mod.VM.freeMessageSnapshot(comp.allocator, message);
@@ -1033,6 +1047,7 @@ pub const Compilation = struct {
         if (ast.tag(arg) == .field_access and ast.data(arg).lhs == @import("Ast.zig").null_node) return .{ .int = 0 };
         if (ast.tag(arg) == .field_access) {
             if (try comp.executeBuildOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
+            if (try comp.executeBuildLlvmOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeMessageSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeTypeInfoMemberSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
         }
@@ -1050,6 +1065,7 @@ pub const Compilation = struct {
         } };
         if (typed.comptime_calendars.get(arg)) |value| return .{ .calendar = comptimeCalendarToVm(value) };
         if (typed.comptime_build_options.get(arg)) |value| return .{ .build_options = buildOptionsSemaToVm(value) };
+        if (typed.comptime_build_llvm_options.get(arg)) |value| return .{ .build_llvm_options = buildLlvmOptionsSemaToVm(value) };
         if (typed.comptime_messages.get(arg)) |value| return .{ .message = messageSemaToVm(value) };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
@@ -1086,6 +1102,7 @@ pub const Compilation = struct {
                     } };
                     if (typed.comptime_calendars.get(decl)) |value| break :blk .{ .calendar = comptimeCalendarToVm(value) };
                     if (typed.comptime_build_options.get(decl)) |value| break :blk .{ .build_options = buildOptionsSemaToVm(value) };
+                    if (typed.comptime_build_llvm_options.get(decl)) |value| break :blk .{ .build_llvm_options = buildLlvmOptionsSemaToVm(value) };
                     if (typed.comptime_messages.get(decl)) |value| break :blk .{ .message = messageSemaToVm(value) };
                 }
                 break :blk .{ .string = name };
@@ -1130,6 +1147,30 @@ pub const Compilation = struct {
         if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
         if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = .{
+            .output_bitcode = options.llvm_output_bitcode,
+            .output_llvm_ir = options.llvm_output_ir,
+        } };
+        return null;
+    }
+
+    fn executeBuildLlvmOptionsSnapshotField(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, base: @import("Ast.zig").NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        _ = comp;
+        const options = typed.comptime_build_llvm_options.get(base) orelse blk: {
+            if (ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = resolved.local_values.get(base) orelse lookup_decl: {
+                if (resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node| break :lookup_decl node,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_build_llvm_options.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "output_bitcode")) return .{ .bool = options.output_bitcode };
+        if (std.mem.eql(u8, field_name, "output_llvm_ir")) return .{ .bool = options.output_llvm_ir };
         return null;
     }
 
@@ -1201,6 +1242,7 @@ pub const Compilation = struct {
             .runtime_storageless_type_info = value.runtime_storageless_type_info,
             .use_custom_link_command = value.use_custom_link_command,
             .llvm_output_bitcode = value.llvm_output_bitcode,
+            .llvm_output_ir = value.llvm_output_ir,
         };
     }
 
@@ -1786,6 +1828,7 @@ fn buildOptionsSnapshotToSema(value: vm_mod.BuildOptionsSnapshot) sema.BuildOpti
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
         .llvm_output_bitcode = value.llvm_output_bitcode,
+        .llvm_output_ir = value.llvm_output_ir,
     };
 }
 
@@ -1806,6 +1849,21 @@ fn buildOptionsSemaToVm(value: sema.BuildOptionsValue) vm_mod.BuildOptionsSnapsh
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
         .llvm_output_bitcode = value.llvm_output_bitcode,
+        .llvm_output_ir = value.llvm_output_ir,
+    };
+}
+
+fn buildLlvmOptionsSnapshotToSema(value: vm_mod.BuildLlvmOptionsSnapshot) sema.BuildLlvmOptionsValue {
+    return .{
+        .output_bitcode = value.output_bitcode,
+        .output_llvm_ir = value.output_llvm_ir,
+    };
+}
+
+fn buildLlvmOptionsSemaToVm(value: sema.BuildLlvmOptionsValue) vm_mod.BuildLlvmOptionsSnapshot {
+    return .{
+        .output_bitcode = value.output_bitcode,
+        .output_llvm_ir = value.output_llvm_ir,
     };
 }
 

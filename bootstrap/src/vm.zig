@@ -27,6 +27,7 @@ pub const Value = union(enum) {
     calendar: CalendarValue,
     message: MessageSnapshot,
     build_options: BuildOptionsSnapshot,
+    build_llvm_options: BuildLlvmOptionsSnapshot,
     type_text: []const u8,
 };
 
@@ -158,6 +159,12 @@ pub const BuildOptionsSnapshot = struct {
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
+    llvm_output_ir: bool = false,
+};
+
+pub const BuildLlvmOptionsSnapshot = struct {
+    output_bitcode: bool = false,
+    output_llvm_ir: bool = false,
 };
 
 const WorkspaceSource = WorkspaceSourceSnapshot;
@@ -211,6 +218,7 @@ const BuildOptions = struct {
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
+    llvm_output_ir: bool = false,
     import_path: ?usize = null,
     compile_time_command_line: ?usize = null,
 };
@@ -2900,6 +2908,7 @@ pub const VM = struct {
             .runtime_storageless_type_info = options.runtime_storageless_type_info,
             .use_custom_link_command = options.use_custom_link_command,
             .llvm_output_bitcode = options.llvm_output_bitcode,
+            .llvm_output_ir = options.llvm_output_ir,
         };
     }
 
@@ -2921,6 +2930,25 @@ pub const VM = struct {
             .runtime_storageless_type_info = snapshot.runtime_storageless_type_info,
             .use_custom_link_command = snapshot.use_custom_link_command,
             .llvm_output_bitcode = snapshot.llvm_output_bitcode,
+            .llvm_output_ir = snapshot.llvm_output_ir,
+        });
+        return index;
+    }
+
+    fn buildLlvmOptionsSnapshot(vm: *VM, index: usize) !BuildLlvmOptionsSnapshot {
+        if (index >= vm.build_options.items.len) return error.InvalidBuildOptionsHandle;
+        const options = vm.build_options.items[index];
+        return .{
+            .output_bitcode = options.llvm_output_bitcode,
+            .output_llvm_ir = options.llvm_output_ir,
+        };
+    }
+
+    fn buildLlvmOptionsFromSnapshot(vm: *VM, snapshot: BuildLlvmOptionsSnapshot) !usize {
+        const index = vm.build_options.items.len;
+        try vm.build_options.append(vm.allocator, .{
+            .llvm_output_bitcode = snapshot.output_bitcode,
+            .llvm_output_ir = snapshot.output_llvm_ir,
         });
         return index;
     }
@@ -3090,6 +3118,7 @@ pub const VM = struct {
         if (index >= vm.build_options.items.len) return diag.failAt(0, "VM Build_Options.llvm_options handle out of range", .{});
         const options = vm.build_options.items[index];
         if (std.mem.eql(u8, field_name, "output_bitcode")) return .{ .bool = options.llvm_output_bitcode };
+        if (std.mem.eql(u8, field_name, "output_llvm_ir")) return .{ .bool = options.llvm_output_ir };
         return diag.failAt(0, "VM Build_Options.llvm_options has no implemented field '{s}'", .{field_name});
     }
 
@@ -3098,6 +3127,10 @@ pub const VM = struct {
         const options = &vm.build_options.items[index];
         if (std.mem.eql(u8, field_name, "output_bitcode")) {
             options.llvm_output_bitcode = try registerTruthy(value, diag, "Build_Options.llvm_options.output_bitcode");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "output_llvm_ir")) {
+            options.llvm_output_ir = try registerTruthy(value, diag, "Build_Options.llvm_options.output_llvm_ir");
             return;
         }
         return diag.failAt(0, "VM Build_Options.llvm_options has no implemented field '{s}'", .{field_name});
@@ -5003,7 +5036,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
         .build_options => diag.failAt(0, "VM cannot pass Build_Options across this boundary without an active VM", .{}),
-        .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options_LLVM_Options across procedure calls yet", .{}),
+        .build_llvm_options => diag.failAt(0, "VM Build_Options_LLVM_Options conversion requires an active VM", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
     };
@@ -5028,7 +5061,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .source_location => |v| .{ .source_location = v },
         .calendar => |v| .{ .calendar = v },
         .build_options => |v| .{ .build_options = try vm.buildOptionsSnapshot(vm.allocator, v) },
-        .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options_LLVM_Options values", .{}),
+        .build_llvm_options => |v| .{ .build_llvm_options = try vm.buildLlvmOptionsSnapshot(v) },
     };
 }
 
@@ -5044,6 +5077,7 @@ fn registerValueFromValue(vm: *VM, value: Value, diag: Diagnostic) !RegisterValu
         .calendar => |v| .{ .calendar = v },
         .message => |v| .{ .message = try vm.messageFromSnapshot(v) },
         .build_options => |v| .{ .build_options = try vm.buildOptionsFromSnapshot(v) },
+        .build_llvm_options => |v| .{ .build_llvm_options = try vm.buildLlvmOptionsFromSnapshot(v) },
         .type_text => |v| .{ .type_text = v },
         .type_info_member => |v| .{ .type_info_member = .{
             .name = v.name,

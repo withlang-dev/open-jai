@@ -35,6 +35,7 @@ pub const Typed = struct {
     comptime_calendars: std.AutoHashMapUnmanaged(NodeIndex, CalendarValue) = .empty,
     comptime_build_options: std.AutoHashMapUnmanaged(NodeIndex, BuildOptionsValue) = .empty,
     owned_build_option_strings: std.ArrayList([]const u8) = .empty,
+    comptime_build_llvm_options: std.AutoHashMapUnmanaged(NodeIndex, BuildLlvmOptionsValue) = .empty,
     comptime_messages: std.AutoHashMapUnmanaged(NodeIndex, MessageValue) = .empty,
     owned_message_strings: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
@@ -64,6 +65,7 @@ pub const Typed = struct {
         t.comptime_build_options.deinit(t.allocator);
         for (t.owned_build_option_strings.items) |value| t.allocator.free(value);
         t.owned_build_option_strings.deinit(t.allocator);
+        t.comptime_build_llvm_options.deinit(t.allocator);
         t.comptime_messages.deinit(t.allocator);
         for (t.owned_message_strings.items) |value| t.allocator.free(value);
         t.owned_message_strings.deinit(t.allocator);
@@ -137,6 +139,10 @@ pub const Typed = struct {
         try t.comptime_build_options.put(t.allocator, node, owned);
     }
 
+    pub fn putComptimeBuildLlvmOptions(t: *Typed, node: NodeIndex, value: BuildLlvmOptionsValue) !void {
+        try t.comptime_build_llvm_options.put(t.allocator, node, value);
+    }
+
     fn ownBuildOptionString(t: *Typed, value: []const u8) ![]const u8 {
         const owned = try t.allocator.dupe(u8, value);
         errdefer t.allocator.free(owned);
@@ -203,6 +209,12 @@ pub const BuildOptionsValue = struct {
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
     llvm_output_bitcode: bool = false,
+    llvm_output_ir: bool = false,
+};
+
+pub const BuildLlvmOptionsValue = struct {
+    output_bitcode: bool = false,
+    output_llvm_ir: bool = false,
 };
 
 pub const MessageValue = struct {
