@@ -49,3 +49,11 @@ testscope_module_import_loads_real_source :: () {
 check_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/check_module_import_value.jai", "check:true\n");
 } @TestProcedure
+
+debug_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/debug_module_import_value.jai", "debug:direct\n");
+} @TestProcedure
+
+debug_module_alias_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/debug_module_alias_import_value.jai", "debug:alias\n");
+} @TestProcedure

@@ -610,7 +610,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
                     std.mem.eql(u8, module_name, "Mail") or
-                    std.mem.eql(u8, module_name, "Debug") or
                     std.mem.eql(u8, module_name, "Sort") or
                     std.mem.eql(u8, module_name, "Hash_Table") or
                     std.mem.eql(u8, module_name, "Pool") or
@@ -624,9 +623,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Debug")) {
-                        try putExternalSymbols(&r, &.{ "init", "attach_to_debugger", "breakpoint" });
-                    } else if (std.mem.eql(u8, module_name, "Windows")) {
+                    if (std.mem.eql(u8, module_name, "Windows")) {
                         try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.symbols.put(allocator, "GetStdHandle", .builtin_get_std_handle);
                         try r.putRealSymbol("STD_INPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
@@ -1093,8 +1090,6 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             } else if (std.mem.eql(u8, module_name, "Compiler")) {
                 try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
                 try putCompilerModuleSymbols(r);
-            } else if (std.mem.eql(u8, module_name, "Debug")) {
-                try putExternalSymbols(r, &.{ "init", "attach_to_debugger", "breakpoint" });
             } else if (std.mem.eql(u8, module_name, "GL")) {
                 try putExternalSymbols(r, &.{
                     "gl",
