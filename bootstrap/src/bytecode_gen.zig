@@ -6152,15 +6152,6 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_run_command, .dest = reg, .arg1 = command, .source_node = expr });
             return reg;
         }
-        if (std.mem.eql(u8, name, "copy_file")) {
-            if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "copy_file expects source and destination strings", .{});
-            const src = try genCallArg(ctx, @intCast(args[0]), diag);
-            const dest = try genCallArg(ctx, @intCast(args[1]), diag);
-            const reg = ctx.proc.num_registers;
-            ctx.proc.num_registers += 1;
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_copy_file, .dest = reg, .arg1 = src, .arg2 = dest, .source_node = expr });
-            return reg;
-        }
         if (std.mem.eql(u8, name, "build_cpp_dynamic_lib") or std.mem.eql(u8, name, "build_cpp")) {
             if (args.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects a library name and source path", .{name});
             const lib_name = try genCallArg(ctx, handleArgNode(ast, @intCast(args[0])), diag);
@@ -9321,7 +9312,7 @@ fn procHasExpandModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     const token_start = ast.tokens[ast.mainToken(proc)].start;
     const body = ast.data(proc).lhs;
     const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
-    const start = token_start - @min(token_start, 200);
+    const start = token_start;
     if (body_start <= start or body_start > ast.source.len) return false;
     return std.mem.indexOf(u8, ast.source[start..body_start], "#expand") != null;
 }
@@ -9331,7 +9322,7 @@ fn procHasForeignModifierLocal(ast: *const Ast, proc: NodeIndex) bool {
     const token_start = ast.tokens[ast.mainToken(proc)].start;
     const body = ast.data(proc).lhs;
     const body_start = if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len) ast.tokens[ast.mainToken(body)].start else @min(ast.source.len, token_start + 256);
-    const start = token_start - @min(token_start, 200);
+    const start = token_start;
     if (body_start <= start or body_start > ast.source.len) return false;
     const header = ast.source[start..body_start];
     return std.mem.indexOf(u8, header, "#foreign") != null or
