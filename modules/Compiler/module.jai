@@ -129,7 +129,7 @@ Type_Info_Pointer :: struct {
     points_to: Type;
 }
 
-compiler_create_workspace :: () -> Workspace #compiler;
+compiler_create_workspace :: (name := "") -> Workspace #compiler;
 get_current_workspace :: () -> Workspace #compiler;
 get_build_options :: (workspace: Workspace = 0) -> Build_Options #compiler;
 set_build_options :: (options: Build_Options, workspace: Workspace = 0) #compiler;
