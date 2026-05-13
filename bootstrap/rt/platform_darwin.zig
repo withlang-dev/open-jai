@@ -8,6 +8,8 @@ const c = @cImport({
     @cInclude("time.h");
 });
 
+extern fn _NSGetExecutablePath(buf: [*]u8, bufsize: *u32) c_int;
+
 const OpenJaiRtStat = extern struct {
     size: i64,
     is_dir: i32,
@@ -140,6 +142,13 @@ export fn oj_rt_chdir(path_z: [*:0]const u8) i32 {
 export fn oj_rt_getcwd(buffer: [*]u8, len: usize) i64 {
     if (c.getcwd(buffer, len)) |cwd| return @intCast(std.mem.len(cwd));
     return -errnoCode();
+}
+
+export fn oj_rt_executable_path(buffer: [*]u8, len: usize) i64 {
+    if (len > std.math.maxInt(u32)) return -34;
+    var size: u32 = @intCast(len);
+    if (_NSGetExecutablePath(buffer, &size) == 0) return @intCast(std.mem.len(@as([*:0]const u8, @ptrCast(buffer))));
+    return -34;
 }
 
 export fn oj_rt_mmap(len: usize) ?*anyopaque {

@@ -365,6 +365,11 @@ pub const VM = struct {
                     if (start_usize > text.len or count_usize > text.len - start_usize) return diag.failAt(0, "VM string_slice out of bounds", .{});
                     regs[inst.dest] = .{ .string = text[start_usize .. start_usize + count_usize] };
                 },
+                .path_strip_filename => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM path_strip_filename register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "path_strip_filename source");
+                    regs[inst.dest] = .{ .string = try vm.pathStripFilename(path) };
+                },
                 .cmp_lt_int => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM cmp_lt_int register out of range", .{});
                     const lhs = switch (regs[inst.arg1]) {
@@ -1093,6 +1098,10 @@ pub const VM = struct {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM get_working_directory register out of range", .{});
                     regs[inst.dest] = .{ .string = try vm.hostGetWorkingDirectory(diag) };
                 },
+                .get_path_of_running_executable => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM get_path_of_running_executable register out of range", .{});
+                    regs[inst.dest] = .{ .string = try vm.hostGetExecutablePath(diag) };
+                },
                 .host_copy_file => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM copy_file register out of range", .{});
                     const src = try vm.registerText(regs[inst.arg1], diag, "copy_file source");
@@ -1500,6 +1509,31 @@ pub const VM = struct {
         errdefer vm.allocator.free(cwd);
         try vm.rendered_code_strings.append(vm.allocator, cwd);
         return cwd;
+    }
+
+    fn hostGetExecutablePath(vm: *VM, diag: Diagnostic) ![]const u8 {
+        const io = try vm.requireIo(diag, "get_path_of_running_executable");
+        const path = std.process.executablePathAlloc(io, vm.allocator) catch |err| return diag.failAt(0, "VM get_path_of_running_executable failed: {s}", .{@errorName(err)});
+        errdefer vm.allocator.free(path);
+        try vm.rendered_code_strings.append(vm.allocator, path);
+        return path;
+    }
+
+    fn pathStripFilename(vm: *VM, path: []const u8) ![]const u8 {
+        var i = path.len;
+        while (i > 0) {
+            i -= 1;
+            if (path[i] == '/' or path[i] == '\\') {
+                const result = try vm.allocator.dupe(u8, path[0 .. i + 1]);
+                errdefer vm.allocator.free(result);
+                try vm.rendered_code_strings.append(vm.allocator, result);
+                return result;
+            }
+        }
+        const result = try vm.allocator.dupe(u8, "");
+        errdefer vm.allocator.free(result);
+        try vm.rendered_code_strings.append(vm.allocator, result);
+        return result;
     }
 
     fn hostCopyFile(vm: *VM, src: []const u8, dest: []const u8, diag: Diagnostic) !bool {

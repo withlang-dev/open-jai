@@ -4218,6 +4218,14 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .get_working_directory, .dest = reg, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "get_path_of_running_executable")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_path_of_running_executable expects no arguments", .{});
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .get_path_of_running_executable, .dest = reg, .source_node = expr });
+                    return reg;
+                }
                 if (std.mem.eql(u8, name, "visit_files")) {
                     return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "visit_files runtime traversal lowering is not implemented yet", .{});
                 }
@@ -5146,6 +5154,14 @@ const GenContext = struct {
             const reg = proc.num_registers;
             proc.num_registers += 1;
             try proc.instructions.append(program.allocator, .{ .opcode = .string_slice, .dest = reg, .arg1 = source, .arg2 = start, .arg3 = len, .source_node = expr });
+            return reg;
+        }
+        if (std.mem.eql(u8, name, "path_strip_filename")) {
+            if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "path_strip_filename expects one path string", .{});
+            const source = try ctx.genExpr(@intCast(args[0]), diag);
+            const reg = proc.num_registers;
+            proc.num_registers += 1;
+            try proc.instructions.append(program.allocator, .{ .opcode = .path_strip_filename, .dest = reg, .arg1 = source, .source_node = expr });
             return reg;
         }
         if (std.mem.eql(u8, name, "compare") or std.mem.eql(u8, name, "compare_strings") or std.mem.eql(u8, name, "contains") or std.mem.eql(u8, name, "begins_with") or std.mem.eql(u8, name, "find_index_from_left") or std.mem.eql(u8, name, "find_index_from_right")) {
@@ -6469,6 +6485,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "add_global_data") or
                     std.mem.eql(u8, name, "read_entire_file") or
                     std.mem.eql(u8, name, "get_working_directory") or
+                    std.mem.eql(u8, name, "get_path_of_running_executable") or
                     std.mem.eql(u8, name, "string_slice") or
                     std.mem.eql(u8, name, "formatInt") or
                     std.mem.eql(u8, name, "formatFloat") or
@@ -6483,7 +6500,8 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "trim") or
                     std.mem.eql(u8, name, "join") or
                     std.mem.eql(u8, name, "replace") or
-                    std.mem.eql(u8, name, "slice"))
+                    std.mem.eql(u8, name, "slice") or
+                    std.mem.eql(u8, name, "path_strip_filename"))
                 {
                     return "string";
                 }
