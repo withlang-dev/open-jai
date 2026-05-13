@@ -9,7 +9,11 @@ pub fn link(allocator: std.mem.Allocator, io: std.Io, object_path: []const u8, r
 
     var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &.{ "cc", "-no-pie", "-o", output_path, object_path });
+    try argv.appendSlice(allocator, &.{
+        "cc", "-o", output_path, object_path,
+        if (builtin.os.tag == .linux)
+            "-no-pie",
+    });
     try argv.appendSlice(allocator, runtime_inputs.items.items);
 
     const result = std.process.run(allocator, io, .{ .argv = argv.items, .stderr_limit = .limited(64 * 1024), .stdout_limit = .limited(64 * 1024) }) catch |err| {
