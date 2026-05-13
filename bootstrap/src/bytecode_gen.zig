@@ -5087,8 +5087,12 @@ const GenContext = struct {
             return reg;
         }
         if (std.mem.eql(u8, name, "compiler_set_workspace_status")) {
-            for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-            return try ctx.emitBool(expr, true);
+            if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_set_workspace_status expects one status value", .{});
+            const status = try ctx.genExpr(@intCast(args[0]), diag);
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .host_set_workspace_status, .dest = reg, .arg1 = status, .source_node = expr });
+            return reg;
         }
         if (std.mem.eql(u8, name, "compiler_report")) {
             if (args.len == 0 or args.len > 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "compiler_report expects a message and optional Source_Code_Location", .{});

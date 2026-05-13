@@ -21,3 +21,7 @@ compiler_report_uses_code_declaration_locations :: () {
 typechecked_subexpressions_drive_compiler_reports :: () {
     expect_compile_output("examples/30/30.9_house_rules.jai", "main5.jai:4: Too many levels of pointer indirection.\n");
 } @TestProcedure
+
+workspace_failed_status_reaches_complete_message :: () {
+    expect_compile_output("test/examples/workspace/workspace_failed_status_value.jai", "post failed:true linker:1\ncomplete error:1\n");
+} @TestProcedure

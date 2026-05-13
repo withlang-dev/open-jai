@@ -84,6 +84,7 @@ const CompilerMessage = struct {
     declaration_start: usize = 0,
     declaration_count: usize = 0,
     dump_text: []const u8 = "",
+    error_code: i64 = 0,
 };
 
 pub const WorkspaceSourceSnapshot = struct {
@@ -165,6 +166,7 @@ pub const VM = struct {
     rendered_code_strings: std.ArrayList([]const u8) = .empty,
     build_options: std.ArrayList(BuildOptions) = .empty,
     workspace_build_options: std.AutoHashMapUnmanaged(i64, usize) = .empty,
+    workspace_status: std.AutoHashMapUnmanaged(i64, i64) = .empty,
     compiler_messages: std.ArrayList(CompilerMessage) = .empty,
     compiler_message_queue: std.ArrayList(usize) = .empty,
     compiler_message_nodes: std.ArrayList(CodeNode) = .empty,
@@ -242,6 +244,7 @@ pub const VM = struct {
         vm.rendered_code_strings.deinit(vm.allocator);
         vm.build_options.deinit(vm.allocator);
         vm.workspace_build_options.deinit(vm.allocator);
+        vm.workspace_status.deinit(vm.allocator);
         vm.compiler_messages.deinit(vm.allocator);
         vm.compiler_message_queue.deinit(vm.allocator);
         vm.compiler_message_nodes.deinit(vm.allocator);
@@ -1229,6 +1232,12 @@ pub const VM = struct {
                     try vm.applyOptimization(options_index, mode, keep_runtime_checks, diag);
                     regs[inst.dest] = .{ .bool = true };
                 },
+                .host_set_workspace_status => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM compiler_set_workspace_status register out of range", .{});
+                    const status = try vm.workspaceStatusCode(regs[inst.arg1], diag);
+                    try vm.setWorkspaceStatus(status, diag);
+                    regs[inst.dest] = .{ .bool = true };
+                },
                 .build_options_get_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Build_Options field access out of range", .{});
                     const index = switch (regs[inst.arg1]) {
@@ -1730,6 +1739,33 @@ pub const VM = struct {
         return vm.current_workspace_id;
     }
 
+    fn workspaceStatusCode(vm: *VM, value: RegisterValue, diag: Diagnostic) !i64 {
+        _ = vm;
+        switch (value) {
+            .int => |status| {
+                if (status == 0 or status == 1) return status;
+                return diag.failAt(0, "VM unsupported workspace status value {d}", .{status});
+            },
+            .string, .bytes => |name| {
+                if (std.mem.eql(u8, name, "SUCCEEDED") or std.mem.eql(u8, name, "SUCCESS") or std.mem.eql(u8, name, "OK")) return 0;
+                if (std.mem.eql(u8, name, "FAILED")) return 1;
+                return diag.failAt(0, "VM unsupported workspace status value '{s}'", .{name});
+            },
+            else => return diag.failAt(0, "VM compiler_set_workspace_status requires a workspace status value", .{}),
+        }
+    }
+
+    fn setWorkspaceStatus(vm: *VM, status: i64, diag: Diagnostic) !void {
+        const workspace = if (vm.intercepted_workspace != 0) vm.intercepted_workspace else vm.hostGetCurrentWorkspace();
+        if (workspace <= 0) return diag.failAt(0, "compiler_set_workspace_status requires an active compiler workspace", .{});
+        try vm.workspace_status.put(vm.allocator, workspace, status);
+        if (workspace == vm.intercepted_workspace) try vm.rebuildInterceptMessages(workspace, diag);
+    }
+
+    fn workspaceErrorCode(vm: *VM, workspace: i64) i64 {
+        return vm.workspace_status.get(workspace) orelse 0;
+    }
+
     fn appendCompilerMessage(vm: *VM, message: CompilerMessage) !void {
         const index = vm.compiler_messages.items.len;
         try vm.compiler_messages.append(vm.allocator, message);
@@ -1767,9 +1803,10 @@ pub const VM = struct {
         try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
         try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
-        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
-        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
-        try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = 0 });
+        const error_code = vm.workspaceErrorCode(workspace);
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = error_code });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .executable_write_failed = error_code != 0, .linker_exit_code = error_code });
+        try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = error_code, .error_code = error_code });
     }
 
     fn appendWorkspaceDeclarations(vm: *VM, path: []const u8, source: []const u8, parent_diag: Diagnostic) !usize {
@@ -1998,7 +2035,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "executable_name")) return .{ .string = message.executable_name };
         if (std.mem.eql(u8, field_name, "executable_write_failed")) return .{ .bool = message.executable_write_failed };
         if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
-        if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = 0 };
+        if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = message.error_code };
         if (std.mem.eql(u8, field_name, "all")) {
             if (message.all_start > vm.compiler_message_nodes.items.len or message.all_count > vm.compiler_message_nodes.items.len - message.all_start) return diag.failAt(0, "VM Message_Typechecked node slice out of range", .{});
             return .{ .code_nodes = vm.compiler_message_nodes.items[message.all_start .. message.all_start + message.all_count] };

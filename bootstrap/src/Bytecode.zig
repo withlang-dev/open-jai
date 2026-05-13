@@ -153,6 +153,7 @@ pub const Opcode = enum(u8) {
     load_build_options,
     host_set_build_options,
     host_set_optimization,
+    host_set_workspace_status,
     build_options_get_field,
     build_options_set_field,
     type_info_field,
