@@ -1767,6 +1767,7 @@ pub const VM = struct {
         try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
         try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "POST_WRITE_EXECUTABLE", .executable_name = "program", .linker_exit_code = 0 });
         try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = "program", .linker_exit_code = 0 });
     }

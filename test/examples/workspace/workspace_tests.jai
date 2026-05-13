@@ -11,7 +11,7 @@ global_data_handles_embed_bytes :: () {
 } @TestProcedure
 
 compiler_intercept_messages_are_real_values :: () {
-    expect_compile_output("test/examples/workspace/message_loop_value.jai", "IMPORT:3\nFILE:3\nPHASE:3\nphase:TYPECHECKED_ALL_WE_CAN\nTYPECHECKED:3\nchecked:1\nPHASE:3\nphase:POST_WRITE_EXECUTABLE\nCOMPLETE:3\n");
+    expect_compile_output("test/examples/workspace/message_loop_value.jai", "IMPORT:3\nFILE:3\nPHASE:3\nphase:TYPECHECKED_ALL_WE_CAN\nTYPECHECKED:3\nchecked:1\nPHASE:3\nphase:PRE_WRITE_EXECUTABLE\nPHASE:3\nphase:POST_WRITE_EXECUTABLE\nCOMPLETE:3\n");
 } @TestProcedure
 
 compiler_report_uses_code_declaration_locations :: () {
