@@ -185,6 +185,7 @@ const GenContext = struct {
     current_proc_node: NodeIndex = @import("Ast.zig").null_node,
     current_proc_index: u32 = 0,
     decl_registers: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
+    decl_addresses: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
     pointer_addrs: std.AutoHashMapUnmanaged(Bytecode.Register, Bytecode.Register) = .empty,
     field_values: std.AutoHashMapUnmanaged(u64, Bytecode.Register) = .empty,
     array_last_items: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
@@ -238,6 +239,7 @@ const GenContext = struct {
 
     pub fn deinit(ctx: *GenContext) void {
         ctx.decl_registers.deinit(ctx.program.allocator);
+        ctx.decl_addresses.deinit(ctx.program.allocator);
         ctx.pointer_addrs.deinit(ctx.program.allocator);
         ctx.field_values.deinit(ctx.program.allocator);
         ctx.array_last_items.deinit(ctx.program.allocator);
@@ -1035,6 +1037,32 @@ const GenContext = struct {
             diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must be marked #expand", .{expansion_name})
         else
             false;
+
+        if (!is_explicit and ast.tag(iterated) == .call_expr) {
+            const callee = ast.data(iterated).lhs;
+            const args = ast.extraSlice(ast.data(iterated).rhs);
+            if (ast.tag(callee) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "step_iterator") and args.len == 3) {
+                const min = try evalIntegerConstExpr(ctx, @intCast(args[0]), diag);
+                const max = try evalIntegerConstExpr(ctx, @intCast(args[1]), diag);
+                const step = try evalIntegerConstExpr(ctx, @intCast(args[2]), diag);
+                if (step <= 0) return diag.failAt(ast.tokens[ast.mainToken(iterated)].start, "step_iterator requires a positive step", .{});
+                const old_iter_reg = ctx.decl_registers.get(stmt);
+                defer {
+                    if (old_iter_reg) |reg| {
+                        ctx.decl_registers.put(ctx.program.allocator, stmt, reg) catch {};
+                    } else {
+                        _ = ctx.decl_registers.remove(stmt);
+                    }
+                }
+                var value = min;
+                while (value <= max) : (value += step) {
+                    try ctx.decl_registers.put(ctx.program.allocator, stmt, try ctx.emitInt(stmt, value));
+                    try ctx.genBlock(ast.data(stmt).rhs, diag);
+                }
+                return true;
+            }
+        }
+
         const sig = procSignature(ast, target) orelse return diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must have parameters", .{expansion_name});
         const params = ast.extraSlice(sig.params_extra);
         if (params.len < 2) return diag.failAt(ast.tokens[ast.mainToken(target)].start, "for-expansion target '{s}' must accept iterator and body parameters", .{expansion_name});
@@ -1817,6 +1845,17 @@ const GenContext = struct {
             if (typeTextForDecl(ctx, decl, diag)) |ty| {
                 try child.external_types.put(child.program.allocator, name, ty);
             }
+            if (ctx.ast.tag(decl) == .var_decl) {
+                const addr = if (ctx.decl_addresses.get(decl)) |existing| existing else blk: {
+                    const new_addr = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = new_addr, .arg1 = entry.value_ptr.*, .source_node = decl });
+                    try ctx.decl_addresses.put(ctx.program.allocator, decl, new_addr);
+                    try ctx.pointer_addrs.put(ctx.program.allocator, new_addr, decl);
+                    break :blk new_addr;
+                };
+                try child.external_lvalue_addresses.put(child.program.allocator, name, addr);
+            }
             if (std.mem.eql(u8, name, "it")) {
                 if (ctx.for_expansion_it_alias) |alias| {
                     try child.external_registers.put(child.program.allocator, alias, entry.value_ptr.*);
@@ -1934,6 +1973,15 @@ const GenContext = struct {
             if (typeTextForDecl(child, stmt, diag)) |ty| {
                 const ty_index = try ctx.program.addByteArray(ty);
                 try ctx.external_types.put(ctx.program.allocator, name, ctx.program.byte_arrays.items[ty_index]);
+            }
+            if (child.ast.tag(stmt) == .var_decl) {
+                const addr = if (child.decl_addresses.get(stmt)) |existing| existing else blk: {
+                    const new_addr = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = new_addr, .arg1 = reg, .source_node = stmt });
+                    break :blk new_addr;
+                };
+                try ctx.external_lvalue_addresses.put(ctx.program.allocator, name, addr);
             }
         }
     }
@@ -2413,6 +2461,10 @@ const GenContext = struct {
                         return;
                     }
                     if (ctx.decl_registers.get(decl)) |old_reg| {
+                        if (ctx.decl_addresses.get(decl)) |addr| {
+                            const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, lhs, diag) orelse "int";
+                            try emitStoreToAddressForType(ctx, addr, rhs, type_text, stmt, diag);
+                        }
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = rhs, .source_node = stmt });
                         return;
                     }
@@ -2456,9 +2508,6 @@ const GenContext = struct {
                         bind_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
-                        const addr_reg = ctx.proc.num_registers;
-                        ctx.proc.num_registers += 1;
-                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr_reg, .arg1 = bind_reg, .source_node = stmt });
                     }
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, bind_reg);
                 } else if (ast.tag(stmt) == .var_decl and init == @import("Ast.zig").null_node) {
@@ -3424,6 +3473,7 @@ const GenContext = struct {
                 if (op == .star) {
                     if (ctx.resolved.local_values.get(operand)) |decl| {
                         try ctx.pointer_addrs.put(program.allocator, reg, decl);
+                        try ctx.decl_addresses.put(program.allocator, decl, reg);
                     }
                 }
                 return reg;
@@ -3450,6 +3500,10 @@ const GenContext = struct {
                     }
                     if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) {
                         if (ctx.loop_index_registers.get(decl)) |index_reg| return index_reg;
+                    }
+                    if (ctx.decl_addresses.get(decl)) |addr| {
+                        const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, expr, diag) orelse "int";
+                        return try emitLoadFromAddressForType(ctx, addr, type_text, expr, diag);
                     }
                     if (ctx.decl_registers.get(decl)) |reg| return reg;
                     if (ctx.isTopLevelVarDecl(decl)) {
@@ -6741,6 +6795,7 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
                     const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, expr, diag) orelse "int";
                     return try ctx.emitGlobalAddress(decl, expr, type_text, diag);
                 }
+                if (ctx.decl_addresses.get(decl)) |addr| return addr;
             }
             const value = try ctx.genExpr(expr, diag);
             if (typeTextForExpr(ctx, expr, diag)) |ty| {
@@ -6750,6 +6805,12 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             const addr = proc.num_registers;
             proc.num_registers += 1;
             try proc.instructions.append(program.allocator, .{ .opcode = .addr_of_local, .dest = addr, .arg1 = value, .source_node = expr });
+            if (ctx.resolved.local_values.get(expr)) |decl| {
+                if (decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len and ast.tag(decl) == .var_decl) {
+                    try ctx.decl_addresses.put(program.allocator, decl, addr);
+                    try ctx.pointer_addrs.put(program.allocator, addr, decl);
+                }
+            }
             return addr;
         },
         .field_access => {
@@ -9249,6 +9310,15 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
 fn emitLoadFromAddressForType(ctx: *GenContext, addr: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!Bytecode.Register {
     const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
     if (isDynamicArrayTypeText(clean_type) or isStaticArrayTypeText(clean_type) or try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) return addr;
+    if (std.mem.eql(u8, firstTypeWord(clean_type), "bool")) {
+        const byte_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr_byte, .dest = byte_reg, .arg1 = addr, .source_node = source_node });
+        const bool_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .int_to_bool_cast, .dest = bool_reg, .arg1 = byte_reg, .source_node = source_node });
+        return bool_reg;
+    }
     const reg = ctx.proc.num_registers;
     ctx.proc.num_registers += 1;
     const opcode: Bytecode.Opcode = if (std.mem.eql(u8, firstTypeWord(clean_type), "string"))
@@ -9261,6 +9331,22 @@ fn emitLoadFromAddressForType(ctx: *GenContext, addr: Bytecode.Register, raw_typ
         .load_ptr;
     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = addr, .source_node = source_node });
     return reg;
+}
+
+fn emitStoreToAddressForType(ctx: *GenContext, addr: Bytecode.Register, value: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
+    const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
+    if (isDynamicArrayTypeText(clean_type) or isStaticArrayTypeText(clean_type) or try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = addr, .arg1 = value, .source_node = source_node });
+        return;
+    }
+    const opcode: Bytecode.Opcode = if (std.mem.eql(u8, firstTypeWord(clean_type), "float") or std.mem.eql(u8, firstTypeWord(clean_type), "float32") or std.mem.eql(u8, firstTypeWord(clean_type), "float64"))
+        .store_ptr_float
+    else if ((try typeTextSize(ctx, clean_type, diag)) == 1)
+        .store_ptr_byte
+    else
+        .store_ptr;
+    const elem_size = if (opcode == .store_ptr_float) try typeTextSize(ctx, clean_type, diag) else 0;
+    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = value, .arg2 = @intCast(elem_size), .source_node = source_node });
 }
 
 fn emitFormattedStructValue(ctx: *GenContext, base_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!void {

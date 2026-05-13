@@ -581,6 +581,17 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = .{ .int = if (value) 1 else 0 };
                 },
+                .int_trunc_cast => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM int_trunc_cast register out of range", .{});
+                    const value: i64 = switch (regs[inst.arg1]) {
+                        .int => |v| v,
+                        .bool => |v| if (v) 1 else 0,
+                        .float => |v| @intFromFloat(v),
+                        .ptr => 1,
+                        else => return diag.failAt(0, "VM int_trunc_cast requires numeric, bool, or pointer operand", .{}),
+                    };
+                    regs[inst.dest] = .{ .int = truncateIntForType(value, inst.arg2) };
+                },
                 .int_to_bool_cast => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM int_to_bool_cast register out of range", .{});
                     regs[inst.dest] = .{ .bool = try registerTruthy(regs[inst.arg1], diag, "bool cast") };
@@ -2920,8 +2931,7 @@ pub const VM = struct {
     }
 
     fn loadStringSlot(vm: *VM, ptr: Pointer, diag: Diagnostic) ![]const u8 {
-        return vm.string_slots.get(pointerKey(ptr)) orelse
-            return diag.failAt(0, "VM string slot at block={d} offset={d} was not initialized", .{ ptr.block, ptr.offset });
+        return vm.string_slots.get(pointerKey(ptr)) orelse try vm.readRemainingBytes(ptr, diag);
     }
 
     fn storeRegister(vm: *VM, ptr: Pointer, value: RegisterValue, diag: Diagnostic) !void {
@@ -4932,6 +4942,18 @@ fn typeName(type_id: u32) []const u8 {
         30 => "procedure",
         31 => "()",
         else => "Type",
+    };
+}
+
+fn truncateIntForType(value: i64, type_id: u32) i64 {
+    const bits: u64 = @bitCast(value);
+    return switch (type_id) {
+        1 => if (value != 0) 1 else 0,
+        4 => @as(i64, @as(i32, @bitCast(@as(u32, @truncate(bits))))),
+        7 => @as(i64, @intCast(@as(u8, @truncate(bits)))),
+        8 => @as(i64, @intCast(@as(u16, @truncate(bits)))),
+        9 => @as(i64, @intCast(@as(u32, @truncate(bits)))),
+        else => value,
     };
 }
 

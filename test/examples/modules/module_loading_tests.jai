@@ -93,3 +93,7 @@ window_creation_module_import_loads_real_source_and_tracks_dimensions :: () {
 simp_module_import_loads_real_source_and_tracks_render_state :: () {
     expect_compile_output("test/examples/modules/simp_module_import_value.jai", "simp:true 1 32 32 true 24 42 false 1 1\n");
 } @TestProcedure
+
+gl_module_import_loads_real_source_and_tracks_state :: () {
+    expect_compile_output("test/examples/modules/gl_module_import_value.jai", "gl:true 1 OpenJai OpenJai GL 1.0 1 2 3 640 true\n");
+} @TestProcedure
