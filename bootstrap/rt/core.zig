@@ -8,6 +8,8 @@ extern fn oj_rt_seek(fd: i32, offset: i64, whence: i32) i64;
 extern fn oj_rt_stat(path_z: [*:0]const u8, out: ?*OpenJaiRtStat) i32;
 extern fn oj_rt_mkdir(path_z: [*:0]const u8, mode: i32) i32;
 extern fn oj_rt_delete_directory(path_z: [*:0]const u8) i32;
+extern fn oj_rt_chdir(path_z: [*:0]const u8) i32;
+extern fn oj_rt_getcwd(buffer: [*]u8, len: usize) i64;
 extern fn oj_rt_mmap(len: usize) ?*anyopaque;
 extern fn oj_rt_munmap(ptr: ?*anyopaque, len: usize) void;
 extern fn oj_rt_sleep_milliseconds(ms: u64) void;
@@ -500,6 +502,32 @@ export fn __openjai_file_exists(path_data: [*]const u8, path_len: usize) bool {
     defer rtFree(path_raw);
     var stat: OpenJaiRtStat = undefined;
     return oj_rt_stat(@ptrCast(path_raw), &stat) == 0 and stat.is_file != 0;
+}
+
+export fn __openjai_set_working_directory(path_data: [*]const u8, path_len: usize) bool {
+    const path_raw = pathToZ(path_data, path_len) orelse return false;
+    defer rtFree(path_raw);
+    return oj_rt_chdir(@ptrCast(path_raw)) == 0;
+}
+
+export fn __openjai_get_working_directory() ?*OpenJaiRuntimeString {
+    var capacity: usize = 256;
+    while (capacity <= 65536) : (capacity *= 2) {
+        const data_raw = rtAlloc(capacity) orelse return null;
+        const data: [*]u8 = @ptrCast(data_raw);
+        const len = oj_rt_getcwd(data, capacity);
+        if (len >= 0) {
+            const header_raw = rtAlloc(@sizeOf(OpenJaiRuntimeString)) orelse {
+                rtFree(data_raw);
+                return null;
+            };
+            const header: *OpenJaiRuntimeString = @ptrCast(@alignCast(header_raw));
+            header.* = .{ .len = @intCast(len), .data = data };
+            return header;
+        }
+        rtFree(data_raw);
+    }
+    return null;
 }
 
 export fn __openjai_file_open(path_data: [*]const u8, path_len: usize, for_writing: bool, keep_existing_content: bool) ?*OpenJaiFile {

@@ -134,6 +134,8 @@ pub const Opcode = enum(u8) {
     make_directory,
     delete_directory,
     file_exists,
+    set_working_directory,
+    get_working_directory,
     host_run_command,
     host_copy_file,
     host_build_cpp_dynamic_lib,

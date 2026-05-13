@@ -132,6 +132,16 @@ export fn oj_rt_delete_directory(path_z: [*:0]const u8) i32 {
     return deleteDirectoryRecursive(path_z);
 }
 
+export fn oj_rt_chdir(path_z: [*:0]const u8) i32 {
+    if (c.chdir(path_z) == 0) return 0;
+    return -errnoCode();
+}
+
+export fn oj_rt_getcwd(buffer: [*]u8, len: usize) i64 {
+    if (c.getcwd(buffer, len)) |cwd| return @intCast(std.mem.len(cwd));
+    return -errnoCode();
+}
+
 export fn oj_rt_mmap(len: usize) ?*anyopaque {
     if (len == 0) return null;
     const ptr = c.mmap(null, len, c.PROT_READ | c.PROT_WRITE, c.MAP_PRIVATE | c.MAP_ANON, -1, 0);

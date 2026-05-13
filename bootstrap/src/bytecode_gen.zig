@@ -4201,6 +4201,26 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .file_exists, .dest = reg, .arg1 = path_reg, .source_node = expr });
                     return reg;
                 }
+                if (std.mem.eql(u8, name, "set_working_directory")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "set_working_directory expects one path string", .{});
+                    const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .set_working_directory, .dest = reg, .arg1 = path_reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "get_working_directory")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_working_directory expects no arguments", .{});
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .get_working_directory, .dest = reg, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "visit_files")) {
+                    return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "visit_files runtime traversal lowering is not implemented yet", .{});
+                }
                 if (std.mem.eql(u8, name, "file_open")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "file_open expects one path string", .{});
@@ -6448,6 +6468,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "compiler_read_file") or
                     std.mem.eql(u8, name, "add_global_data") or
                     std.mem.eql(u8, name, "read_entire_file") or
+                    std.mem.eql(u8, name, "get_working_directory") or
                     std.mem.eql(u8, name, "string_slice") or
                     std.mem.eql(u8, name, "formatInt") or
                     std.mem.eql(u8, name, "formatFloat") or
@@ -6503,6 +6524,8 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "make_directory_if_it_does_not_exist") or
                     std.mem.eql(u8, name, "delete_directory") or
                     std.mem.eql(u8, name, "file_exists") or
+                    std.mem.eql(u8, name, "set_working_directory") or
+                    std.mem.eql(u8, name, "visit_files") or
                     std.mem.eql(u8, name, "file_set_position") or
                     std.mem.eql(u8, name, "file_write") or
                     std.mem.eql(u8, name, "file_read") or

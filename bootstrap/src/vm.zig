@@ -1084,6 +1084,15 @@ pub const VM = struct {
                     const path = try vm.registerText(regs[inst.arg1], diag, "file_exists path");
                     regs[inst.dest] = .{ .bool = try vm.hostPathExists(path, diag) };
                 },
+                .set_working_directory => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM set_working_directory register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "set_working_directory path");
+                    regs[inst.dest] = .{ .bool = try vm.hostSetWorkingDirectory(path, diag) };
+                },
+                .get_working_directory => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM get_working_directory register out of range", .{});
+                    regs[inst.dest] = .{ .string = try vm.hostGetWorkingDirectory(diag) };
+                },
                 .host_copy_file => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM copy_file register out of range", .{});
                     const src = try vm.registerText(regs[inst.arg1], diag, "copy_file source");
@@ -1475,6 +1484,22 @@ pub const VM = struct {
             else => return diag.failAt(0, "VM file_exists failed for '{s}': {s}", .{ full, @errorName(err) }),
         };
         return true;
+    }
+
+    fn hostSetWorkingDirectory(vm: *VM, path: []const u8, diag: Diagnostic) !bool {
+        const io = try vm.requireIo(diag, "set_working_directory");
+        const full = try vm.resolvedHostPath(path);
+        defer vm.allocator.free(full);
+        std.process.setCurrentPath(io, full) catch |err| return diag.failAt(0, "VM set_working_directory failed for '{s}': {s}", .{ full, @errorName(err) });
+        return true;
+    }
+
+    fn hostGetWorkingDirectory(vm: *VM, diag: Diagnostic) ![]const u8 {
+        const io = try vm.requireIo(diag, "get_working_directory");
+        const cwd = std.process.currentPathAlloc(io, vm.allocator) catch |err| return diag.failAt(0, "VM get_working_directory failed: {s}", .{@errorName(err)});
+        errdefer vm.allocator.free(cwd);
+        try vm.rendered_code_strings.append(vm.allocator, cwd);
+        return cwd;
     }
 
     fn hostCopyFile(vm: *VM, src: []const u8, dest: []const u8, diag: Diagnostic) !bool {
