@@ -606,27 +606,12 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
                 } else if (
-                    std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
                     std.mem.eql(u8, module_name, "Bindings_Generator") or
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "GetRect")) {
-                        try putExternalSymbols(&r, &.{
-                            "ui_init",
-                            "ui_per_frame_update",
-                            "getrect_handle_event",
-                            "get_rect",
-                            "button",
-                            "slider",
-                            "dropdown",
-                            "draw_popups",
-                            "set_default_theme",
-                            "default_theme_procs",
-                            "getrect_theme",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
+                    if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         for (&[_][]const u8{
                             "Generate_Bindings_Options",
                             "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH",
