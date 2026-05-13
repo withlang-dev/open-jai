@@ -17,6 +17,8 @@ validate_build_options :: () -> int {
     options.output_type = .EXECUTABLE;
     options.output_executable_name = "openjai_program";
     options.output_path = "./out/test-build-options";
+    assert(options.do_output == true);
+    options.do_output = false;
     options.stack_trace = false;
     options.backtrace_on_crash = .OFF;
     options.array_bounds_check = .ON;
@@ -34,6 +36,7 @@ validate_build_options :: () -> int {
     stored := get_build_options(w);
     assert(stored.output_executable_name == "openjai_program");
     assert(stored.output_path == "./out/test-build-options");
+    assert(stored.do_output == false);
     assert(stored.import_path.count == 2);
     assert(stored.import_path[1] == "local_modules");
 
@@ -62,6 +65,7 @@ validate_build_options :: () -> int {
     assert(options.output_type == "EXECUTABLE");
     assert(options.output_executable_name == "openjai_program");
     assert(options.output_path == "./out/should-not-alias");
+    assert(options.do_output == false);
     assert(options.stack_trace == false);
     assert(options.backtrace_on_crash == "OFF");
     assert(options.array_bounds_check == "ON");
@@ -76,8 +80,14 @@ validate_build_options :: () -> int {
 
     round_tripped := round_trip_options(options);
     assert(round_tripped.output_path == "./out/should-not-alias");
+    assert(round_tripped.do_output == false);
     assert(round_tripped.import_path.count == 2);
     assert(round_tripped.import_path[1] == "local_modules");
+
+    set_build_options_dc(.{do_output = false});
+    current := get_build_options();
+    assert(current.do_output == false);
+    set_build_options_dc(.{do_output = true});
 
     return 12345;
 }

@@ -1147,6 +1147,7 @@ pub const Compilation = struct {
         if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
         if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        if (std.mem.eql(u8, field_name, "do_output")) return .{ .bool = options.do_output };
         if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = .{
             .output_bitcode = options.llvm_output_bitcode,
             .output_llvm_ir = options.llvm_output_ir,
@@ -1241,6 +1242,7 @@ pub const Compilation = struct {
             .enable_bytecode_inliner = value.enable_bytecode_inliner,
             .runtime_storageless_type_info = value.runtime_storageless_type_info,
             .use_custom_link_command = value.use_custom_link_command,
+            .do_output = value.do_output,
             .llvm_output_bitcode = value.llvm_output_bitcode,
             .llvm_output_ir = value.llvm_output_ir,
         };
@@ -1827,6 +1829,7 @@ fn buildOptionsSnapshotToSema(value: vm_mod.BuildOptionsSnapshot) sema.BuildOpti
         .enable_bytecode_inliner = value.enable_bytecode_inliner,
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
+        .do_output = value.do_output,
         .llvm_output_bitcode = value.llvm_output_bitcode,
         .llvm_output_ir = value.llvm_output_ir,
     };
@@ -1848,6 +1851,7 @@ fn buildOptionsSemaToVm(value: sema.BuildOptionsValue) vm_mod.BuildOptionsSnapsh
         .enable_bytecode_inliner = value.enable_bytecode_inliner,
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
+        .do_output = value.do_output,
         .llvm_output_bitcode = value.llvm_output_bitcode,
         .llvm_output_ir = value.llvm_output_ir,
     };

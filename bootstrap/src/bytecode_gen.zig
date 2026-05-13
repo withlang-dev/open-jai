@@ -1593,6 +1593,7 @@ const GenContext = struct {
         if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
         if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        if (std.mem.eql(u8, field_name, "do_output")) return .{ .bool = options.do_output };
         if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = .{
             .output_bitcode = options.llvm_output_bitcode,
             .output_llvm_ir = options.llvm_output_ir,
@@ -6495,18 +6496,8 @@ const GenContext = struct {
             if (ast.tag(child) != .assign_stmt or ast.tag(ast.data(child).lhs) != .identifier) {
                 return diag.failAt(ast.tokens[ast.mainToken(child)].start, "set_build_options_dc aggregate entries must be named fields", .{});
             }
-            const raw_field_name = ast.tokenSlice(ast.mainToken(ast.data(child).lhs));
-            const field_name = if (std.mem.eql(u8, raw_field_name, "do_output")) "output_type" else raw_field_name;
-            const rhs = if (std.mem.eql(u8, raw_field_name, "do_output")) blk: {
-                const rhs_node = ast.data(child).rhs;
-                if (ast.tag(rhs_node) == .bool_literal and ast.data(rhs_node).lhs == 0) {
-                    break :blk try ctx.emitString(rhs_node, "NO_OUTPUT");
-                }
-                if (ast.tag(rhs_node) == .bool_literal and ast.data(rhs_node).lhs != 0) {
-                    break :blk try ctx.emitString(rhs_node, "EXECUTABLE");
-                }
-                return diag.failAt(ast.tokens[ast.mainToken(rhs_node)].start, "set_build_options_dc.do_output requires a bool literal", .{});
-            } else try ctx.genBuildOptionsFieldAssignmentValue(field_name, ast.data(child).rhs, diag);
+            const field_name = ast.tokenSlice(ast.mainToken(ast.data(child).lhs));
+            const rhs = try ctx.genBuildOptionsFieldAssignmentValue(field_name, ast.data(child).rhs, diag);
             const field_index = try ctx.program.addString(field_name);
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .build_options_set_field, .dest = options, .arg1 = options, .arg2 = field_index, .arg3 = rhs, .source_node = source_node });
         }
@@ -7831,6 +7822,7 @@ fn buildOptionsSemaToVm(value: @import("Sema.zig").BuildOptionsValue) vm_mod.Bui
         .enable_bytecode_inliner = value.enable_bytecode_inliner,
         .runtime_storageless_type_info = value.runtime_storageless_type_info,
         .use_custom_link_command = value.use_custom_link_command,
+        .do_output = value.do_output,
         .llvm_output_bitcode = value.llvm_output_bitcode,
         .llvm_output_ir = value.llvm_output_ir,
     };
@@ -8471,7 +8463,8 @@ fn buildOptionsFieldType(name: []const u8) ?[]const u8 {
         std.mem.eql(u8, name, "stack_trace") or
         std.mem.eql(u8, name, "enable_bytecode_inliner") or
         std.mem.eql(u8, name, "runtime_storageless_type_info") or
-        std.mem.eql(u8, name, "use_custom_link_command"))
+        std.mem.eql(u8, name, "use_custom_link_command") or
+        std.mem.eql(u8, name, "do_output"))
     {
         return "bool";
     }

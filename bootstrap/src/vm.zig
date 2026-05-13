@@ -158,6 +158,7 @@ pub const BuildOptionsSnapshot = struct {
     enable_bytecode_inliner: bool = false,
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
+    do_output: bool = true,
     llvm_output_bitcode: bool = false,
     llvm_output_ir: bool = false,
 };
@@ -217,6 +218,7 @@ const BuildOptions = struct {
     enable_bytecode_inliner: bool = false,
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
+    do_output: bool = true,
     llvm_output_bitcode: bool = false,
     llvm_output_ir: bool = false,
     import_path: ?usize = null,
@@ -2907,6 +2909,7 @@ pub const VM = struct {
             .enable_bytecode_inliner = options.enable_bytecode_inliner,
             .runtime_storageless_type_info = options.runtime_storageless_type_info,
             .use_custom_link_command = options.use_custom_link_command,
+            .do_output = options.do_output,
             .llvm_output_bitcode = options.llvm_output_bitcode,
             .llvm_output_ir = options.llvm_output_ir,
         };
@@ -2929,6 +2932,7 @@ pub const VM = struct {
             .enable_bytecode_inliner = snapshot.enable_bytecode_inliner,
             .runtime_storageless_type_info = snapshot.runtime_storageless_type_info,
             .use_custom_link_command = snapshot.use_custom_link_command,
+            .do_output = snapshot.do_output,
             .llvm_output_bitcode = snapshot.llvm_output_bitcode,
             .llvm_output_ir = snapshot.llvm_output_ir,
         });
@@ -3042,6 +3046,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "enable_bytecode_inliner")) return .{ .bool = options.enable_bytecode_inliner };
         if (std.mem.eql(u8, field_name, "runtime_storageless_type_info")) return .{ .bool = options.runtime_storageless_type_info };
         if (std.mem.eql(u8, field_name, "use_custom_link_command")) return .{ .bool = options.use_custom_link_command };
+        if (std.mem.eql(u8, field_name, "do_output")) return .{ .bool = options.do_output };
         if (std.mem.eql(u8, field_name, "llvm_options")) return .{ .build_llvm_options = index };
         if (std.mem.eql(u8, field_name, "import_path")) return .{ .ptr = try vm.buildOptionsImportPath(index, diag) };
         if (std.mem.eql(u8, field_name, "compile_time_command_line")) return .{ .ptr = try vm.buildOptionsCommandLine(index, diag) };
@@ -3193,6 +3198,10 @@ pub const VM = struct {
         }
         if (std.mem.eql(u8, field_name, "use_custom_link_command")) {
             options.use_custom_link_command = try registerTruthy(value, diag, "Build_Options.use_custom_link_command");
+            return;
+        }
+        if (std.mem.eql(u8, field_name, "do_output")) {
+            options.do_output = try registerTruthy(value, diag, "Build_Options.do_output");
             return;
         }
         if (std.mem.eql(u8, field_name, "import_path")) {
@@ -3705,6 +3714,7 @@ pub const VM = struct {
         std.debug.print("    null_pointer_check = {s};\n", .{options.null_pointer_check});
         std.debug.print("    enable_bytecode_inliner = {s};\n", .{if (options.enable_bytecode_inliner) "true" else "false"});
         std.debug.print("    runtime_storageless_type_info = {s};\n", .{if (options.runtime_storageless_type_info) "true" else "false"});
+        std.debug.print("    do_output = {s};\n", .{if (options.do_output) "true" else "false"});
         std.debug.print("    import_path = ", .{});
         try vm.printValue(.{ .ptr = try vm.buildOptionsImportPath(index, diag) }, diag, "Build_Options.import_path print");
         std.debug.print(";\n}}", .{});
@@ -4557,8 +4567,8 @@ pub const VM = struct {
         const options = vm.build_options.items[index];
         const prefix = try std.fmt.allocPrint(
             vm.allocator,
-            "{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; intermediate_path = \"{s}\"; write_added_strings = {s}; stack_trace = {s}; backtrace_on_crash = {s}; array_bounds_check = {s}; cast_bounds_check = {s}; null_pointer_check = {s}; enable_bytecode_inliner = {s}; runtime_storageless_type_info = {s}; use_custom_link_command = {s}; import_path = ",
-            .{ options.output_type, options.backend, options.output_executable_name, options.output_path, options.intermediate_path, if (options.write_added_strings) "true" else "false", if (options.stack_trace) "true" else "false", options.backtrace_on_crash, options.array_bounds_check, options.cast_bounds_check, options.null_pointer_check, if (options.enable_bytecode_inliner) "true" else "false", if (options.runtime_storageless_type_info) "true" else "false", if (options.use_custom_link_command) "true" else "false" },
+            "{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; intermediate_path = \"{s}\"; write_added_strings = {s}; stack_trace = {s}; backtrace_on_crash = {s}; array_bounds_check = {s}; cast_bounds_check = {s}; null_pointer_check = {s}; enable_bytecode_inliner = {s}; runtime_storageless_type_info = {s}; use_custom_link_command = {s}; do_output = {s}; import_path = ",
+            .{ options.output_type, options.backend, options.output_executable_name, options.output_path, options.intermediate_path, if (options.write_added_strings) "true" else "false", if (options.stack_trace) "true" else "false", options.backtrace_on_crash, options.array_bounds_check, options.cast_bounds_check, options.null_pointer_check, if (options.enable_bytecode_inliner) "true" else "false", if (options.runtime_storageless_type_info) "true" else "false", if (options.use_custom_link_command) "true" else "false", if (options.do_output) "true" else "false" },
         );
         defer vm.allocator.free(prefix);
         try builder.appendSlice(vm.allocator, prefix);

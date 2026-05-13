@@ -208,6 +208,7 @@ pub const BuildOptionsValue = struct {
     enable_bytecode_inliner: bool = false,
     runtime_storageless_type_info: bool = false,
     use_custom_link_command: bool = false,
+    do_output: bool = true,
     llvm_output_bitcode: bool = false,
     llvm_output_ir: bool = false,
 };
