@@ -29,6 +29,7 @@ pub const Compilation = struct {
     pending_current_workspace_sources: std.ArrayList([]const u8) = .empty,
     workspace_sources: std.ArrayList(vm_mod.WorkspaceSourceSnapshot) = .empty,
     workspace_build_options: std.AutoHashMapUnmanaged(i64, vm_mod.BuildOptionsSnapshot) = .empty,
+    loaded_module_paths: std.StringHashMapUnmanaged(void) = .empty,
     next_workspace_id: i64 = 3,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
@@ -50,6 +51,12 @@ pub const Compilation = struct {
         var it = comp.workspace_build_options.iterator();
         while (it.next()) |entry| vm_mod.VM.freeBuildOptionsSnapshot(comp.allocator, entry.value_ptr.*);
         comp.workspace_build_options.clearRetainingCapacity();
+    }
+
+    fn clearLoadedModules(comp: *Compilation) void {
+        var it = comp.loaded_module_paths.keyIterator();
+        while (it.next()) |key| comp.allocator.free(key.*);
+        comp.loaded_module_paths.clearRetainingCapacity();
     }
 
     fn captureVMWorkspaceState(comp: *Compilation, vm: *vm_mod.VM) !void {
@@ -181,6 +188,8 @@ pub const Compilation = struct {
             comp.clearWorkspaceBuildState();
             comp.workspace_sources.deinit(comp.allocator);
             comp.workspace_build_options.deinit(comp.allocator);
+            comp.clearLoadedModules();
+            comp.loaded_module_paths.deinit(comp.allocator);
         }
 
         var source = try comp.loadSourceWithLoads(comp.options.input_path);
@@ -1140,6 +1149,10 @@ pub const Compilation = struct {
     }
 
     fn appendLoadedModule(comp: *Compilation, out: *std.ArrayList(u8), module_path: []const u8, source_path: []const u8) anyerror!void {
+        if (comp.loaded_module_paths.contains(module_path)) return;
+        const owned_module_path = try comp.allocator.dupe(u8, module_path);
+        errdefer comp.allocator.free(owned_module_path);
+        try comp.loaded_module_paths.put(comp.allocator, owned_module_path, {});
         const loaded = try comp.loadSourceWithLoads(module_path);
         defer comp.allocator.free(loaded);
         try out.appendSlice(comp.allocator, "#load \"");

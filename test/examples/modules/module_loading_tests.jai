@@ -13,3 +13,7 @@ local_module_scope_file_keeps_private_helpers_private :: () {
 commented_module_imports_do_not_load_source :: () {
     expect_compile_failure("test/examples/modules/module_comment_import_value.jai", "unresolved identifier 'comment_only_value'");
 } @TestProcedure
+
+duplicate_module_imports_load_source_once :: () {
+    expect_compile_output("test/examples/modules/module_duplicate_import_value.jai", "duplicate module loaded\n");
+} @TestProcedure
