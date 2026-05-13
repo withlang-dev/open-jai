@@ -1985,6 +1985,39 @@ const GenContext = struct {
         return true;
     }
 
+    fn tryEmitFileOpenMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
+        const ast = ctx.ast;
+        const children = ast.extraSlice(ast.data(stmt).lhs);
+        if (children.len != 2) return false;
+        const first: NodeIndex = @intCast(children[0]);
+        const rhs = stmtInitOrAssignRhs(ast, first) orelse return false;
+        if (ast.tag(rhs) != .call_expr) return false;
+        const callee = ast.data(rhs).lhs;
+        if (ast.tag(callee) != .identifier or !std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "file_open")) return false;
+        const second: NodeIndex = @intCast(children[1]);
+        if ((stmtInitOrAssignRhs(ast, second) orelse return false) != rhs) return false;
+
+        const args = ast.extraSlice(ast.data(rhs).rhs);
+        if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(rhs)].start, "file_open expects one path string", .{});
+        const path_reg = try ctx.genExpr(@intCast(args[0]), diag);
+        const handle_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        const success_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .file_open,
+            .dest = handle_reg,
+            .arg1 = path_reg,
+            .arg2 = try namedBoolArg(ctx, args[1..], "for_writing", false, diag),
+            .arg3 = try namedBoolArg(ctx, args[1..], "keep_existing_content", false, diag),
+            .arg4 = success_reg + 1,
+            .source_node = rhs,
+        });
+        try ctx.bindStmtTarget(first, handle_reg, diag);
+        try ctx.bindStmtTarget(second, success_reg, diag);
+        return true;
+    }
+
     fn tryEmitCompilerGetNodesMultiReturn(ctx: *GenContext, stmt: NodeIndex, diag: Diagnostic) !bool {
         const ast = ctx.ast;
         const children = ast.extraSlice(ast.data(stmt).lhs);
@@ -2114,6 +2147,7 @@ const GenContext = struct {
                 if (try ctx.tryEmitRunCommandMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitAllocatorCapabilitiesMultiReturn(stmt, diag)) return;
                 if (try ctx.tryEmitStringMultiReturn(stmt, diag)) return;
+                if (try ctx.tryEmitFileOpenMultiReturn(stmt, diag)) return;
                 var is_all_assign = true;
                 var all_assign_targets_are_locals = true;
                 for (ast.extraSlice(ast.data(stmt).lhs)) |child| {

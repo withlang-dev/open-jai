@@ -182,6 +182,20 @@ const DynamicArray = struct {
     elems: std.ArrayList(RegisterValue) = .empty,
 };
 
+const HostFile = struct {
+    path: []const u8,
+    contents: std.ArrayList(u8) = .empty,
+    cursor: usize = 0,
+    writable: bool = false,
+    dirty: bool = false,
+    open: bool = true,
+};
+
+const HostFileOpenResult = struct {
+    handle: i64,
+    ok: bool,
+};
+
 pub const VM = struct {
     allocator: std.mem.Allocator,
     program: *const Bytecode.Program,
@@ -201,6 +215,7 @@ pub const VM = struct {
     compiler_message_declarations: std.ArrayList(CodeNode) = .empty,
     compiler_message_notes: std.ArrayList(CodeNote) = .empty,
     workspace_sources: std.ArrayList(WorkspaceSource) = .empty,
+    open_files: std.ArrayList(HostFile) = .empty,
     intercepted_workspace: i64 = 0,
     io: ?std.Io = null,
     base_dir: []const u8 = ".",
@@ -284,6 +299,11 @@ pub const VM = struct {
             vm.allocator.free(source.source);
         }
         vm.workspace_sources.deinit(vm.allocator);
+        for (vm.open_files.items) |*file| {
+            vm.allocator.free(file.path);
+            file.contents.deinit(vm.allocator);
+        }
+        vm.open_files.deinit(vm.allocator);
     }
 
     pub fn runProc(vm: *VM, proc_index: u32, diag: Diagnostic) !Value {
@@ -1430,11 +1450,58 @@ pub const VM = struct {
                     }
                     if (inst.dest < regs.len) regs[inst.dest] = regs[inst.arg1];
                 },
-                .get_command_line_arguments, .file_open => {
+                .get_command_line_arguments => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM runtime API destination register out of range", .{});
                     return diag.failAt(0, "VM does not support runtime API opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
-                .file_close, .file_length, .file_set_position, .file_write, .file_read, .posix_read => {
+                .file_open => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM file_open destination register out of range", .{});
+                    const path = try vm.registerText(regs[inst.arg1], diag, "file_open path");
+                    const opened = try vm.hostFileOpen(path, inst.arg2 != 0, inst.arg3 != 0, diag);
+                    regs[inst.dest] = .{ .int = opened.handle };
+                    if (inst.arg4 != 0) {
+                        const ok_reg = inst.arg4 - 1;
+                        if (ok_reg >= regs.len) return diag.failAt(0, "VM file_open success register out of range", .{});
+                        regs[ok_reg] = .{ .bool = opened.ok };
+                    }
+                },
+                .file_close => {
+                    if (inst.arg1 >= regs.len) return diag.failAt(0, "VM file_close register out of range", .{});
+                    try vm.hostFileClose(try registerInt(regs[inst.arg1], diag, "file_close handle"), diag);
+                },
+                .file_length => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM file_length register out of range", .{});
+                    regs[inst.dest] = .{ .int = @intCast((try vm.hostFile(try registerInt(regs[inst.arg1], diag, "file_length handle"), diag)).contents.items.len) };
+                },
+                .file_set_position => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM file_set_position register out of range", .{});
+                    const position = try registerInt(regs[inst.arg2], diag, "file_set_position position");
+                    regs[inst.dest] = .{ .bool = if (position < 0)
+                        false
+                    else
+                        try vm.hostFileSetPosition(try registerInt(regs[inst.arg1], diag, "file_set_position handle"), @intCast(position), diag) };
+                },
+                .file_write => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM file_write register out of range", .{});
+                    const data = if (inst.arg4 != 0)
+                        try vm.registerText(regs[inst.arg2], diag, "file_write data")
+                    else blk: {
+                        if (inst.arg3 >= regs.len) return diag.failAt(0, "VM file_write length register out of range", .{});
+                        const len = try registerInt(regs[inst.arg3], diag, "file_write byte count");
+                        if (len < 0) return diag.failAt(0, "VM file_write byte count cannot be negative", .{});
+                        const ptr = try registerPointer(regs[inst.arg2], diag, "file_write data pointer");
+                        break :blk try vm.blockSlice(ptr, @intCast(len), diag);
+                    };
+                    regs[inst.dest] = .{ .bool = try vm.hostFileWrite(try registerInt(regs[inst.arg1], diag, "file_write handle"), data, diag) };
+                },
+                .file_read => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM file_read register out of range", .{});
+                    const len = try registerInt(regs[inst.arg3], diag, "file_read byte count");
+                    if (len < 0) return diag.failAt(0, "VM file_read byte count cannot be negative", .{});
+                    const ptr = try registerPointer(regs[inst.arg2], diag, "file_read destination");
+                    regs[inst.dest] = .{ .bool = try vm.hostFileRead(try registerInt(regs[inst.arg1], diag, "file_read handle"), ptr, @intCast(len), diag) };
+                },
+                .posix_read => {
                     return diag.failAt(0, "VM does not support runtime file opcode {s} in #run yet", .{@tagName(inst.opcode)});
                 },
                 .string_builder_init => {
@@ -1685,6 +1752,96 @@ pub const VM = struct {
         std.Io.Dir.cwd().writeFile(io, .{ .sub_path = full, .data = contents }) catch |err| {
             return diag.failAt(0, "VM compiler_write_file failed for '{s}': {s}", .{ full, @errorName(err) });
         };
+        return true;
+    }
+
+    fn hostFileOpen(vm: *VM, path: []const u8, for_writing: bool, keep_existing_content: bool, diag: Diagnostic) !HostFileOpenResult {
+        const io = try vm.requireIo(diag, "file_open");
+        const full = try vm.resolvedHostPath(path);
+        errdefer vm.allocator.free(full);
+
+        var contents = std.ArrayList(u8).empty;
+        errdefer contents.deinit(vm.allocator);
+
+        if (!for_writing or keep_existing_content) {
+            const loaded = std.Io.Dir.cwd().readFileAlloc(io, full, vm.allocator, .limited(256 * 1024 * 1024)) catch |err| switch (err) {
+                error.FileNotFound => blk: {
+                    if (!for_writing) {
+                        vm.allocator.free(full);
+                        return .{ .handle = 0, .ok = false };
+                    }
+                    break :blk &[_]u8{};
+                },
+                else => return diag.failAt(0, "VM file_open failed for '{s}': {s}", .{ full, @errorName(err) }),
+            };
+            defer if (loaded.len != 0) vm.allocator.free(loaded);
+            try contents.appendSlice(vm.allocator, loaded);
+        }
+
+        try vm.open_files.append(vm.allocator, .{
+            .path = full,
+            .contents = contents,
+            .cursor = 0,
+            .writable = for_writing,
+            .dirty = for_writing and !keep_existing_content,
+        });
+        return .{ .handle = @intCast(vm.open_files.items.len), .ok = true };
+    }
+
+    fn hostFile(vm: *VM, handle: i64, diag: Diagnostic) !*HostFile {
+        if (handle <= 0) return diag.failAt(0, "VM file handle is null", .{});
+        const index: usize = @intCast(handle - 1);
+        if (index >= vm.open_files.items.len) return diag.failAt(0, "VM file handle {d} is out of range", .{handle});
+        const file = &vm.open_files.items[index];
+        if (!file.open) return diag.failAt(0, "VM file handle {d} is closed", .{handle});
+        return file;
+    }
+
+    fn hostFileClose(vm: *VM, handle: i64, diag: Diagnostic) !void {
+        const io = try vm.requireIo(diag, "file_close");
+        const file = try vm.hostFile(handle, diag);
+        if (file.dirty) {
+            try vm.ensureHostParentDir(io, file.path);
+            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file.path, .data = file.contents.items }) catch |err| {
+                return diag.failAt(0, "VM file_close failed to flush '{s}': {s}", .{ file.path, @errorName(err) });
+            };
+            file.dirty = false;
+        }
+        file.open = false;
+    }
+
+    fn hostFileSetPosition(vm: *VM, handle: i64, position: usize, diag: Diagnostic) !bool {
+        const file = try vm.hostFile(handle, diag);
+        file.cursor = position;
+        return true;
+    }
+
+    fn hostFileWrite(vm: *VM, handle: i64, data: []const u8, diag: Diagnostic) !bool {
+        const file = try vm.hostFile(handle, diag);
+        if (!file.writable) return false;
+        if (file.cursor > file.contents.items.len) {
+            const old_len = file.contents.items.len;
+            try file.contents.resize(vm.allocator, file.cursor);
+            @memset(file.contents.items[old_len..], 0);
+        }
+        const end = file.cursor + data.len;
+        if (end > file.contents.items.len) {
+            const old_len = file.contents.items.len;
+            try file.contents.resize(vm.allocator, end);
+            @memset(file.contents.items[old_len..], 0);
+        }
+        if (data.len != 0) @memcpy(file.contents.items[file.cursor..end], data);
+        file.cursor = end;
+        file.dirty = true;
+        return true;
+    }
+
+    fn hostFileRead(vm: *VM, handle: i64, dest: Pointer, len: usize, diag: Diagnostic) !bool {
+        const file = try vm.hostFile(handle, diag);
+        if (len > file.contents.items.len -| file.cursor) return false;
+        const out = try vm.blockSlice(dest, len, diag);
+        if (len != 0) @memcpy(out, file.contents.items[file.cursor .. file.cursor + len]);
+        file.cursor += len;
         return true;
     }
 
