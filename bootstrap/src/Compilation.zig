@@ -497,7 +497,15 @@ pub const Compilation = struct {
             .float_literal => std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(node))) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)}),
             .integer_literal => @floatFromInt(std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)})),
             .identifier => blk: {
-                const decl = resolved.local_values.get(node) orelse return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run argument is not a supported compile-time value", .{});
+                const decl = resolved.local_values.get(node) orelse blk_decl: {
+                    const name = ast.tokenSlice(ast.mainToken(node));
+                    if (resolved.lookup(name)) |sym| switch (sym) {
+                        .const_value => |value_node| break :blk_decl value_node,
+                        else => {},
+                    };
+                    return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run argument is not a supported compile-time value", .{});
+                };
+                if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run argument is not a supported compile-time value", .{});
                 if (typed.comptime_floats.get(decl)) |value| break :blk value;
                 if (typed.comptime_ints.get(decl)) |value| break :blk @as(f64, @floatFromInt(value));
                 const initializer_node = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else decl;
@@ -559,6 +567,17 @@ pub const Compilation = struct {
         }
         if (std.mem.eql(u8, direct_name, "run_command")) {
             return try comp.executeRunCommand(ast, typed, resolved, call_args, diag);
+        }
+        if (std.mem.eql(u8, direct_name, "sin") or std.mem.eql(u8, direct_name, "sqrt") or std.mem.eql(u8, direct_name, "cos")) {
+            if (call_args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "{s} expects one argument", .{direct_name});
+            const arg = try evalComptimeFloatExpr(ast, typed, resolved, @intCast(call_args[0]), diag);
+            const result = if (std.mem.eql(u8, direct_name, "sin"))
+                @sin(arg)
+            else if (std.mem.eql(u8, direct_name, "sqrt"))
+                std.math.sqrt(arg)
+            else
+                std.math.cos(arg);
+            return .{ .float = result };
         }
         if (std.mem.eql(u8, direct_name, "join")) {
             var out = std.ArrayList(u8).empty;
@@ -627,6 +646,12 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .float = try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(arg))) });
             } else if (ast.tag(arg) == .call_expr) {
                 try arg_values.append(comp.allocator, try comp.executeRunCall(ast, typed, resolved, arg, arg, diag));
+            } else if (ast.tag(arg) == .binary_expr or ast.tag(arg) == .unary_expr) {
+                if (evalComptimeFloatExpr(ast, typed, resolved, arg, diag)) |value| {
+                    try arg_values.append(comp.allocator, .{ .float = value });
+                } else |_| {
+                    try arg_values.append(comp.allocator, .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) });
+                }
             } else if (ast.tag(arg) == .meta_expr or ast.tag(arg) == .type_expr) {
                 return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument kind {s}", .{@tagName(ast.tag(arg))});
             } else if (ast.tag(arg) == .identifier) {
@@ -1063,7 +1088,14 @@ pub const Compilation = struct {
             .integer_literal => std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)}),
             .bool_literal => if (ast.data(node).lhs != 0) 1 else 0,
             .identifier => blk: {
-                const decl = resolved.local_values.get(node) orelse return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run constant expression identifier is unresolved", .{});
+                const decl = resolved.local_values.get(node) orelse blk_decl: {
+                    const name = ast.tokenSlice(ast.mainToken(node));
+                    if (resolved.lookup(name)) |sym| switch (sym) {
+                        .const_value => |value_node| break :blk_decl value_node,
+                        else => {},
+                    };
+                    return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run constant expression identifier is unresolved", .{});
+                };
                 if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) break :blk 0;
                 if (typed.comptime_ints.get(decl)) |value| break :blk value;
                 const initializer = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else decl;

@@ -109,3 +109,7 @@ bindings_generator_module_import_loads_real_source :: () {
 thread_module_import_loads_real_source_and_updates_state :: () {
     expect_compile_output("test/examples/modules/thread_module_import_value.jai", "thread:true true true true true 3 2 true true 7 true 1\n");
 } @TestProcedure
+
+math_module_import_loads_real_source_and_math_intrinsics_lower :: () {
+    expect_compile_output("test/examples/modules/math_module_import_value.jai", "math:1 5 9 3 5 4 7 1\n");
+} @TestProcedure

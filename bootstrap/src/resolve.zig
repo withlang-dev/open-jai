@@ -266,7 +266,12 @@ pub const Resolved = struct {
 
     fn putRealSymbol(r: *Resolved, name: []const u8, sym: Symbol) !void {
         if (r.symbols.get(name)) |existing| {
-            if (existing != .placeholder) return;
+            const can_replace = switch (existing) {
+                .placeholder => true,
+                .const_value => |node| node == @import("Ast.zig").null_node,
+                else => false,
+            };
+            if (!can_replace) return;
             _ = r.explicit_placeholders.remove(name);
             _ = r.used_explicit_placeholders.remove(name);
             _ = r.implicit_placeholders.remove(name);
@@ -569,14 +574,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "compiler_arg", .builtin_compiler_arg);
                     try r.symbols.put(allocator, "compiler_read_file", .builtin_compiler_read_file);
                     try r.symbols.put(allocator, "compiler_write_file", .builtin_compiler_write_file);
-                } else if (std.mem.eql(u8, module_name, "Math")) {
-                    try r.symbols.put(allocator, "sin", .builtin_sin);
-                    try r.symbols.put(allocator, "abs", .builtin_abs);
-                    try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
-                    try r.symbols.put(allocator, "Vector4", .{ .const_value = @import("Ast.zig").null_node });
-                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "make_vector4", "sqrt", "cos", "min", "max", "clamp" }) |name| {
-                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                    }
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);

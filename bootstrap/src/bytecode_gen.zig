@@ -730,7 +730,7 @@ const GenContext = struct {
                 const size_reg = try ctx.emitInt(source_node, @intCast(try typeTextSize(ctx, clean_field_type, diag)));
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = value_reg, .arg2 = size_reg, .source_node = source_node });
             } else {
-                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = addr, .arg1 = value_reg, .source_node = source_node });
+                try emitStoreToAddressForType(ctx, addr, value_reg, clean_field_type, source_node, diag);
             }
         }
     }
@@ -1376,6 +1376,17 @@ const GenContext = struct {
         }
         const name = ast.tokenSlice(ast.mainToken(callee));
         const args = ast.extraSlice(ast.data(call).rhs);
+        if (std.mem.eql(u8, name, "sin") or std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
+            if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(call)].start, "{s} expects one argument", .{name});
+            const arg = try ctx.evalFloatConstExpr(@intCast(args[0]), diag);
+            const result = if (std.mem.eql(u8, name, "sin"))
+                @sin(arg)
+            else if (std.mem.eql(u8, name, "sqrt"))
+                std.math.sqrt(arg)
+            else
+                std.math.cos(arg);
+            return .{ .float = result };
+        }
         if (std.mem.eql(u8, name, "type_to_string")) {
             if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(call)].start, "type_to_string expects one argument", .{});
             const value = try ctx.executeRunValue(@intCast(args[0]), bindings, diag);
@@ -4253,19 +4264,7 @@ const GenContext = struct {
                         };
                         const clean_field_type = std.mem.trim(u8, info.type_text, " \t\r\n");
                         if (isDynamicArrayTypeText(clean_field_type) or isStaticArrayTypeText(clean_field_type) or try typeTextIsEmbeddedStruct(ctx, clean_field_type, diag)) return addr;
-                        const reg = proc.num_registers;
-                        proc.num_registers += 1;
-                        if (std.mem.eql(u8, firstTypeWord(clean_field_type), "string")) {
-                            try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr_string, .dest = reg, .arg1 = addr, .source_node = expr });
-                        } else if (std.mem.eql(u8, firstTypeWord(clean_field_type), "bool")) {
-                            const raw = proc.num_registers;
-                            proc.num_registers += 1;
-                            try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr_byte, .dest = raw, .arg1 = addr, .source_node = expr });
-                            try proc.instructions.append(program.allocator, .{ .opcode = .int_to_bool_cast, .dest = reg, .arg1 = raw, .source_node = expr });
-                        } else {
-                            try proc.instructions.append(program.allocator, .{ .opcode = .load_ptr, .dest = reg, .arg1 = addr, .source_node = expr });
-                        }
-                        return reg;
+                        return try emitLoadFromAddressForType(ctx, addr, clean_field_type, expr, diag);
                     }
                 }
                 const lhs_ty = if (ctx.typed) |typed| typed.typeOf(ast.data(expr).lhs) else Type.voidType();
@@ -5330,7 +5329,18 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "abs")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "abs expects one argument", .{});
-                    return try ctx.genExpr(@intCast(args[0]), diag);
+                    const value = try ctx.genExpr(@intCast(args[0]), diag);
+                    const zero = try ctx.emitInt(expr, 0);
+                    const cmp = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .cmp_lt_int, .dest = cmp, .arg1 = value, .arg2 = zero, .source_node = expr });
+                    const neg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .neg_int, .dest = neg, .arg1 = value, .source_node = expr });
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .select_value, .dest = reg, .arg1 = cmp, .arg2 = neg, .arg3 = value, .source_node = expr });
+                    return reg;
                 }
                 if (std.mem.eql(u8, name, "to_float64_seconds")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
@@ -5393,7 +5403,7 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .load_bool, .dest = reg, .arg1 = 1, .source_node = expr });
                     return reg;
                 }
-                if (!std.mem.eql(u8, name, "print") and !std.mem.eql(u8, name, "log")) {
+                if (!std.mem.eql(u8, name, "print") and !std.mem.eql(u8, name, "log") and !isNameLoweredAsMathIntrinsic(name)) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     var is_user_proc_call = false;
                     if (ctx.resolved.local_values.get(callee)) |decl| is_user_proc_call = ctx.localDeclIsProcedureCallable(decl);
@@ -5527,9 +5537,23 @@ const GenContext = struct {
             return reg;
         }
         if (std.mem.eql(u8, name, "make_vector2") or std.mem.eql(u8, name, "make_vector3") or std.mem.eql(u8, name, "make_vector4")) {
-            for (args) |arg| _ = try ctx.genExpr(handleArgNode(ast, @intCast(arg)), diag);
             const type_name = if (std.mem.eql(u8, name, "make_vector2")) "Vector2" else if (std.mem.eql(u8, name, "make_vector3")) "Vector3" else "Vector4";
-            return try ctx.genDefaultValueFromText(type_name, expr, diag);
+            const expected: usize = if (std.mem.eql(u8, name, "make_vector2")) 2 else if (std.mem.eql(u8, name, "make_vector3")) 3 else 4;
+            if (args.len != expected) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects {d} arguments", .{ name, expected });
+            const dest = try ctx.genDefaultValueFromText(type_name, expr, diag);
+            const type_node = try structTypeNodeByName(ctx, type_name) orelse return dest;
+            for (args, 0..) |arg_idx, index| {
+                const info = try containerFieldInfoAtIndex(ctx, type_node, index, diag) orelse continue;
+                const addr = if (info.offset == 0) dest else blk: {
+                    const tmp = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = tmp, .arg1 = dest, .arg2 = @intCast(info.offset), .source_node = expr });
+                    break :blk tmp;
+                };
+                const value = try ctx.genExpr(handleArgNode(ast, @intCast(arg_idx)), diag);
+                try emitStoreToAddressForType(ctx, addr, value, info.type_text, expr, diag);
+            }
+            return dest;
         }
 
         if (std.mem.eql(u8, name, "compiler_create_workspace")) {
@@ -6031,6 +6055,15 @@ const GenContext = struct {
         return ctx.resolved.overloads(name) != null;
     }
 
+    fn isNameLoweredAsMathIntrinsic(name: []const u8) bool {
+        return std.mem.eql(u8, name, "sin") or
+            std.mem.eql(u8, name, "sqrt") or
+            std.mem.eql(u8, name, "cos") or
+            std.mem.eql(u8, name, "make_vector2") or
+            std.mem.eql(u8, name, "make_vector3") or
+            std.mem.eql(u8, name, "make_vector4");
+    }
+
     fn genInlineResultSlot(ctx: *GenContext, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const result = try ctx.genTypedPlaceholderValue(source_node, diag);
         const should_stack_back = if (ctx.typed) |typed| blk: {
@@ -6109,6 +6142,9 @@ const GenContext = struct {
 
     fn evalFloatConstExpr(ctx: *GenContext, node: NodeIndex, diag: Diagnostic) !f64 {
         const ast = ctx.ast;
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) {
+            return diag.failAt(0, "float constant expression is not a valid AST node", .{});
+        }
         if (ctx.typed) |typed| {
             if (typed.comptime_floats.get(node)) |value| return value;
             if (typed.comptime_ints.get(node)) |value| return @floatFromInt(value);
@@ -6119,7 +6155,14 @@ const GenContext = struct {
             .identifier => blk: {
                 const name = ast.tokenSlice(ast.mainToken(node));
                 if (std.mem.eql(u8, name, "PI")) break :blk std.math.pi;
-                const decl = ctx.resolved.local_values.get(node) orelse return diag.failAt(ast.tokens[ast.mainToken(node)].start, "expected compile-time numeric value", .{});
+                const decl = ctx.resolved.local_values.get(node) orelse blk_decl: {
+                    if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                        .const_value => |value_node| break :blk_decl value_node,
+                        else => {},
+                    };
+                    return diag.failAt(ast.tokens[ast.mainToken(node)].start, "expected compile-time numeric value", .{});
+                };
+                if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "expected compile-time numeric value", .{});
                 const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else @import("Ast.zig").null_node;
                 if (init == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "expected compile-time numeric value", .{});
                 break :blk try ctx.evalFloatConstExpr(init, diag);
@@ -6884,10 +6927,22 @@ fn formatNamedIntOption(ctx: *GenContext, args: []const u32, name: []const u8, d
 
 fn evalIntegerConstExpr(ctx: *GenContext, node: NodeIndex, diag: Diagnostic) !i64 {
     const ast = ctx.ast;
+    if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) {
+        return diag.failAt(0, "integer constant expression is not a valid AST node", .{});
+    }
     return switch (ast.tag(node)) {
         .integer_literal => try parseIntLiteral(ast, node, diag),
         .identifier => blk: {
-            if (ctx.resolved.local_values.get(node)) |decl| {
+            const decl_opt = ctx.resolved.local_values.get(node) orelse blk_decl: {
+                const name = ast.tokenSlice(ast.mainToken(node));
+                if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |value_node| break :blk_decl value_node,
+                    else => {},
+                };
+                break :blk_decl @import("Ast.zig").null_node;
+            };
+            if (decl_opt != @import("Ast.zig").null_node and decl_opt < ast.node_tags.items.len) {
+                const decl = decl_opt;
                 if (ast.tag(decl) == .const_decl) break :blk try evalIntegerConstExpr(ctx, ast.data(decl).lhs, diag);
                 if (ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node) break :blk try evalIntegerConstExpr(ctx, ast.data(decl).rhs, diag);
                 break :blk try evalIntegerConstExpr(ctx, decl, diag);
@@ -9640,7 +9695,13 @@ fn emitLoadFromAddressForType(ctx: *GenContext, addr: Bytecode.Register, raw_typ
         .load_ptr_byte
     else
         .load_ptr;
-    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = addr, .source_node = source_node });
+    try ctx.proc.instructions.append(ctx.program.allocator, .{
+        .opcode = opcode,
+        .dest = reg,
+        .arg1 = addr,
+        .arg2 = if (opcode == .load_ptr_float) @intCast(try typeTextSize(ctx, clean_type, diag)) else 0,
+        .source_node = source_node,
+    });
     return reg;
 }
 

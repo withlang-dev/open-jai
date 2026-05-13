@@ -923,7 +923,7 @@ pub const VM = struct {
                     regs[inst.dest] = if (inst.opcode == .load_ptr_byte)
                         .{ .int = try vm.loadByte(ptr, diag) }
                     else if (inst.opcode == .load_ptr_float)
-                        .{ .float = @bitCast(try vm.loadU64(ptr, diag)) }
+                        .{ .float = if (inst.arg2 == 4) @as(f64, @floatCast(try vm.loadF32(ptr, diag))) else @bitCast(try vm.loadU64(ptr, diag)) }
                     else
                         .{ .int = @bitCast(try vm.loadU64(ptr, diag)) };
                 },
