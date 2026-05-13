@@ -167,9 +167,78 @@ export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64)
 }
 
 export fn __openjai_print_float(value: f64) void {
+    if (writeLargeFloat32IntegerText(value)) return;
     var buf: [128]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{d:.6}", .{value}) catch unreachable;
     writeFloatText(text);
+}
+
+fn writeLargeFloat32IntegerText(value: f64) bool {
+    if (!std.math.isFinite(value) or @abs(value) < 1.0e15) return false;
+    const value32: f32 = @floatCast(value);
+    if (@as(f64, @floatCast(value32)) != value) return false;
+
+    const bits: u32 = @bitCast(value32);
+    const exp_raw = (bits >> 23) & 0xff;
+    if (exp_raw == 0 or exp_raw == 0xff) return false;
+    const exponent = @as(i32, @intCast(exp_raw)) - 127;
+    if (exponent < 23) return false;
+    const shift = exponent - 23;
+    if (shift > 104) return false;
+
+    const negative = (bits & 0x80000000) != 0;
+    const mantissa = @as(u128, (bits & 0x7fffff) | 0x800000);
+    var magnitude = mantissa << @as(u7, @intCast(shift));
+    if (magnitude == 0) return false;
+
+    var reversed: [64]u8 = undefined;
+    var digit_count: usize = 0;
+    while (magnitude != 0) {
+        reversed[digit_count] = '0' + @as(u8, @intCast(magnitude % 10));
+        digit_count += 1;
+        magnitude /= 10;
+    }
+
+    var out: [80]u8 = undefined;
+    var start: usize = 0;
+    if (negative) {
+        out[0] = '-';
+        start = 1;
+    }
+    var i: usize = 0;
+    while (i < digit_count) : (i += 1) {
+        out[start + i] = reversed[digit_count - 1 - i];
+    }
+
+    const significant_digits: usize = 18;
+    var total_len = start + digit_count;
+    if (digit_count > significant_digits) {
+        var carry = out[start + significant_digits] >= '5';
+        if (carry) {
+            var pos = start + significant_digits;
+            while (pos > start) {
+                pos -= 1;
+                if (out[pos] != '9') {
+                    out[pos] += 1;
+                    carry = false;
+                    break;
+                }
+                out[pos] = '0';
+            }
+        }
+        if (carry) {
+            out[start] = '1';
+            var zero: usize = 1;
+            while (zero <= digit_count) : (zero += 1) out[start + zero] = '0';
+            total_len = start + digit_count + 1;
+        } else {
+            var zero = start + significant_digits;
+            while (zero < start + digit_count) : (zero += 1) out[zero] = '0';
+            total_len = start + digit_count;
+        }
+    }
+    writeAll(out[0..total_len]);
+    return true;
 }
 
 export fn __openjai_print_format_float(value: f64, width: i64, trailing_width: i64, zero_removal: i64, mode: i64) void {

@@ -603,7 +603,7 @@ pub const Compilation = struct {
         if (typed.comptime_floats.get(node)) |value| return value;
         if (typed.comptime_ints.get(node)) |value| return @floatFromInt(value);
         return switch (ast.tag(node)) {
-            .float_literal => std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(node))) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)}),
+            .float_literal => try evalComptimeFloatLiteral(ast, typed, node, diag),
             .integer_literal => @floatFromInt(std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)})),
             .identifier => blk: {
                 const decl = resolved.local_values.get(node) orelse blk_decl: {
@@ -636,6 +636,15 @@ pub const Compilation = struct {
             },
             else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported #run float expression", .{}),
         };
+    }
+
+    fn evalComptimeFloatLiteral(ast: *const @import("Ast.zig").Ast, typed: *const sema.Typed, node: @import("Ast.zig").NodeIndex, diag: Diagnostic) !f64 {
+        const raw = ast.tokenSlice(ast.mainToken(node));
+        if (typed.typeOf(node).index == InternPool.well_known.float64_type) {
+            return std.fmt.parseFloat(f64, raw) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
+        }
+        const value = std.fmt.parseFloat(f32, raw) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
+        return @floatCast(value);
     }
 
     fn executeRunCall(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, run_node: @import("Ast.zig").NodeIndex, expr: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
@@ -769,7 +778,7 @@ pub const Compilation = struct {
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
-                try arg_values.append(comp.allocator, .{ .float = try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(arg))) });
+                try arg_values.append(comp.allocator, .{ .float = try evalComptimeFloatLiteral(ast, typed, arg, diag) });
             } else if (ast.tag(arg) == .call_expr) {
                 try arg_values.append(comp.allocator, try comp.executeRunCall(ast, typed, resolved, arg, arg, diag));
             } else if (ast.tag(arg) == .binary_expr or ast.tag(arg) == .unary_expr) {

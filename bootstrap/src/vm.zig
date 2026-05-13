@@ -3628,7 +3628,7 @@ pub const VM = struct {
             .bytes => |bytes| std.debug.print("{s}", .{bytes}),
             .code => |code| std.debug.print("{s}", .{code.text}),
             .int => |int_value| std.debug.print("{d}", .{int_value}),
-            .float => |float_value| std.debug.print("{d}", .{float_value}),
+            .float => |float_value| printDefaultFloat(float_value),
             .bool => |bool_value| std.debug.print("{s}", .{if (bool_value) "true" else "false"}),
             .type_id => |type_id| std.debug.print("{s}", .{typeName(type_id)}),
             .type_text => |type_text| std.debug.print("{s}", .{type_text}),
@@ -4473,7 +4473,7 @@ pub const VM = struct {
                 try builder.appendSlice(vm.allocator, text);
             },
             .float => |float_value| {
-                const text = try std.fmt.allocPrint(vm.allocator, "{d}", .{float_value});
+                const text = try defaultFloatText(vm.allocator, float_value);
                 defer vm.allocator.free(text);
                 try builder.appendSlice(vm.allocator, text);
             },
@@ -4567,7 +4567,11 @@ pub const VM = struct {
                 .string => |text| try appendFormatted(vm.allocator, builder, "\"{s}\"", .{text}),
                 .bytes => |bytes| try appendFormatted(vm.allocator, builder, "\"{s}\"", .{bytes}),
                 .int => |int_value| try appendFormatted(vm.allocator, builder, "{d}", .{int_value}),
-                .float => |float_value| try appendFormatted(vm.allocator, builder, "{d}", .{float_value}),
+                .float => |float_value| {
+                    const text = try defaultFloatText(vm.allocator, float_value);
+                    defer vm.allocator.free(text);
+                    try builder.appendSlice(vm.allocator, text);
+                },
                 .bool => |bool_value| try builder.appendSlice(vm.allocator, if (bool_value) "true" else "false"),
                 else => return diag.failAt(0, "VM cannot append {s} dynamic-array element to Build_Options string", .{@tagName(item)}),
             }
@@ -4580,6 +4584,28 @@ fn appendFormatted(allocator: std.mem.Allocator, builder: *std.ArrayList(u8), co
     const text = try std.fmt.allocPrint(allocator, fmt, args);
     defer allocator.free(text);
     try builder.appendSlice(allocator, text);
+}
+
+fn printDefaultFloat(value: f64) void {
+    var buf: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d:.6}", .{value}) catch unreachable;
+    std.debug.print("{s}", .{trimFloatText(text)});
+}
+
+fn defaultFloatText(allocator: std.mem.Allocator, value: f64) ![]const u8 {
+    var buf: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d:.6}", .{value}) catch unreachable;
+    return allocator.dupe(u8, trimFloatText(text));
+}
+
+fn trimFloatText(text: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, text, '.')) |dot| {
+        var end = text.len;
+        while (end > dot + 1 and text[end - 1] == '0') end -= 1;
+        if (end == dot + 1) end = dot;
+        return text[0..end];
+    }
+    return text;
 }
 
 fn decodeJaiStringLiteralValue(allocator: std.mem.Allocator, literal: []const u8) ![]const u8 {

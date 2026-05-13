@@ -1504,7 +1504,7 @@ const GenContext = struct {
             .run_expr => try ctx.executeRunValue(ast.data(expr).lhs, bindings, diag),
             .call_expr => try ctx.executeRunCallValue(expr, bindings, diag),
             .integer_literal, .char_literal, .unary_expr, .binary_expr, .size_of_expr => .{ .int = try evalIntegerConstExpr(ctx, expr, diag) },
-            .float_literal => .{ .float = try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(expr))) },
+            .float_literal => .{ .float = try parseFloatLiteralValue(ast, expr, ctx.typed, diag) },
             .bool_literal => .{ .bool = ast.data(expr).lhs != 2 and ast.data(expr).lhs != 0 },
             .string_literal => blk: {
                 const decoded = try stringLiteralRuntimeValue(ctx.program.allocator, ast, expr, diag);
@@ -3948,9 +3948,10 @@ const GenContext = struct {
             return try ctx.emitString(source_node, decoded);
         }
         if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "float32") or std.mem.eql(u8, type_name, "float64")) {
-            const value = std.fmt.parseFloat(f64, default_text) catch {
-                return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "unsupported float field default '{s}'", .{default_text});
-            };
+            const value: f64 = if (std.mem.eql(u8, type_name, "float64"))
+                std.fmt.parseFloat(f64, default_text) catch return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "unsupported float field default '{s}'", .{default_text})
+            else
+                @floatCast(std.fmt.parseFloat(f32, default_text) catch return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "unsupported float field default '{s}'", .{default_text}));
             return try ctx.emitFloat(source_node, value);
         }
         if (isIntegerTypeText(raw_type) or std.mem.eql(u8, type_name, "bool")) {
@@ -4161,13 +4162,7 @@ const GenContext = struct {
                 return reg;
             },
             .float_literal => {
-                const raw = ast.tokenSlice(ast.mainToken(expr));
-                const value: f64 = std.fmt.parseFloat(f64, raw) catch return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "invalid float literal '{s}'", .{raw});
-                const bits: u64 = @bitCast(value);
-                const reg = proc.num_registers;
-                proc.num_registers += 1;
-                try proc.instructions.append(program.allocator, .{ .opcode = .load_float, .dest = reg, .arg1 = @truncate(bits), .arg2 = @truncate(bits >> 32), .source_node = expr });
-                return reg;
+                return try ctx.emitFloat(expr, try parseFloatLiteralValue(ast, expr, ctx.typed, diag));
             },
             .bool_literal => {
                 const reg = proc.num_registers;
@@ -4571,6 +4566,11 @@ const GenContext = struct {
                         if (isStorageValueTypeText(type_text) or try typeTextIsStruct(ctx, stripPointerText(type_text), diag)) return addr;
                         return try emitLoadFromAddressForType(ctx, addr, type_text, expr, diag);
                     }
+                    if (ctx.typed != null and ast.tag(decl) == .float_literal and ctx.typed.?.typeOf(decl).index == InternPool.well_known.float32_type) {
+                        const reg = try ctx.emitFloat(decl, try parseFloat32LiteralValue(ast, decl, diag));
+                        try ctx.decl_registers.put(program.allocator, decl, reg);
+                        return reg;
+                    }
                     switch (ast.tag(decl)) {
                         .var_decl => {
                             const init = ast.data(decl).rhs;
@@ -4586,7 +4586,11 @@ const GenContext = struct {
                             return reg;
                         },
                         .const_decl => {
-                            const reg = try ctx.genExpr(ast.data(decl).lhs, diag);
+                            const init = ast.data(decl).lhs;
+                            const reg = if (ctx.typed != null and init != @import("Ast.zig").null_node and ast.tag(init) == .float_literal and ctx.typed.?.typeOf(init).index == InternPool.well_known.float32_type)
+                                try ctx.emitFloat(init, try parseFloat32LiteralValue(ast, init, diag))
+                            else
+                                try ctx.genExpr(init, diag);
                             try ctx.decl_registers.put(program.allocator, decl, reg);
                             return reg;
                         },
@@ -4612,6 +4616,17 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "STD_OUTPUT_HANDLE")) return try ctx.emitInt(expr, -11);
                 if (std.mem.eql(u8, name, "STD_ERROR_HANDLE")) return try ctx.emitInt(expr, -12);
                 if (std.mem.eql(u8, name, "PI")) return try ctx.emitFloat(expr, std.math.pi);
+                if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |value_node| {
+                        if (value_node != @import("Ast.zig").null_node and value_node < ast.node_tags.items.len and ast.tag(value_node) != .var_decl and ast.tag(value_node) != .proc_decl and ast.tag(value_node) != .struct_type and ast.tag(value_node) != .union_type and ast.tag(value_node) != .enum_type) {
+                            if (ctx.typed != null and ast.tag(value_node) == .float_literal and ctx.typed.?.typeOf(value_node).index == InternPool.well_known.float32_type) {
+                                return try ctx.emitFloat(value_node, try parseFloat32LiteralValue(ast, value_node, diag));
+                            }
+                            return try ctx.genExpr(value_node, diag);
+                        }
+                    },
+                    else => {},
+                };
                 if (std.mem.eql(u8, name, "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH")) return try ctx.emitString(expr, "/usr/include");
                 if (isBindingOptionField(name)) return try ctx.genSyntheticBindingOptionField(name, expr, diag);
                 if (ctx.external_registers.get(name)) |reg| return reg;
@@ -6983,7 +6998,7 @@ const GenContext = struct {
             if (typed.comptime_ints.get(node)) |value| return @floatFromInt(value);
         }
         return switch (ast.tag(node)) {
-            .float_literal => try std.fmt.parseFloat(f64, ast.tokenSlice(ast.mainToken(node))),
+            .float_literal => try parseFloatLiteralValue(ast, node, ctx.typed, diag),
             .integer_literal => @floatFromInt(try evalIntegerConstExpr(ctx, node, diag)),
             .identifier => blk: {
                 const name = ast.tokenSlice(ast.mainToken(node));
@@ -9584,6 +9599,22 @@ fn exprUsesFloatArithmetic(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) 
     return std.mem.eql(u8, name, "float") or
         std.mem.eql(u8, name, "float32") or
         std.mem.eql(u8, name, "float64");
+}
+
+fn parseFloatLiteralValue(ast: *const Ast, expr: NodeIndex, typed: ?*const Typed, diag: Diagnostic) !f64 {
+    const raw = ast.tokenSlice(ast.mainToken(expr));
+    if (typed) |typed_info| {
+        if (typed_info.typeOf(expr).index == InternPool.well_known.float64_type) {
+            return std.fmt.parseFloat(f64, raw) catch return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "invalid float literal '{s}'", .{raw});
+        }
+    }
+    return std.fmt.parseFloat(f64, raw) catch return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "invalid float literal '{s}'", .{raw});
+}
+
+fn parseFloat32LiteralValue(ast: *const Ast, expr: NodeIndex, diag: Diagnostic) !f64 {
+    const raw = ast.tokenSlice(ast.mainToken(expr));
+    const value = std.fmt.parseFloat(f32, raw) catch return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "invalid float literal '{s}'", .{raw});
+    return @floatCast(value);
 }
 
 fn parseIntLiteral(ast: *const Ast, expr: NodeIndex, diag: Diagnostic) !i64 {

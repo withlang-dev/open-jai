@@ -22,6 +22,10 @@ literals_output :: () {
     expect_program_output("examples/05/5.1_literals.jai", "Hello, Sailor!\nI greet you: Hello, Sailor!\n42\nfalse\nchar literal: 49\nThe type of Hello, Sailor! is string\nThe type of 42 is s64\nThe type of false is bool\n");
 } @TestProcedure
 
+constants_output :: () {
+    expect_program_output("examples/05/5.2_constants.jai", "The earth mass is 5972189887017193070000000\nI was computed at compile time: 3510\nfloat32\ntrue\ntrue\ntrue\n");
+} @TestProcedure
+
 variable_declarations_2_output :: () {
     expect_example_annotations("examples/05/5.4_variable_declarations2.jai");
 } @TestProcedure
