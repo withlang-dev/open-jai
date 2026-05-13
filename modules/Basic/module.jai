@@ -119,8 +119,8 @@ assert :: (condition: bool, message := "", args: ..Any) #foreign;
 exit :: (status: s64) #foreign;
 
 swap :: (a: *$T, b: *T) #foreign;
-memcpy :: (dest: *void, source: *void, count: s64) -> *void #foreign;
-memset :: (dest: *void, value: s64, count: s64) -> *void #foreign;
+memcpy :: (dest: *void, source: *void, count: s64) -> *void #intrinsic;
+memset :: (dest: *void, value: s64, count: s64) -> *void #intrinsic;
 
 alloc :: (size: s64, allocator := context.allocator) -> *void #foreign;
 free :: (ptr: *void) #foreign;

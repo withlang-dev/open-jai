@@ -6116,6 +6116,22 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "sqrt")) .sqrt_float else .cos_float, .dest = reg, .arg1 = arg_reg, .source_node = expr });
             return reg;
         }
+        if (std.mem.eql(u8, name, "memcpy")) {
+            if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "memcpy expects three arguments", .{});
+            const dst = try ctx.genExpr(@intCast(args[0]), diag);
+            const src = try ctx.genExpr(@intCast(args[1]), diag);
+            const count = try ctx.genExpr(@intCast(args[2]), diag);
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = dst, .arg1 = src, .arg2 = count, .source_node = expr });
+            return dst;
+        }
+        if (std.mem.eql(u8, name, "memset")) {
+            if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "memset expects three arguments", .{});
+            const dst = try ctx.genExpr(@intCast(args[0]), diag);
+            const value = try ctx.genExpr(@intCast(args[1]), diag);
+            const count = try ctx.genExpr(@intCast(args[2]), diag);
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memset, .dest = dst, .arg1 = value, .arg2 = count, .source_node = expr });
+            return dst;
+        }
         if (std.mem.eql(u8, name, "make_vector2") or std.mem.eql(u8, name, "make_vector3") or std.mem.eql(u8, name, "make_vector4")) {
             const type_name = if (std.mem.eql(u8, name, "make_vector2")) "Vector2" else if (std.mem.eql(u8, name, "make_vector3")) "Vector3" else "Vector4";
             const expected: usize = if (std.mem.eql(u8, name, "make_vector2")) 2 else if (std.mem.eql(u8, name, "make_vector3")) 3 else 4;
