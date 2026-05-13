@@ -7095,7 +7095,9 @@ fn isCompilerMessageEnumName(name: []const u8) bool {
 }
 
 fn isCompilerPhaseEnumName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "TYPECHECKED_ALL_WE_CAN") or
+    return std.mem.eql(u8, name, "ALL_SOURCE_CODE_PARSED") or
+        std.mem.eql(u8, name, "TYPECHECKED_ALL_WE_CAN") or
+        std.mem.eql(u8, name, "ALL_TARGET_CODE_BUILT") or
         std.mem.eql(u8, name, "PRE_WRITE_EXECUTABLE") or
         std.mem.eql(u8, name, "POST_WRITE_EXECUTABLE") or
         std.mem.eql(u8, name, "READY_FOR_CUSTOM_LINK_COMMAND");

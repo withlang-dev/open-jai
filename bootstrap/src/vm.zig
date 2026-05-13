@@ -1862,8 +1862,10 @@ pub const VM = struct {
             try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = 1, .error_code = 1 });
             return;
         }
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "ALL_SOURCE_CODE_PARSED" });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
         try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
+        try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "ALL_TARGET_CODE_BUILT" });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = vm.workspaceErrorCode(workspace) });
         if (vm.workspaceUsesCustomLinkCommand(workspace)) {
             try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "READY_FOR_CUSTOM_LINK_COMMAND", .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = vm.workspaceErrorCode(workspace) });
