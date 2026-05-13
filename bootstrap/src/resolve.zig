@@ -322,6 +322,7 @@ fn putCompilerModuleSymbols(r: *Resolved) !void {
         "compiler_get_nodes",
         "compiler_get_code",
         "print_expression",
+        "is_subclass_of",
         "get_current_workspace",
         "Optimization_Type",
         "Message_Complete",

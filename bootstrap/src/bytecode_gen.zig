@@ -2846,6 +2846,48 @@ const GenContext = struct {
         _ = diag;
     }
 
+    fn typeInfoTypeNameForExpr(ctx: *GenContext, expr: NodeIndex) ?[]const u8 {
+        const ast = ctx.ast;
+        if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len) return null;
+        switch (ast.tag(expr)) {
+            .identifier => {
+                const decl = ctx.resolved.local_values.get(expr) orelse return null;
+                if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return null;
+                const init = switch (ast.tag(decl)) {
+                    .const_decl => ast.data(decl).lhs,
+                    .var_decl => ast.data(decl).rhs,
+                    else => return null,
+                };
+                return typeInfoTypeNameForExpr(ctx, init);
+            },
+            .unary_expr => {
+                if (ast.tokens[ast.mainToken(expr)].tag == .keyword_cast) return typeInfoTypeNameForExpr(ctx, ast.data(expr).lhs);
+                return null;
+            },
+            .type_of_expr => {
+                if (ast.tokens[ast.mainToken(expr)].tag != .keyword_type_info) return null;
+                const operand = ast.data(expr).lhs;
+                if (operand == @import("Ast.zig").null_node or operand >= ast.node_tags.items.len) return null;
+                return firstTypeWord(stripPointerText(ctx.nodeSource(operand)));
+            },
+            else => return null,
+        }
+    }
+
+    fn typeHasAsSubclass(ctx: *GenContext, type_name: []const u8, target_name: []const u8, diag: Diagnostic) !bool {
+        const type_node = try structTypeNodeByName(ctx, type_name) orelse return false;
+        const body = containerBodySource(ctx.ast, type_node) orelse return false;
+        var field_it = FieldSegmentIterator{ .source = body };
+        while (field_it.next()) |segment| {
+            const parsed = parseFieldSegment(segment) orelse continue;
+            if (std.mem.indexOf(u8, parsed.names_text, "#as") == null) continue;
+            const parent_name = firstTypeWord(stripPointerText(parsed.type_text));
+            if (std.mem.eql(u8, parent_name, target_name)) return true;
+            if (try ctx.typeHasAsSubclass(parent_name, target_name, diag)) return true;
+        }
+        return false;
+    }
+
     fn genExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) anyerror!Bytecode.Register {
         const ast = ctx.ast;
         const program = ctx.program;
@@ -4201,6 +4243,15 @@ const GenContext = struct {
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .cmp_eq, .dest = reg, .arg1 = lhs, .arg2 = rhs, .source_node = expr });
                     return reg;
+                }
+                if (std.mem.eql(u8, name, "is_subclass_of")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "is_subclass_of expects Type_Info and name arguments", .{});
+                    const type_name = typeInfoTypeNameForExpr(ctx, @intCast(args[0])) orelse return diag.failAt(ast.tokens[ast.mainToken(@as(NodeIndex, @intCast(args[0])))].start, "is_subclass_of requires a Type_Info value from type_info(T)", .{});
+                    const target_node: NodeIndex = @intCast(args[1]);
+                    if (ast.tag(target_node) != .string_literal) return diag.failAt(ast.tokens[ast.mainToken(target_node)].start, "is_subclass_of requires a string subclass target", .{});
+                    const target_name = ast.stringTokenContents(ast.mainToken(target_node));
+                    return try ctx.emitBool(expr, try ctx.typeHasAsSubclass(type_name, target_name, diag));
                 }
                 if (std.mem.eql(u8, name, "push_allocator")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
