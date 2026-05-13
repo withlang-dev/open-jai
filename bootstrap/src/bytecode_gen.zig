@@ -5390,7 +5390,7 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .load_string, .dest = reg, .arg1 = string_idx, .source_node = expr });
                     return reg;
                 }
-                if (std.mem.eql(u8, name, "to_upper") or std.mem.eql(u8, name, "to_lower")) {
+                if ((std.mem.eql(u8, name, "to_upper") or std.mem.eql(u8, name, "to_lower")) and !ctx.nameResolvesToUserProc(name)) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one argument", .{name});
                     return try ctx.genExpr(@intCast(args[0]), diag);

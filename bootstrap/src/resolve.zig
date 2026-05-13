@@ -269,7 +269,7 @@ pub const Resolved = struct {
             const can_replace = switch (existing) {
                 .placeholder => true,
                 .const_value => |node| node == @import("Ast.zig").null_node,
-                else => false,
+                else => sym == .proc or sym == .const_value,
             };
             if (!can_replace) return;
             _ = r.explicit_placeholders.remove(name);
@@ -551,20 +551,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try putStringBuiltins(&r);
                     try r.symbols.put(allocator, "get_command_line_arguments", .builtin_get_command_line_arguments);
                     try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
-                } else if (std.mem.eql(u8, module_name, "String")) {
-                    try r.symbols.put(allocator, "to_upper", .builtin_to_upper);
-                    try r.symbols.put(allocator, "to_lower", .builtin_to_lower);
-                    try r.symbols.put(allocator, "is_digit", .builtin_is_digit);
-                    try r.symbols.put(allocator, "is_alpha", .builtin_is_alpha);
-                    try r.symbols.put(allocator, "is_alnum", .builtin_is_alnum);
-                    try r.symbols.put(allocator, "is_space", .builtin_is_space);
-                    try r.symbols.put(allocator, "is_any", .builtin_is_any);
-                    try putStringBuiltins(&r);
-                    try r.symbols.put(allocator, "begins_with", .builtin_begins_with);
-                    try r.symbols.put(allocator, "find_index_from_left", .builtin_find_index_from_left);
-                    try r.symbols.put(allocator, "find_index_from_right", .builtin_find_index_from_right);
-                    try r.symbols.put(allocator, "equal", .builtin_compare);
-                    try r.putRealSymbol("compare_strings", .{ .const_value = @import("Ast.zig").null_node });
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);
@@ -904,18 +890,6 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             } else if (std.mem.eql(u8, module_name, "Compiler")) {
                 try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
                 try putCompilerModuleSymbols(r);
-            } else if (std.mem.eql(u8, module_name, "String")) {
-                try r.symbols.put(r.allocator, "to_upper", .builtin_to_upper);
-                try r.symbols.put(r.allocator, "to_lower", .builtin_to_lower);
-                try r.symbols.put(r.allocator, "is_digit", .builtin_is_digit);
-                try r.symbols.put(r.allocator, "is_alpha", .builtin_is_alpha);
-                try r.symbols.put(r.allocator, "is_alnum", .builtin_is_alnum);
-                try r.symbols.put(r.allocator, "is_space", .builtin_is_space);
-                try r.symbols.put(r.allocator, "is_any", .builtin_is_any);
-                try putStringBuiltins(r);
-                try r.symbols.put(r.allocator, "begins_with", .builtin_begins_with);
-                try r.symbols.put(r.allocator, "find_index_from_left", .builtin_find_index_from_left);
-                try r.symbols.put(r.allocator, "find_index_from_right", .builtin_find_index_from_right);
             }
         },
         .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .load_decl, .scope_decl => {},

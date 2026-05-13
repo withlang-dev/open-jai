@@ -117,3 +117,7 @@ math_module_import_loads_real_source_and_math_intrinsics_lower :: () {
 random_module_import_loads_real_source_and_random_intrinsics_lower :: () {
     expect_compile_output("test/examples/modules/random_module_import_value.jai", "random:true true true\n");
 } @TestProcedure
+
+string_module_import_loads_real_source_and_string_intrinsics_lower :: () {
+    expect_compile_output("test/examples/modules/string_module_import_value.jai", "string:true true true true true true\n");
+} @TestProcedure
