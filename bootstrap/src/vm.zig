@@ -1838,10 +1838,15 @@ pub const VM = struct {
         const declaration_start = vm.compiler_message_declarations.items.len;
         var found_source = false;
         var declaration_count: usize = 0;
+        var first_error: ?[]const u8 = null;
         for (vm.workspace_sources.items) |source| {
             if (source.workspace != workspace) continue;
             found_source = true;
-            declaration_count += try vm.appendWorkspaceDeclarations(source.path, source.source, diag);
+            declaration_count += vm.appendWorkspaceDeclarations(source.path, source.source, diag) catch |err| blk: {
+                if (first_error == null) first_error = @errorName(err);
+                try vm.workspace_status.put(vm.allocator, workspace, 1);
+                break :blk 0;
+            };
         }
         if (!found_source) {
             const node: CodeNode = .{ .kind = "DECLARATION", .flags = "ALLOWED_BY_CONTEXT", .text = "main", .name = "main", .start = 0, .end = 4 };
@@ -1852,6 +1857,11 @@ pub const VM = struct {
         const typechecked_count = vm.compiler_message_nodes.items.len - typechecked_start;
         try vm.appendCompilerMessage(.{ .kind = "IMPORT", .workspace = workspace });
         try vm.appendCompilerMessage(.{ .kind = "FILE", .workspace = workspace });
+        if (first_error) |error_name| {
+            try vm.appendCompilerMessage(.{ .kind = "ERROR", .workspace = workspace, .dump_text = error_name, .error_code = 1 });
+            try vm.appendCompilerMessage(.{ .kind = "COMPLETE", .workspace = workspace, .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = 1, .error_code = 1 });
+            return;
+        }
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "TYPECHECKED_ALL_WE_CAN" });
         try vm.appendCompilerMessage(.{ .kind = "TYPECHECKED", .workspace = workspace, .all_start = typechecked_start, .all_count = typechecked_count, .declaration_start = declaration_start, .declaration_count = declaration_count });
         try vm.appendCompilerMessage(.{ .kind = "PHASE", .workspace = workspace, .phase = "PRE_WRITE_EXECUTABLE", .executable_name = vm.workspaceExecutableName(workspace), .linker_exit_code = vm.workspaceErrorCode(workspace) });
