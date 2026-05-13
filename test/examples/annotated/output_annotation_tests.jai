@@ -78,6 +78,10 @@ defer_levels_output :: () {
     expect_example_annotations("examples/11/11.3_defer_levels.jai");
 } @TestProcedure
 
+struct_declarations_output :: () {
+    expect_program_output("examples/12/12.1_struct_declarations.jai", "{0, 0}\n0 0\n42 108\n1 4\n0 0\nVector2un\nRobert is aged 42 and is currently at location {64.139999, -21.92}\n{\"Robert\", 42, {64.139999, -21.92}}\n{2, 6.28}\nPerson\n32\nv3d = {\n    x = 1;\n    y = 2;\n    z = 3;\n}\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
