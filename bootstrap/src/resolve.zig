@@ -617,7 +617,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Flat_Pool") or
                     std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "GetRect") or
-                    std.mem.eql(u8, module_name, "TestScope") or
                     std.mem.eql(u8, module_name, "Machine_X64") or
                     std.mem.eql(u8, module_name, "Check") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
@@ -771,8 +770,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "GLFWerrorfun",
                             "GLFWkeyfun",
                         });
-                    } else if (std.mem.eql(u8, module_name, "TestScope")) {
-                        try r.symbols.put(allocator, "Struct1", .{ .const_value = @import("Ast.zig").null_node });
                     }
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
