@@ -502,9 +502,13 @@ const Parser = struct {
                 return p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = @intCast(stmts.items.len) });
             }
             const expr = if (p.check(.semicolon)) null_node else blk: {
-                const first = try p.parseExpr();
-                while (p.matchDiscard(.comma)) _ = try p.parseExpr();
-                break :blk first;
+                var values = std.ArrayList(NodeIndex).empty;
+                defer values.deinit(p.allocator);
+                try values.append(p.allocator, try p.parseExpr());
+                while (p.matchDiscard(.comma)) try values.append(p.allocator, try p.parseExpr());
+                if (values.items.len == 1) break :blk values.items[0];
+                const extra = try p.ast.addExtraSlice(values.items);
+                break :blk try p.ast.addNode(.stmt_list, tok, .{ .lhs = extra, .rhs = @intCast(values.items.len) });
             };
             _ = try p.expect(.semicolon, "expected semicolon after return statement", .{});
             return p.ast.addNode(.return_stmt, tok, .{ .lhs = expr });

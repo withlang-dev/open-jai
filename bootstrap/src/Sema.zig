@@ -1576,9 +1576,7 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "thread_init") or
         std.mem.eql(u8, name, "thread_start") or
         std.mem.eql(u8, name, "thread_deinit") or
-        std.mem.eql(u8, name, "thread_destroy") or
-        std.mem.eql(u8, name, "table_add") or
-        std.mem.eql(u8, name, "table_remove"))
+        std.mem.eql(u8, name, "thread_destroy"))
     {
         return Type.voidType();
     }

@@ -40,7 +40,9 @@ pub const Opcode = enum(u8) {
     call_proc0,
     call_extern,
     ret,
+    ret_multi,
     ret_void,
+    tuple_extract,
     alloc_local,
     load,
     store,
@@ -253,12 +255,14 @@ pub const ProcBytecode = struct {
     name: []const u8,
     instructions: std.ArrayList(Instruction) = .empty,
     param_types: std.ArrayList(u32) = .empty,
+    return_types: std.ArrayList(u32) = .empty,
     num_registers: u32 = 0,
     param_count: u32 = 0,
     return_type: u32 = 0,
 
     pub fn deinit(p: *ProcBytecode, allocator: std.mem.Allocator) void {
         p.param_types.deinit(allocator);
+        p.return_types.deinit(allocator);
         p.instructions.deinit(allocator);
     }
 };

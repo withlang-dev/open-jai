@@ -77,3 +77,7 @@ mail_module_import_loads_real_source_from_local_alias :: () {
 sort_module_import_loads_real_source_and_runtime_sorting_works :: () {
     expect_compile_output("test/examples/modules/sort_module_import_value.jai", "sort:[-272, -5, 3.14, 5, 8, 17, 42, 108] [\"brown\", \"dog\", \"fox\", \"jumped\", \"lazy\", \"over\", \"quick\", \"the\", \"the\"]\n");
 } @TestProcedure
+
+hash_table_module_import_loads_real_source_and_finds_values :: () {
+    expect_compile_output("test/examples/modules/hash_table_module_import_value.jai", "hash:true 521-1234 false false \n");
+} @TestProcedure

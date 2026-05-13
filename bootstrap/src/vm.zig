@@ -148,6 +148,7 @@ const RegisterValue = union(enum) {
     type_id: u32,
     type_text: []const u8,
     type_info_member: Bytecode.TypeInfoMember,
+    tuple: []const RegisterValue,
     ptr: Pointer,
     int: i64,
     float: f64,
@@ -808,6 +809,18 @@ pub const VM = struct {
                         else => regs[inst.arg1],
                     };
                 },
+                .ret_multi => {
+                    if (inst.arg2 == 0) return .empty;
+                    if (inst.arg1 + inst.arg2 > vm.program.call_args.items.len) return diag.failAt(0, "VM multi-return register table out of range", .{});
+                    const values = try vm.allocator.alloc(RegisterValue, inst.arg2);
+                    for (values, 0..) |*value, value_index| {
+                        const reg_index = vm.program.call_args.items[inst.arg1 + value_index];
+                        if (reg_index >= regs.len) return diag.failAt(0, "VM multi-return register out of range", .{});
+                        if (regs[reg_index] == .empty) return diag.failAt(0, "VM multi-return register was not initialized", .{});
+                        value.* = regs[reg_index];
+                    }
+                    return .{ .tuple = values };
+                },
                 .assert_true => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM assert register out of range", .{});
                     if (!try registerTruthy(regs[inst.arg1], diag, "assert condition")) {
@@ -815,6 +828,15 @@ pub const VM = struct {
                     }
                 },
                 .ret_void => return .empty,
+                .tuple_extract => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM tuple_extract register out of range", .{});
+                    const tuple = switch (regs[inst.arg1]) {
+                        .tuple => |values| values,
+                        else => return diag.failAt(0, "multi-return destructuring requires a tuple result", .{}),
+                    };
+                    if (inst.arg2 >= tuple.len) return diag.failAt(0, "multi-return destructuring index out of range", .{});
+                    regs[inst.dest] = tuple[inst.arg2];
+                },
                 .exit_process => return .empty,
                 .alloc_heap => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM alloc_heap destination register out of range", .{});
@@ -952,7 +974,7 @@ pub const VM = struct {
                 },
                 .array_count => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_count register out of range", .{});
-                    regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], diag)) };
+                    regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], @intCast(inst.arg3), diag)) };
                 },
                 .array_data => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_data register out of range", .{});
@@ -1683,6 +1705,7 @@ pub const VM = struct {
             },
             .type_text => return diag.failAt(0, "VM cannot materialize Type values as raw bytes", .{}),
             .type_info_member => return diag.failAt(0, "VM cannot materialize Type_Info member values as raw bytes", .{}),
+            .tuple => return diag.failAt(0, "VM cannot materialize undestructured multi-return values as raw bytes", .{}),
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
             .message => return diag.failAt(0, "VM cannot materialize compiler Message values as raw bytes", .{}),
             .source_location => return diag.failAt(0, "VM cannot materialize Source_Code_Location as raw bytes; access its fields instead", .{}),
@@ -2916,6 +2939,7 @@ pub const VM = struct {
             },
             .string => |text| try vm.storeStringSlot(ptr, text, diag),
             .code => |code| if (code.text.len != 0) @memcpy(try vm.blockSlice(ptr, code.text.len, diag), code.text),
+            .tuple => return diag.failAt(0, "VM cannot store undestructured multi-return values into raw memory", .{}),
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
             .message => return diag.failAt(0, "VM cannot store compiler Message values into raw memory", .{}),
             .source_location => return diag.failAt(0, "VM cannot store Source_Code_Location into raw memory; use field assignment", .{}),
@@ -2940,11 +2964,13 @@ pub const VM = struct {
         }
     }
 
-    fn arrayCount(vm: *VM, value: RegisterValue, diag: Diagnostic) !usize {
+    fn arrayCount(vm: *VM, value: RegisterValue, elem_size_hint: usize, diag: Diagnostic) !usize {
         return switch (value) {
             .bytes => |bytes| bytes.len,
             .ptr => |ptr| if (vm.dynamicArrayIndexForPointer(ptr)) |array_index|
                 vm.dynamic_arrays.items[array_index].elems.items.len
+            else if (elem_size_hint != 0)
+                vm.dynamic_arrays.items[try vm.ensureDynamicArrayForPointer(ptr, elem_size_hint, diag)].elems.items.len
             else
                 (try vm.readRemainingBytes(ptr, diag)).len,
             .code_nodes => |nodes| nodes.len,
@@ -3191,6 +3217,7 @@ pub const VM = struct {
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
                 .{ .int = @bitCast(try vm.loadU64(try vm.dynamicArrayItemPointer(array_index, index, diag), diag)) },
+            .tuple => diag.failAt(0, "VM dynamic arrays cannot index undestructured multi-return values as runtime data", .{}),
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM dynamic arrays cannot index compiler Code_Node values as runtime data", .{}),
             .message => diag.failAt(0, "VM dynamic arrays cannot index compiler Message values as runtime data", .{}),
         };
@@ -3282,6 +3309,7 @@ pub const VM = struct {
             .type_id => |type_id| std.debug.print("{s}", .{typeName(type_id)}),
             .type_text => |type_text| std.debug.print("{s}", .{type_text}),
             .type_info_member => |member| std.debug.print("Type_Info_Struct_Member {{ name = \"{s}\"; }}", .{member.name}),
+            .tuple => return diag.failAt(0, "{s} cannot print an undestructured multi-return value", .{context}),
             .ptr => |ptr| {
                 if (vm.dynamicArrayIndexForPointer(ptr)) |array_index| {
                     try vm.printDynamicArray(array_index, diag);
@@ -4128,6 +4156,7 @@ pub const VM = struct {
             .type_id => |type_id| try builder.appendSlice(vm.allocator, typeName(type_id)),
             .type_text => |type_text| try builder.appendSlice(vm.allocator, type_text),
             .type_info_member => |member| try builder.appendSlice(vm.allocator, member.name),
+            .tuple => return diag.failAt(0, "VM cannot append an undestructured multi-return value to a String_Builder", .{}),
             .empty => return diag.failAt(0, "VM cannot append an uninitialized value to a String_Builder", .{}),
         }
     }
@@ -4581,8 +4610,6 @@ fn registerInt(value: RegisterValue, diag: Diagnostic, context: []const u8) !i64
 }
 
 fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !bool {
-    _ = diag;
-    _ = context;
     return switch (value) {
         .bool => |v| v,
         .int => |v| v != 0,
@@ -4604,6 +4631,7 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .build_llvm_options => true,
         .message => true,
         .type_id => true,
+        .tuple => diag.failAt(0, "VM {s} cannot coerce an undestructured multi-return value to bool", .{context}),
         .ptr => true,
         .empty => false,
     };
@@ -4690,6 +4718,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .type_text => |v| .{ .type_text = v },
         .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
         .type_info_member => diag.failAt(0, "expression-form #run cannot materialize Type_Info member values", .{}),
+        .tuple => diag.failAt(0, "expression-form #run cannot materialize undestructured multi-return values", .{}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
         .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
         .source_location => diag.failAt(0, "expression-form #run cannot materialize Source_Code_Location values", .{}),
@@ -4786,6 +4815,14 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .build_llvm_options => |l| switch (rhs) {
             .build_llvm_options => |r| l == r,
+            else => false,
+        },
+        .tuple => |l| switch (rhs) {
+            .tuple => |r| blk: {
+                if (l.len != r.len) break :blk false;
+                for (l, r) |lv, rv| if (!registerValuesEqual(lv, rv)) break :blk false;
+                break :blk true;
+            },
             else => false,
         },
         .int => |l| switch (rhs) {

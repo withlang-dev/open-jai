@@ -427,7 +427,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         for (proc.param_types.items, 0..) |type_id, param_index| {
             param_types[param_index] = llvmTypeForTypeId(context, llvm_i64, llvm_f64, ptr_ty, type_id);
         }
-        const return_ty = llvmTypeForTypeId(context, llvm_i64, llvm_f64, ptr_ty, proc.return_type);
+        const return_ty = llvmReturnTypeForProc(context, llvm_i64, llvm_f64, ptr_ty, proc);
         const fn_ty = c.LLVMFunctionType(return_ty, if (param_types.len == 0) null else param_types.ptr, @intCast(param_types.len), 0);
         proc_function_tys[i] = fn_ty;
         const safe_proc_name = try sanitizeLlvmSymbolName(allocator, proc.name);
@@ -453,7 +453,9 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
             helper_registers[param_index] = registerValueForTypedLlvmValue(c.LLVMGetParam(helper_fn, @intCast(param_index)), type_id);
         }
         try emitProcInstructions(&env, helper_proc, helper_registers, diag);
-        if (helper_proc.return_type == 0) {
+        if (helper_proc.return_types.items.len != 0) {
+            _ = c.LLVMBuildRet(builder, c.LLVMConstNull(llvmReturnTypeForProc(context, llvm_i64, llvm_f64, ptr_ty, helper_proc)));
+        } else if (helper_proc.return_type == 0) {
             _ = c.LLVMBuildRetVoid(builder);
         } else {
             _ = c.LLVMBuildRet(builder, defaultLlvmValueForTypeId(&env, helper_proc.return_type));
@@ -507,6 +509,18 @@ fn llvmTypeForTypeId(context: c.LLVMContextRef, llvm_i64: c.LLVMTypeRef, llvm_f6
         10 => ptr_ty,
         else => llvm_i64,
     };
+}
+
+fn llvmReturnTypeForProc(context: c.LLVMContextRef, llvm_i64: c.LLVMTypeRef, llvm_f64: c.LLVMTypeRef, ptr_ty: c.LLVMTypeRef, proc: *const Bytecode.ProcBytecode) c.LLVMTypeRef {
+    if (proc.return_types.items.len == 0) return llvmTypeForTypeId(context, llvm_i64, llvm_f64, ptr_ty, proc.return_type);
+    var fields = std.heap.stackFallback(16 * @sizeOf(c.LLVMTypeRef), std.heap.page_allocator);
+    const allocator = fields.get();
+    const types = allocator.alloc(c.LLVMTypeRef, proc.return_types.items.len) catch @panic("out of memory while building LLVM multi-return type");
+    defer allocator.free(types);
+    for (proc.return_types.items, 0..) |type_id, i| {
+        types[i] = llvmTypeForTypeId(context, llvm_i64, llvm_f64, ptr_ty, type_id);
+    }
+    return c.LLVMStructTypeInContext(context, types.ptr, @intCast(types.len), 0);
 }
 
 fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, registers: []RegisterValue, diag: Diagnostic) !void {
@@ -1661,6 +1675,19 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 _ = c.LLVMBuildBr(env.builder, blocks[instruction_count]);
                 terminates_block = true;
             },
+            .ret_multi => {
+                if (inst.arg1 + inst.arg2 > env.program.call_args.items.len) return diag.failAt(0, "LLVM backend multi-return register table out of range", .{});
+                if (proc.return_types.items.len != inst.arg2) return diag.failAt(0, "LLVM backend multi-return type count mismatch", .{});
+                var result = c.LLVMGetUndef(llvmReturnTypeForProc(env.context, env.llvm_i64, env.llvm_f64, env.ptr_ty, proc));
+                for (proc.return_types.items, 0..) |type_id, return_index| {
+                    const reg_index = env.program.call_args.items[inst.arg1 + return_index];
+                    if (reg_index >= registers.len) return diag.failAt(0, "LLVM backend multi-return register out of range", .{});
+                    const value = try callArgValueForType(env, registers[reg_index], type_id, diag);
+                    result = c.LLVMBuildInsertValue(env.builder, result, value, @intCast(return_index), "ret_insert");
+                }
+                _ = c.LLVMBuildRet(env.builder, result);
+                terminates_block = true;
+            },
             .ret => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend return register out of range", .{});
                 if (proc.return_type == 0) {
@@ -1805,10 +1832,23 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     arg.* = try callArgValueForType(env, registers[reg_index], target_proc.param_types.items[arg_index], diag);
                 }
                 const result = c.LLVMBuildCall2(env.builder, env.proc_function_tys[inst.arg1], env.proc_functions[inst.arg1], if (args.len == 0) null else args.ptr, @intCast(args.len), if (target_proc.return_type == 0) "" else "call");
-                if (target_proc.return_type != 0) {
+                if (target_proc.return_types.items.len != 0) {
+                    if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend call destination out of range", .{});
+                    registers[inst.dest] = .{ .llvm_value = result, .kind = .{ .tuple = target_proc.return_types.items } };
+                } else if (target_proc.return_type != 0) {
                     if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend call destination out of range", .{});
                     try setTypedResult(env, registers, inst.dest, result, target_proc.return_type);
                 }
+            },
+            .tuple_extract => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend tuple_extract register out of range", .{});
+                const tuple_types = switch (registers[inst.arg1].kind) {
+                    .tuple => |types| types,
+                    else => return diag.failAt(0, "LLVM backend tuple_extract requires tuple register", .{}),
+                };
+                if (inst.arg2 >= tuple_types.len) return diag.failAt(0, "LLVM backend tuple_extract index out of range", .{});
+                const value = c.LLVMBuildExtractValue(env.builder, registers[inst.arg1].llvm_value, inst.arg2, "tuple_extract");
+                try setTypedResult(env, registers, inst.dest, value, tuple_types[inst.arg2]);
             },
             .call_proc0 => {
                 if (inst.arg1 >= env.proc_functions.len or env.proc_functions[inst.arg1] == null) return diag.failAt(0, "LLVM backend call_proc0 target out of range", .{});
@@ -1864,6 +1904,7 @@ const RegisterValue = struct {
         bool,
         void_value,
         type_id,
+        tuple: []const u32,
         source_location: struct { file: Bytecode.StringIndex, line: u32 },
     };
 };
@@ -2301,6 +2342,7 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
             var args = [_]c.LLVMValueRef{try valueAsBool(env, arg, diag)};
             _ = c.LLVMBuildCall2(env.builder, env.print_bool_fn_ty, env.print_bool_fn, &args, args.len, "");
         },
+        .tuple => return diag.failAt(0, "LLVM backend cannot print an undestructured multi-return value", .{}),
         .unset => return diag.failAt(0, "LLVM backend print argument register was not initialized", .{}),
     }
 }
