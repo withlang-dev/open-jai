@@ -26,6 +26,7 @@ pub const InternPool = struct {
         pub const calendar_type: Index = 19;
         pub const type_table_type: Index = 20;
         pub const type_info_type: Index = 21;
+        pub const vector4_type: Index = 22;
     };
 
     allocator: std.mem.Allocator,
@@ -45,6 +46,7 @@ pub const InternPool = struct {
         type_calendar,
         type_table,
         type_info,
+        type_vector4,
         type_proc: ProcType,
         type_pointer: Index,
         value_string: u32,
@@ -92,10 +94,13 @@ pub const InternPool = struct {
             .type_calendar,
             .type_table,
             .type_info,
+            .type_vector4,
         });
     }
 
-    pub fn key(ip: *const InternPool, idx: Index) Key { return ip.keys.items[idx]; }
+    pub fn key(ip: *const InternPool, idx: Index) Key {
+        return ip.keys.items[idx];
+    }
 
     pub fn internPointerType(ip: *InternPool, child: Index) !Index {
         for (ip.keys.items, 0..) |existing_key, i| switch (existing_key) {

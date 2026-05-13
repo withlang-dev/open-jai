@@ -4828,9 +4828,10 @@ const GenContext = struct {
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "sqrt")) .sqrt_float else .cos_float, .dest = reg, .arg1 = arg_reg, .source_node = expr });
             return reg;
         }
-        if (std.mem.eql(u8, name, "make_vector2") or std.mem.eql(u8, name, "make_vector3")) {
+        if (std.mem.eql(u8, name, "make_vector2") or std.mem.eql(u8, name, "make_vector3") or std.mem.eql(u8, name, "make_vector4")) {
             for (args) |arg| _ = try ctx.genExpr(handleArgNode(ast, @intCast(arg)), diag);
-            return try ctx.genDefaultValueFromText(if (std.mem.eql(u8, name, "make_vector2")) "Vector2" else "Vector3", expr, diag);
+            const type_name = if (std.mem.eql(u8, name, "make_vector2")) "Vector2" else if (std.mem.eql(u8, name, "make_vector3")) "Vector3" else "Vector4";
+            return try ctx.genDefaultValueFromText(type_name, expr, diag);
         }
 
         if (std.mem.eql(u8, name, "compiler_create_workspace")) {
@@ -6565,6 +6566,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, name, "to_c_string")) return "*u8";
                 if (std.mem.eql(u8, name, "make_vector2")) return "Vector2";
                 if (std.mem.eql(u8, name, "make_vector3")) return "Vector3";
+                if (std.mem.eql(u8, name, "make_vector4")) return "Vector4";
                 if (std.mem.eql(u8, name, "compiler_get_nodes")) return "*Code_Node";
                 if (std.mem.eql(u8, name, "compiler_get_code")) return "Code";
                 if (std.mem.eql(u8, name, "compiler_wait_for_message")) return "*Message";
@@ -7101,7 +7103,7 @@ fn decodeCharLiteral(allocator: std.mem.Allocator, raw: []const u8, diag: Diagno
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
 }
 
 fn isOperatorIdentifierName(name: []const u8) bool {
@@ -7149,6 +7151,8 @@ fn typeIdFromTypeText(raw: []const u8) u32 {
     if (std.mem.eql(u8, name, "float64")) return 13;
     if (std.mem.eql(u8, name, "string")) return 14;
     if (std.mem.eql(u8, name, "Type")) return 15;
+    if (std.mem.eql(u8, name, "Vector3")) return 17;
+    if (std.mem.eql(u8, name, "Vector4")) return 22;
     return 16;
 }
 
@@ -7166,6 +7170,8 @@ fn typeNameFromTypeId(type_id: u32) []const u8 {
         14 => "string",
         15 => "Type",
         16 => "Any",
+        17 => "Vector3",
+        22 => "Vector4",
         30 => "procedure",
         31 => "()",
         else => "Type",
@@ -7697,6 +7703,8 @@ fn typeIdFromToken(ast: *const Ast, token: u32, diag: Diagnostic) !u32 {
     if (std.mem.eql(u8, name, "string")) return 14;
     if (std.mem.eql(u8, name, "bool")) return 1;
     if (std.mem.eql(u8, name, "Type")) return 15;
+    if (std.mem.eql(u8, name, "Vector3")) return 17;
+    if (std.mem.eql(u8, name, "Vector4")) return 22;
     if (std.mem.eql(u8, name, "Any")) return 16;
     _ = diag;
     return 16;
@@ -8311,6 +8319,8 @@ fn typeTextSize(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerr
     if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 2;
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "string")) return 8;
     if (std.mem.eql(u8, name, "Any")) return 16;
+    if (std.mem.eql(u8, name, "Vector3")) return 12;
+    if (std.mem.eql(u8, name, "Vector4")) return 16;
     if (try structSizeFromTypeText(ctx, ty, diag)) |size| return size;
     return 8;
 }
@@ -8329,6 +8339,7 @@ fn typeTextAlign(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyer
     if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "bool")) return 1;
     if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 2;
     if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u32")) return 4;
+    if (std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4")) return 4;
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Type")) return 8;
     return try structAlignByName(ctx, name, diag) orelse 8;
 }

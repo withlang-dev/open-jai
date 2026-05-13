@@ -532,7 +532,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.putRealSymbol("advance", .{ .const_value = @import("Ast.zig").null_node });
                     try r.putRealSymbol("log_error", .{ .const_value = @import("Ast.zig").null_node });
                     try r.symbols.put(allocator, "equal", .builtin_compare);
-                    for (&[_][]const u8{ "make_vector2", "make_vector3", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
+                    for (&[_][]const u8{ "make_vector2", "make_vector3", "make_vector4", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                     }
                     try putStringBuiltins(&r);
@@ -587,7 +587,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "sin", .builtin_sin);
                     try r.symbols.put(allocator, "abs", .builtin_abs);
                     try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
-                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "sqrt", "cos" }) |name| {
+                    try r.symbols.put(allocator, "Vector4", .{ .const_value = @import("Ast.zig").null_node });
+                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "make_vector4", "sqrt", "cos" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                     }
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
@@ -700,10 +701,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try putExternalSymbols(&r, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putExternalSymbols(&r, &.{
-                            "get_font_at_size",  "texture_load_from_file", "gl_load",             "DrawTexturePro", "immediate_quad", "gl",
-                            "set_render_target", "set_shader_for_color",   "clear_render_target", "swap_buffers",   "update_window",  "immediate_triangle",
-                            "load_font",         "draw_text",              "set_shader_for_images", "immediate_begin",
-                            "immediate_flush",
+                            "get_font_at_size",  "texture_load_from_file", "gl_load",               "DrawTexturePro",  "immediate_quad",  "gl",
+                            "set_render_target", "set_shader_for_color",   "clear_render_target",   "swap_buffers",    "update_window",   "immediate_triangle",
+                            "load_font",         "draw_text",              "set_shader_for_images", "immediate_begin", "immediate_flush",
                         });
                     } else if (std.mem.eql(u8, module_name, "GL")) {
                         try putExternalSymbols(&r, &.{
@@ -1388,7 +1388,7 @@ fn isBacktickedIdentifier(ast: *const Ast, node: NodeIndex) bool {
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
 }
 
 fn isOperatorIdentifierName(name: []const u8) bool {

@@ -661,7 +661,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                             try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
                         else
                             try analyzeNode(ast, resolved, typed, arg_node, diag);
-                        if (!(arg_ty.isString() or arg_ty.isInteger() or arg_ty.index == InternPool.well_known.float32_type or arg_ty.index == InternPool.well_known.float64_type or arg_ty.isBool() or arg_ty.isVoid() or arg_ty.isPointer() or arg_ty.index == InternPool.well_known.type_type or arg_ty.index == InternPool.well_known.type_table_type or arg_ty.isAny() or arg_ty.index == InternPool.well_known.apollo_time_type or arg_ty.index == InternPool.well_known.calendar_type or arg_ty.index == InternPool.well_known.vector3_type)) return diag.failAt(ast.tokens[ast.mainToken(@intCast(arg))].start, "Phase 3 print currently rejected this argument type", .{});
+                        if (!(arg_ty.isString() or arg_ty.isInteger() or arg_ty.index == InternPool.well_known.float32_type or arg_ty.index == InternPool.well_known.float64_type or arg_ty.isBool() or arg_ty.isVoid() or arg_ty.isPointer() or arg_ty.index == InternPool.well_known.type_type or arg_ty.index == InternPool.well_known.type_table_type or arg_ty.isAny() or arg_ty.index == InternPool.well_known.apollo_time_type or arg_ty.index == InternPool.well_known.calendar_type or arg_ty.index == InternPool.well_known.vector3_type or arg_ty.index == InternPool.well_known.vector4_type)) return diag.failAt(ast.tokens[ast.mainToken(@intCast(arg))].start, "Phase 3 print currently rejected this argument type", .{});
                     }
                     break :blk Type.voidType();
                 },
@@ -1538,7 +1538,7 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "String_Builder") or isCompilerMetaTypeName(name);
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "String_Builder") or isCompilerMetaTypeName(name);
 }
 
 fn isOperatorIdentifierName(name: []const u8) bool {
@@ -1611,6 +1611,7 @@ fn typeFromTypeExprWithAliases(ast: *const Ast, typed: ?*Typed, node: NodeIndex,
     if (std.mem.eql(u8, name, "String_Builder")) return Type.init(InternPool.well_known.s64_type);
     if (std.mem.eql(u8, name, "Vector2")) return Type.init(InternPool.well_known.any_type);
     if (std.mem.eql(u8, name, "Vector3")) return Type.init(InternPool.well_known.vector3_type);
+    if (std.mem.eql(u8, name, "Vector4")) return Type.init(InternPool.well_known.vector4_type);
     if (std.mem.eql(u8, name, "Workspace")) return Type.init(InternPool.well_known.s64_type);
     if (isCompilerMetaTypeName(name)) return Type.init(InternPool.well_known.any_type);
     return Type.init(InternPool.well_known.any_type);
