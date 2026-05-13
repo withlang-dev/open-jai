@@ -8440,7 +8440,12 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 const target_ty: NodeIndex = @intCast(ast.data(expr).rhs & 0x7fffffff);
                 if (target_ty != @import("Ast.zig").null_node and target_ty < ast.node_tags.items.len) return ctx.nodeSource(target_ty);
             }
-            if (op == .star or op == .shift_left or op == .dot_star) {
+            if (op == .star) {
+                const operand_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
+                const clean = std.mem.trim(u8, operand_ty, " \t\r\n");
+                return ctx.ownedTypeTextFmt("*{s}", .{clean}) catch return null;
+            }
+            if (op == .shift_left or op == .dot_star) {
                 const operand_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
                 return std.mem.trim(u8, stripPointerText(operand_ty), " \t\r\n");
             }

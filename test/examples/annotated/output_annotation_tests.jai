@@ -98,6 +98,13 @@ using_output :: () {
     expect_program_output("examples/12/12.4_using.jai", "Patient is: {{\"Johnson\"}, \"Bronchitis\"}\nPatient has name: Johnson\n");
 } @TestProcedure
 
+pointer_to_struct_output :: () {
+    expect_program_output_contains("examples/12/12.5_pointer_to_struct.jai", "rob is ");
+    expect_program_output_contains("examples/12/12.5_pointer_to_struct.jai", "The type of rob is *Person\n");
+    expect_program_output_contains("examples/12/12.5_pointer_to_struct.jai", "The value rob points to is {\"Robert\", 42, {64.139999, -21.92}}\n");
+    expect_program_output_contains("examples/12/12.5_pointer_to_struct.jai", "e's value is: {349825645}\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
