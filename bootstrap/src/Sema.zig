@@ -1455,7 +1455,8 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
     if (std.mem.eql(u8, name, "get_build_options") or
         std.mem.eql(u8, name, "compiler_get_nodes") or
         std.mem.eql(u8, name, "compiler_get_code") or
-        std.mem.eql(u8, name, "make_location"))
+        std.mem.eql(u8, name, "make_location") or
+        std.mem.eql(u8, name, "get_completed_work"))
     {
         return Type.init(InternPool.well_known.any_type);
     }
