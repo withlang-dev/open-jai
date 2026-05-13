@@ -4494,6 +4494,7 @@ const GenContext = struct {
                     if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) {
                         if (ctx.loop_index_registers.get(decl)) |index_reg| return index_reg;
                     }
+                    if (try genUsingFallbackFieldValue(ctx, expr, decl, diag)) |reg| return reg;
                     if (ctx.decl_addresses.get(decl)) |addr| {
                         const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, expr, diag) orelse "int";
                         return try emitLoadFromAddressForType(ctx, addr, type_text, expr, diag);
@@ -8003,6 +8004,47 @@ const FieldInfo = struct {
     type_text: []const u8,
 };
 
+fn usingFallbackFieldInfoForIdentifier(ctx: *GenContext, expr: NodeIndex, decl: NodeIndex, diag: Diagnostic) !?FieldInfo {
+    const ast = ctx.ast;
+    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len or ast.tag(expr) != .identifier) return null;
+    if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return null;
+    if (ast.tag(decl) != .var_decl and ast.tag(decl) != .const_decl) return null;
+    const ident_name = ast.tokenSlice(ast.mainToken(expr));
+    const decl_name = ast.tokenSlice(ast.mainToken(decl));
+    if (std.mem.eql(u8, ident_name, decl_name)) return null;
+    const base_type = typeTextForDecl(ctx, decl, diag) orelse return null;
+    return try fieldInfoFromTypeText(ctx, base_type, ident_name, diag);
+}
+
+fn genUsingFallbackFieldAddress(ctx: *GenContext, expr: NodeIndex, decl: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+    const info = try usingFallbackFieldInfoForIdentifier(ctx, expr, decl, diag) orelse return null;
+    const ast = ctx.ast;
+    const proc = ctx.proc;
+    const base_addr = if (ctx.isTopLevelVarDecl(decl)) blk: {
+        const type_node = ast.data(decl).lhs;
+        const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForDecl(ctx, decl, diag) orelse "int";
+        break :blk try ctx.emitGlobalAddress(decl, expr, type_text, diag);
+    } else if (ctx.decl_registers.get(decl)) |reg|
+        reg
+    else if (ctx.decl_addresses.get(decl)) |addr|
+        addr
+    else
+        return null;
+    if (info.offset == 0) return base_addr;
+    const addr = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = addr, .arg1 = base_addr, .arg2 = @intCast(info.offset), .source_node = expr });
+    return addr;
+}
+
+fn genUsingFallbackFieldValue(ctx: *GenContext, expr: NodeIndex, decl: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+    const info = try usingFallbackFieldInfoForIdentifier(ctx, expr, decl, diag) orelse return null;
+    const addr = try genUsingFallbackFieldAddress(ctx, expr, decl, diag) orelse return null;
+    const clean_type = std.mem.trim(u8, info.type_text, " \t\r\n");
+    if (isDynamicArrayTypeText(clean_type) or isStaticArrayTypeText(clean_type) or try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) return addr;
+    return try emitLoadFromAddressForType(ctx, addr, clean_type, expr, diag);
+}
+
 const TypeArgRestore = struct {
     name: []const u8,
     had_old: bool,
@@ -8018,6 +8060,7 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             const ident_name = ast.tokenSlice(ast.mainToken(expr));
             if (isBindingOptionField(ident_name)) return try ctx.genSyntheticBindingOptionField(ident_name, expr, diag);
             if (ctx.resolved.local_values.get(expr)) |decl| {
+                if (try genUsingFallbackFieldAddress(ctx, expr, decl, diag)) |addr| return addr;
                 if (ctx.isTopLevelVarDecl(decl)) {
                     const type_node = ast.data(decl).lhs;
                     const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, expr, diag) orelse "int";
@@ -8267,6 +8310,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             }
             if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) return "int";
             if (ctx.type_overrides.get(decl)) |actual_type| return actual_type;
+            if (usingFallbackFieldInfoForIdentifier(ctx, expr, decl, diag) catch null) |info| return info.type_text;
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
                 if (typed.comptime_type_texts.contains(decl)) return "Type";

@@ -94,6 +94,10 @@ linked_list_output :: () {
     expect_program_output_contains("examples/12/12.3_linked_list.jai", "List data is 0 -> 12 -> 24 -> 36\n");
 } @TestProcedure
 
+using_output :: () {
+    expect_program_output("examples/12/12.4_using.jai", "Patient is: {{\"Johnson\"}, \"Bronchitis\"}\nPatient has name: Johnson\n");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
