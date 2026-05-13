@@ -26,6 +26,8 @@ pub const Typed = struct {
     owned_comptime_strings: std.ArrayList([]const u8) = .empty,
     comptime_type_texts: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_type_texts: std.ArrayList([]const u8) = .empty,
+    comptime_type_info_members: std.AutoHashMapUnmanaged(NodeIndex, TypeInfoMemberValue) = .empty,
+    owned_type_info_member_strings: std.ArrayList([]const u8) = .empty,
     comptime_bytes: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
     comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
@@ -49,6 +51,9 @@ pub const Typed = struct {
         t.comptime_type_texts.deinit(t.allocator);
         for (t.owned_comptime_type_texts.items) |value| t.allocator.free(value);
         t.owned_comptime_type_texts.deinit(t.allocator);
+        t.comptime_type_info_members.deinit(t.allocator);
+        for (t.owned_type_info_member_strings.items) |value| t.allocator.free(value);
+        t.owned_type_info_member_strings.deinit(t.allocator);
         t.comptime_bytes.deinit(t.allocator);
         for (t.owned_comptime_bytes.items) |value| t.allocator.free(value);
         t.owned_comptime_bytes.deinit(t.allocator);
@@ -88,6 +93,20 @@ pub const Typed = struct {
         errdefer t.allocator.free(owned);
         try t.owned_comptime_bytes.append(t.allocator, owned);
         try t.comptime_bytes.put(t.allocator, node, owned);
+    }
+
+    pub fn putComptimeTypeInfoMember(t: *Typed, node: NodeIndex, value: TypeInfoMemberValue) !void {
+        var owned = value;
+        owned.name = try t.ownTypeInfoMemberString(value.name);
+        owned.type_name = try t.ownTypeInfoMemberString(value.type_name);
+        try t.comptime_type_info_members.put(t.allocator, node, owned);
+    }
+
+    fn ownTypeInfoMemberString(t: *Typed, value: []const u8) ![]const u8 {
+        const owned = try t.allocator.dupe(u8, value);
+        errdefer t.allocator.free(owned);
+        try t.owned_type_info_member_strings.append(t.allocator, owned);
+        return owned;
     }
 
     pub fn putComptimeSourceLocation(t: *Typed, node: NodeIndex, value: SourceLocationValue) !void {
@@ -148,6 +167,12 @@ pub const Typed = struct {
 pub const SourceLocationValue = struct {
     fully_pathed_filename: []const u8,
     line_number: i64,
+};
+
+pub const TypeInfoMemberValue = struct {
+    name: []const u8,
+    type_name: []const u8,
+    flags: i64 = 0,
 };
 
 pub const CalendarValue = struct {

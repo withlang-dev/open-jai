@@ -15,6 +15,7 @@ pub const Opcode = enum(u8) {
     load_null_ptr,
     load_type,
     load_type_text,
+    load_type_info_member,
     type_to_string,
     load_undef,
     global_addr,
@@ -299,6 +300,7 @@ pub const Program = struct {
     code_literals: std.ArrayList(CodeLiteral) = .empty,
     calendar_literals: std.ArrayList(CalendarLiteral) = .empty,
     byte_arrays: std.ArrayList([]const u8) = .empty,
+    type_info_members: std.ArrayList(TypeInfoMember) = .empty,
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
     proc_nodes: std.ArrayList(u32) = .empty,
@@ -318,6 +320,10 @@ pub const Program = struct {
             p.allocator.free(literal.path);
         }
         for (p.byte_arrays.items) |b| p.allocator.free(b);
+        for (p.type_info_members.items) |member| {
+            p.allocator.free(member.name);
+            p.allocator.free(member.type_name);
+        }
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
         for (p.foreign_functions.items) |foreign| {
             p.allocator.free(foreign.name);
@@ -336,6 +342,7 @@ pub const Program = struct {
         p.code_literals.deinit(p.allocator);
         p.calendar_literals.deinit(p.allocator);
         p.byte_arrays.deinit(p.allocator);
+        p.type_info_members.deinit(p.allocator);
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
         p.proc_nodes.deinit(p.allocator);
@@ -398,6 +405,20 @@ pub const Program = struct {
         errdefer p.allocator.free(owned);
         const idx: u32 = @intCast(p.byte_arrays.items.len);
         try p.byte_arrays.append(p.allocator, owned);
+        return idx;
+    }
+
+    pub fn addTypeInfoMemberLiteral(p: *Program, member: TypeInfoMember) !u32 {
+        const owned_name = try p.allocator.dupe(u8, member.name);
+        errdefer p.allocator.free(owned_name);
+        const owned_type_name = try p.allocator.dupe(u8, member.type_name);
+        errdefer p.allocator.free(owned_type_name);
+        const idx: u32 = @intCast(p.type_info_members.items.len);
+        try p.type_info_members.append(p.allocator, .{
+            .name = owned_name,
+            .type_name = owned_type_name,
+            .flags = member.flags,
+        });
         return idx;
     }
 

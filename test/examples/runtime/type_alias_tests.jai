@@ -5,3 +5,7 @@ compile_time_type_alias_locals_copy_values :: () {
 expression_form_run_type_is_materialized :: () {
     expect_compile_output("test/examples/runtime/type_run_value.jai", "type:string\n");
 } @TestProcedure
+
+expression_form_run_type_info_member_is_materialized :: () {
+    expect_compile_output("test/examples/runtime/type_info_member_run_value.jai", "member:count type:int flags:0 via:count\n");
+} @TestProcedure

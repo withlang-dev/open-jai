@@ -349,6 +349,11 @@ pub const Compilation = struct {
                 try typed.putComptimeMessage(value_node, message_value);
                 try typed.putComptimeMessage(decl_node, message_value);
             },
+            .type_info_member => |member| {
+                const member_value = typeInfoMemberVmToSema(member);
+                try typed.putComptimeTypeInfoMember(value_node, member_value);
+                try typed.putComptimeTypeInfoMember(decl_node, member_value);
+            },
             .type_text => |type_text| {
                 try typed.putComptimeTypeText(value_node, type_text);
                 try typed.putComptimeTypeText(decl_node, type_text);
@@ -460,7 +465,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_type_texts.contains(node) or typed.comptime_type_info_members.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node) or typed.comptime_calendars.contains(node) or typed.comptime_build_options.contains(node) or typed.comptime_messages.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -487,6 +492,7 @@ pub const Compilation = struct {
                     }),
                     .build_options => |options| try typed.putComptimeBuildOptions(node, buildOptionsSnapshotToSema(options)),
                     .message => |message| try typed.putComptimeMessage(node, messageSnapshotToSema(message)),
+                    .type_info_member => |member| try typed.putComptimeTypeInfoMember(node, typeInfoMemberVmToSema(member)),
                     .void => {},
                 }
             },
@@ -693,6 +699,8 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .string = value });
             } else if (typed.comptime_type_texts.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .type_text = value });
+            } else if (typed.comptime_type_info_members.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .type_info_member = typeInfoMemberSemaToVm(value) });
             } else if (typed.comptime_bytes.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .bytes = value });
             } else if (typed.comptime_source_locations.get(arg)) |value| {
@@ -737,6 +745,8 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .string = value });
                 } else if (typed.comptime_type_texts.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .type_text = value });
+                } else if (typed.comptime_type_info_members.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .type_info_member = typeInfoMemberSemaToVm(value) });
                 } else if (typed.comptime_bytes.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .bytes = value });
                 } else if (typed.comptime_source_locations.get(decl)) |value| {
@@ -770,6 +780,8 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .string = value });
                     } else if (typed.comptime_type_texts.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .type_text = value });
+                    } else if (typed.comptime_type_info_members.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .type_info_member = typeInfoMemberSemaToVm(value) });
                     } else if (typed.comptime_bytes.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .bytes = value });
                     } else if (typed.comptime_source_locations.get(initializer_node)) |value| {
@@ -918,6 +930,7 @@ pub const Compilation = struct {
             .build_options => |v| std.debug.print("{{ output_type = {s}; backend = {s}; output_executable_name = \"{s}\"; output_path = \"{s}\"; }}", .{ v.output_type, v.backend, v.output_executable_name, v.output_path }),
             .message => |v| std.debug.print("{{{s}, {d}}}", .{ v.kind, v.workspace }),
             .type_text => |v| std.debug.print("{s}", .{v}),
+            .type_info_member => |v| std.debug.print("{{name = \"{s}\"; type = {s}; flags = {d};}}", .{ v.name, v.type_name, v.flags }),
         }
     }
 
@@ -993,6 +1006,11 @@ pub const Compilation = struct {
                 const owned = try comp.ownRunString(type_text);
                 break :blk .{ .type_text = owned };
             },
+            .type_info_member => |member| blk: {
+                const owned_name = try comp.ownRunString(member.name);
+                const owned_type_name = try comp.ownRunString(member.type_name);
+                break :blk .{ .type_info_member = .{ .name = owned_name, .type_name = owned_type_name, .flags = member.flags } };
+            },
             .source_location => |loc| blk: {
                 const owned_path = try comp.ownRunString(loc.fully_pathed_filename);
                 break :blk .{ .source_location = .{ .fully_pathed_filename = owned_path, .line_number = loc.line_number } };
@@ -1016,6 +1034,7 @@ pub const Compilation = struct {
         if (ast.tag(arg) == .field_access) {
             if (try comp.executeBuildOptionsSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
             if (try comp.executeMessageSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
+            if (try comp.executeTypeInfoMemberSnapshotField(ast, typed, resolved, ast.data(arg).lhs, ast.tokenSlice(ast.data(arg).rhs))) |value| return value;
         }
         if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .keyword_xx) return comp.executeRunHostArg(ast, typed, resolved, ast.data(arg).lhs, diag);
         if (ast.tag(arg) == .call_expr) return try comp.executeRunCall(ast, typed, resolved, arg, arg, diag);
@@ -1023,6 +1042,7 @@ pub const Compilation = struct {
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
         if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
         if (typed.comptime_type_texts.get(arg)) |value| return .{ .type_text = value };
+        if (typed.comptime_type_info_members.get(arg)) |value| return .{ .type_info_member = typeInfoMemberSemaToVm(value) };
         if (typed.comptime_bytes.get(arg)) |value| return .{ .bytes = value };
         if (typed.comptime_source_locations.get(arg)) |value| return .{ .source_location = .{
             .fully_pathed_filename = value.fully_pathed_filename,
@@ -1058,6 +1078,7 @@ pub const Compilation = struct {
                     if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
                     if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
                     if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
+                    if (typed.comptime_type_info_members.get(decl)) |value| break :blk .{ .type_info_member = typeInfoMemberSemaToVm(value) };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
@@ -1138,6 +1159,28 @@ pub const Compilation = struct {
         if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
         if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = message.error_code };
         if (std.mem.eql(u8, field_name, "dump_text")) return .{ .string = message.dump_text };
+        return null;
+    }
+
+    fn executeTypeInfoMemberSnapshotField(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, base: @import("Ast.zig").NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        _ = comp;
+        const member = typed.comptime_type_info_members.get(base) orelse blk: {
+            if (ast.tag(base) != .identifier) return null;
+            const name = ast.tokenSlice(ast.mainToken(base));
+            const decl = resolved.local_values.get(base) orelse lookup_decl: {
+                if (resolved.lookup(name)) |sym| switch (sym) {
+                    .const_value => |node| break :lookup_decl node,
+                    else => {},
+                };
+                break :lookup_decl @import("Ast.zig").null_node;
+            };
+            if (decl == @import("Ast.zig").null_node) return null;
+            break :blk typed.comptime_type_info_members.get(decl) orelse return null;
+        };
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = member.name };
+        if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = member.type_name };
+        if (std.mem.eql(u8, field_name, "flags")) return .{ .int = member.flags };
+        if (std.mem.eql(u8, field_name, "offset_in_bytes")) return .{ .int = 0 };
         return null;
     }
 
@@ -1795,6 +1838,22 @@ fn messageSemaToVm(value: sema.MessageValue) vm_mod.MessageSnapshot {
         .linker_exit_code = value.linker_exit_code,
         .error_code = value.error_code,
         .dump_text = value.dump_text,
+    };
+}
+
+fn typeInfoMemberVmToSema(value: vm_mod.TypeInfoMemberValue) sema.TypeInfoMemberValue {
+    return .{
+        .name = value.name,
+        .type_name = value.type_name,
+        .flags = value.flags,
+    };
+}
+
+fn typeInfoMemberSemaToVm(value: sema.TypeInfoMemberValue) vm_mod.TypeInfoMemberValue {
+    return .{
+        .name = value.name,
+        .type_name = value.type_name,
+        .flags = value.flags,
     };
 }
 

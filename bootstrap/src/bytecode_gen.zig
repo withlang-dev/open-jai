@@ -1011,10 +1011,13 @@ const GenContext = struct {
             const param_type = ast.data(param).lhs;
             const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
             const captures_syntax = ((target_is_expand or paramNameHasDollar(ast, param)) and std.mem.eql(u8, param_type_text, "Code")) or isCallerCodeExpr(ast, source);
-            const code = if (captures_syntax and !(ast.tag(source) == .meta_expr and ast.tokens[ast.mainToken(source)].tag == .directive_code))
-                ctx.nodeSource(source)
+            const code = if (captures_syntax)
+                if (ast.tag(source) == .meta_expr and ast.tokens[ast.mainToken(source)].tag == .directive_code)
+                    try ctx.codeTextForMacroArg(source, &[_]MacroCodeBinding{}, diag)
+                else
+                    ctx.nodeSource(source)
             else
-                try ctx.codeTextForMacroArg(source, &[_]MacroCodeBinding{}, diag);
+                "";
             if (captures_syntax) try ctx.rememberLocalCode(param, code);
             const arg_reg = if (param_args[i] == @import("Ast.zig").null_node and isCallerLocationExpr(ast, source))
                 try ctx.emitSourceLocation(call_expr, call_expr, diag)
@@ -1469,6 +1472,7 @@ const GenContext = struct {
             if (typed.comptime_floats.get(expr)) |value| return .{ .float = value };
             if (typed.comptime_strings.get(expr)) |value| return .{ .string = value };
             if (typed.comptime_type_texts.get(expr)) |value| return .{ .type_text = value };
+            if (ctx.comptimeTypeInfoMemberForExpr(expr)) |value| return .{ .type_info_member = typeInfoMemberSemaToVm(value) };
             if (typed.comptime_bytes.get(expr)) |value| return .{ .bytes = value };
             if (typed.comptime_source_locations.get(expr)) |value| return .{ .source_location = .{
                 .fully_pathed_filename = value.fully_pathed_filename,
@@ -1509,6 +1513,7 @@ const GenContext = struct {
                 }
                 if (try ctx.executeBuildOptionsSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 if (try ctx.executeMessageSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
+                if (try ctx.executeTypeInfoMemberSnapshotField(ast.data(expr).lhs, field_name)) |value| break :blk value;
                 return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "unsupported #run field access", .{});
             },
             .identifier => blk: {
@@ -1535,6 +1540,7 @@ const GenContext = struct {
                     if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
                     if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
                     if (typed.comptime_type_texts.get(decl)) |value| break :blk .{ .type_text = value };
+                    if (ctx.comptimeTypeInfoMemberForExpr(decl)) |value| break :blk .{ .type_info_member = typeInfoMemberSemaToVm(value) };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
                     if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
                         .fully_pathed_filename = value.fully_pathed_filename,
@@ -1614,6 +1620,43 @@ const GenContext = struct {
         if (std.mem.eql(u8, field_name, "linker_exit_code")) return .{ .int = message.linker_exit_code };
         if (std.mem.eql(u8, field_name, "error_code")) return .{ .int = message.error_code };
         if (std.mem.eql(u8, field_name, "dump_text")) return .{ .string = message.dump_text };
+        return null;
+    }
+
+    fn executeTypeInfoMemberSnapshotField(ctx: *GenContext, base: NodeIndex, field_name: []const u8) !?vm_mod.Value {
+        const member = ctx.comptimeTypeInfoMemberForExpr(base) orelse return null;
+        if (std.mem.eql(u8, field_name, "name")) return .{ .string = member.name };
+        if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = member.type_name };
+        if (std.mem.eql(u8, field_name, "flags")) return .{ .int = member.flags };
+        if (std.mem.eql(u8, field_name, "offset_in_bytes")) return .{ .int = 0 };
+        return null;
+    }
+
+    fn comptimeTypeInfoMemberForExpr(ctx: *GenContext, expr: NodeIndex) ?@import("Sema.zig").TypeInfoMemberValue {
+        const typed = ctx.typed orelse return null;
+        const ast = ctx.ast;
+        if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
+        if (typed.comptime_type_info_members.get(expr)) |value| return value;
+        if (ast.tag(expr) != .identifier) return null;
+        const name = ast.tokenSlice(ast.mainToken(expr));
+        const decl = ctx.resolved.local_values.get(expr) orelse lookup_decl: {
+            if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                .const_value => |node| break :lookup_decl node,
+                else => {},
+            };
+            break :lookup_decl @import("Ast.zig").null_node;
+        };
+        if (decl == @import("Ast.zig").null_node or decl == using_param_sentinel or decl >= ast.node_tags.items.len) return null;
+        if (typed.comptime_type_info_members.get(decl)) |value| return value;
+        const init = if (ast.tag(decl) == .const_decl)
+            ast.data(decl).lhs
+        else if (ast.tag(decl) == .var_decl)
+            ast.data(decl).rhs
+        else
+            @import("Ast.zig").null_node;
+        if (init != @import("Ast.zig").null_node and init != using_param_sentinel and init < ast.node_tags.items.len) {
+            if (typed.comptime_type_info_members.get(init)) |value| return value;
+        }
         return null;
     }
 
@@ -3053,7 +3096,7 @@ const GenContext = struct {
                         try ctx.rememberLocalCode(stmt, try ctx.codeTextForMacroArg(init, &[_]MacroCodeBinding{}, diag));
                     }
                     if (ctx.typed) |typed| {
-                        if (typed.comptime_type_texts.contains(stmt) or typed.comptime_type_texts.contains(init) or typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init)) {
+                        if (typed.comptime_type_texts.contains(stmt) or typed.comptime_type_texts.contains(init) or typed.comptime_type_info_members.contains(stmt) or typed.comptime_type_info_members.contains(init) or typed.comptime_build_options.contains(stmt) or typed.comptime_build_options.contains(init) or typed.comptime_messages.contains(stmt) or typed.comptime_messages.contains(init)) {
                             return;
                         }
                     }
@@ -3720,6 +3763,18 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitTypeInfoMemberValue(ctx: *GenContext, source_node: NodeIndex, member: @import("Sema.zig").TypeInfoMemberValue) !Bytecode.Register {
+        const member_idx = try ctx.program.addTypeInfoMemberLiteral(.{
+            .name = member.name,
+            .type_name = member.type_name,
+            .flags = @intCast(member.flags),
+        });
+        const reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_type_info_member, .dest = reg, .arg1 = member_idx, .source_node = source_node });
+        return reg;
+    }
+
     fn ensureTypeInfoForText(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !void {
         const type_name = firstTypeWord(stripPointerText(raw_type));
         if (type_name.len == 0 or ctx.program.typeInfoIndexByName(type_name) != null) return;
@@ -3844,6 +3899,11 @@ const GenContext = struct {
                 return reg;
             },
             .type_of_expr => {
+                if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
+                    const type_text = firstTypeWord(stripPointerText(ctx.nodeSource(ast.data(expr).lhs)));
+                    try ctx.ensureTypeInfoForText(type_text, diag);
+                    return try ctx.emitTypeText(expr, type_text, diag);
+                }
                 const type_id = if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |type_text|
                     typeIdFromTypeText(type_text)
                 else
@@ -3929,6 +3989,10 @@ const GenContext = struct {
                     if (typed.comptime_type_texts.get(expr)) |value| {
                         return try ctx.emitTypeText(expr, value, diag);
                     }
+                    if (ctx.comptimeTypeInfoMemberForExpr(expr)) |value| {
+                        if (!ctx.compile_time_host) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Type_Info_Struct_Member #run values are compile-time only; access their fields during #run", .{});
+                        return try ctx.emitTypeInfoMemberValue(expr, value);
+                    }
                     if (typed.comptime_bytes.get(expr)) |value| {
                         const idx = try program.addByteArray(value);
                         const reg = proc.num_registers;
@@ -3979,6 +4043,10 @@ const GenContext = struct {
                     }),
                     .build_options => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Build_Options #run values are compile-time only; access their fields during #run", .{}),
                     .message => return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Message #run values are compile-time only; access their fields during #run", .{}),
+                    .type_info_member => |member| {
+                        if (!ctx.compile_time_host) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Type_Info_Struct_Member #run values are compile-time only; access their fields during #run", .{});
+                        return try ctx.emitTypeInfoMemberValue(expr, .{ .name = member.name, .type_name = member.type_name, .flags = member.flags });
+                    },
                     .bytes => |bytes_value| {
                         const idx = try program.addByteArray(bytes_value);
                         const reg = proc.num_registers;
@@ -4141,6 +4209,12 @@ const GenContext = struct {
                         }
                         if (typed.comptime_type_texts.get(decl)) |value| {
                             const reg = try ctx.emitTypeText(expr, value, diag);
+                            try ctx.decl_registers.put(program.allocator, decl, reg);
+                            return reg;
+                        }
+                        if (ctx.comptimeTypeInfoMemberForExpr(decl)) |value| {
+                            if (!ctx.compile_time_host) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Type_Info_Struct_Member values are compile-time only; access their fields during #run", .{});
+                            const reg = try ctx.emitTypeInfoMemberValue(expr, value);
                             try ctx.decl_registers.put(program.allocator, decl, reg);
                             return reg;
                         }
@@ -4449,6 +4523,12 @@ const GenContext = struct {
                     }
                     return try ctx.emitCompileTimeValue(expr, value, diag);
                 }
+                if (try ctx.executeTypeInfoMemberSnapshotField(ast.data(expr).lhs, field_name)) |value| {
+                    if (!ctx.compile_time_host) {
+                        return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "Type_Info_Struct_Member fields from #run values are compile-time only", .{});
+                    }
+                    return try ctx.emitCompileTimeValue(expr, value, diag);
+                }
                 const base_reg = try ctx.genExpr(ast.data(expr).lhs, diag);
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
                     const base_name = firstTypeWord(stripPointerText(base_text));
@@ -4748,7 +4828,8 @@ const GenContext = struct {
                     if (dynamicArrayElementText(base_text)) |elem_text| {
                         const elem_size = try typeTextSize(ctx, elem_text, diag);
                         const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_text, diag);
-                        const elem_kind: u32 = if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else 0;
+                        const elem_is_type_info_member = std.mem.eql(u8, firstTypeWord(stripPointerText(elem_text)), "Type_Info_Struct_Member");
+                        const elem_kind: u32 = if (elem_is_type_info_member) 3 else if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else 0;
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
                         try proc.instructions.append(program.allocator, .{ .opcode = .array_index, .dest = reg, .arg1 = base_reg, .arg2 = index_reg, .arg3 = @intCast(elem_size), .arg4 = elem_kind, .source_node = expr });
@@ -6608,7 +6689,8 @@ const GenContext = struct {
                 .time_zone = v.time_zone,
             }),
             .code => |v| try ctx.emitCodeValue(source_node, v),
-            .type_text => |v| try ctx.emitString(source_node, v),
+            .type_text => |v| try ctx.emitTypeText(source_node, v, diag),
+            .type_info_member => |v| try ctx.emitTypeInfoMemberValue(source_node, .{ .name = v.name, .type_name = v.type_name, .flags = v.flags }),
             .void => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "compile-time value has no runtime representation", .{}),
             .build_options => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Build_Options values are compile-time only; access their fields during #run", .{}),
             .message => diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "Message values are compile-time only; access their fields during #run", .{}),
@@ -7727,6 +7809,14 @@ fn messageSemaToVm(value: @import("Sema.zig").MessageValue) vm_mod.MessageSnapsh
     };
 }
 
+fn typeInfoMemberSemaToVm(value: @import("Sema.zig").TypeInfoMemberValue) vm_mod.TypeInfoMemberValue {
+    return .{
+        .name = value.name,
+        .type_name = value.type_name,
+        .flags = value.flags,
+    };
+}
+
 fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
     const ast = ctx.ast;
     if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
@@ -7744,6 +7834,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     if (ctx.typed) |typed| {
         if (typed.comptime_strings.contains(expr) or typed.comptime_bytes.contains(expr)) return "string";
         if (typed.comptime_type_texts.contains(expr)) return "Type";
+        if (ctx.comptimeTypeInfoMemberForExpr(expr) != null) return "Type_Info_Struct_Member";
         if (typed.comptime_source_locations.contains(expr)) return "Source_Code_Location";
         if (typed.comptime_calendars.contains(expr)) return "Calendar";
         if (typed.comptime_build_options.contains(expr)) return "Build_Options";
@@ -7772,6 +7863,22 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             }
             return lhs_ty orelse rhs_ty;
         },
+        .type_of_expr => {
+            if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
+                const operand = ast.data(expr).lhs;
+                if (operand != @import("Ast.zig").null_node and operand < ast.node_tags.items.len) {
+                    const type_name = firstTypeWord(stripPointerText(ctx.nodeSource(operand)));
+                    const is_struct = if (structTypeNodeByName(ctx, type_name)) |type_node|
+                        type_node != null
+                    else |_|
+                        false;
+                    if (is_struct) return "Type_Info_Struct";
+                    if (std.mem.startsWith(u8, std.mem.trim(u8, ctx.nodeSource(operand), " \t\r\n"), "*")) return "Type_Info_Pointer";
+                }
+                return "Type";
+            }
+            return "Type";
+        },
         .identifier => {
             const ident_name = ast.tokenSlice(ast.mainToken(expr));
             if (std.mem.eql(u8, ident_name, "context")) return "Context";
@@ -7791,6 +7898,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
                 if (typed.comptime_type_texts.contains(decl)) return "Type";
+                if (ctx.comptimeTypeInfoMemberForExpr(decl) != null) return "Type_Info_Struct_Member";
                 if (typed.comptime_source_locations.contains(decl)) return "Source_Code_Location";
                 if (typed.comptime_calendars.contains(decl)) return "Calendar";
                 if (typed.comptime_build_options.contains(decl)) return "Build_Options";

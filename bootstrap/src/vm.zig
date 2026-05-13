@@ -22,6 +22,7 @@ pub const Value = union(enum) {
     string: []const u8,
     bytes: []const u8,
     code: CodeValue,
+    type_info_member: TypeInfoMemberValue,
     source_location: SourceLocation,
     calendar: CalendarValue,
     message: MessageSnapshot,
@@ -83,6 +84,12 @@ const CodeTree = struct {
 pub const SourceLocation = struct {
     fully_pathed_filename: []const u8,
     line_number: i64,
+};
+
+pub const TypeInfoMemberValue = struct {
+    name: []const u8,
+    type_name: []const u8,
+    flags: i64 = 0,
 };
 
 pub const CalendarValue = struct {
@@ -447,6 +454,10 @@ pub const VM = struct {
                 .load_type_text => {
                     if (inst.dest >= regs.len or inst.arg1 >= vm.program.strings.items.len) return diag.failAt(0, "VM load_type_text register/string index out of range", .{});
                     regs[inst.dest] = .{ .type_text = vm.program.strings.items[inst.arg1] };
+                },
+                .load_type_info_member => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.type_info_members.items.len) return diag.failAt(0, "VM load_type_info_member register/member index out of range", .{});
+                    regs[inst.dest] = .{ .type_info_member = vm.program.type_info_members.items[inst.arg1] };
                 },
                 .type_to_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM type_to_string register out of range", .{});
@@ -4986,7 +4997,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .code => |v| .{ .code = v },
         .type_id => |v| .{ .type_text = typeName(v) },
         .type_text => |v| .{ .type_text = v },
-        .type_info_member => diag.failAt(0, "VM cannot pass Type_Info member values across procedure calls yet", .{}),
+        .type_info_member => |v| .{ .type_info_member = typeInfoMemberValue(v) },
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => |v| .{ .source_location = v },
@@ -5010,7 +5021,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .type_id => |v| .{ .type_text = typeName(v) },
         .type_text => |v| .{ .type_text = v },
         .ptr => |ptr| .{ .bytes = try vm.readRemainingBytes(ptr, diag) },
-        .type_info_member => diag.failAt(0, "expression-form #run cannot materialize Type_Info member values", .{}),
+        .type_info_member => |v| .{ .type_info_member = typeInfoMemberValue(v) },
         .tuple => diag.failAt(0, "expression-form #run cannot materialize undestructured multi-return values", .{}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
         .message => |v| .{ .message = try vm.messageSnapshot(vm.allocator, v, diag) },
@@ -5034,7 +5045,20 @@ fn registerValueFromValue(vm: *VM, value: Value, diag: Diagnostic) !RegisterValu
         .message => |v| .{ .message = try vm.messageFromSnapshot(v) },
         .build_options => |v| .{ .build_options = try vm.buildOptionsFromSnapshot(v) },
         .type_text => |v| .{ .type_text = v },
+        .type_info_member => |v| .{ .type_info_member = .{
+            .name = v.name,
+            .type_name = v.type_name,
+            .flags = @intCast(v.flags),
+        } },
         .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),
+    };
+}
+
+fn typeInfoMemberValue(member: Bytecode.TypeInfoMember) TypeInfoMemberValue {
+    return .{
+        .name = member.name,
+        .type_name = member.type_name,
+        .flags = member.flags,
     };
 }
 
