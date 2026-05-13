@@ -784,20 +784,22 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     break :blk Type.string();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for compiler_arg", .{}),
-            } else if (std.mem.eql(u8, name, "get_cpu_info")) switch (sym) {
-                .builtin_get_cpu_info => {
-                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "get_cpu_info expects no arguments", .{});
-                    break :blk Type.init(InternPool.well_known.any_type);
-                },
-                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for get_cpu_info", .{}),
-            } else if (std.mem.eql(u8, name, "check_feature") or std.mem.eql(u8, name, "has_feature")) switch (sym) {
-                .builtin_check_feature => {
-                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "{s} expects feature leaves and a feature flag", .{name});
-                    _ = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
-                    _ = try analyzeNode(ast, resolved, typed, @intCast(args[1]), diag);
-                    break :blk Type.boolType();
-                },
-                else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+            } else if (std.mem.eql(u8, name, "get_cpu_info")) {
+                switch (sym) {
+                    .builtin_get_cpu_info, .proc => {},
+                    else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for get_cpu_info", .{}),
+                }
+                if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "get_cpu_info expects no arguments", .{});
+                break :blk Type.init(InternPool.well_known.any_type);
+            } else if (std.mem.eql(u8, name, "check_feature") or std.mem.eql(u8, name, "has_feature")) {
+                switch (sym) {
+                    .builtin_check_feature, .proc => {},
+                    else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for {s}", .{name}),
+                }
+                const expected_args: usize = if (std.mem.eql(u8, name, "has_feature")) 1 else 2;
+                if (args.len != expected_args) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "{s} expects {d} argument{s}", .{ name, expected_args, if (expected_args == 1) "" else "s" });
+                for (args) |arg| _ = try analyzeNode(ast, resolved, typed, @intCast(arg), diag);
+                break :blk Type.boolType();
             } else if (std.mem.eql(u8, name, "compiler_read_file")) switch (sym) {
                 .builtin_compiler_read_file => {
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "compiler_read_file expects one path string", .{});

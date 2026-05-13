@@ -615,7 +615,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Flat_Pool") or
                     std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "GetRect") or
-                    std.mem.eql(u8, module_name, "Machine_X64") or
                     std.mem.eql(u8, module_name, "Sound_Player") or
                     std.mem.eql(u8, module_name, "glfw") or
                     std.mem.eql(u8, module_name, "Bindings_Generator") or
@@ -691,12 +690,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     } else if (std.mem.eql(u8, module_name, "rpmalloc")) {
                         try r.putRealSymbol("rpmalloc_allocator_proc", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "Machine_X64")) {
-                        try r.symbols.put(allocator, "get_cpu_info", .builtin_get_cpu_info);
-                        try r.symbols.put(allocator, "check_feature", .builtin_check_feature);
-                        try r.symbols.put(allocator, "has_feature", .builtin_check_feature);
-                        try r.putRealSymbol("Feature", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("x86_Feature_Flag", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         for (&[_][]const u8{
                             "Generate_Bindings_Options",

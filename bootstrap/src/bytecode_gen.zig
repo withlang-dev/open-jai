@@ -3743,6 +3743,10 @@ const GenContext = struct {
                         try proc.instructions.append(program.allocator, .{ .opcode = .source_location_get_field, .dest = reg, .arg1 = base_reg, .arg2 = field_index, .source_node = expr });
                         return reg;
                     }
+                    if (std.mem.eql(u8, firstTypeWord(base_text), "CPU_Info")) {
+                        if (std.mem.eql(u8, field_name, "feature_leaves")) return base_reg;
+                        if (std.mem.eql(u8, field_name, "vendor")) return try ctx.emitString(expr, "unknown");
+                    }
                     if (isBuildOptionsValueType(base_text)) {
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -4280,9 +4284,15 @@ const GenContext = struct {
                 }
                 if (std.mem.eql(u8, name, "check_feature") or std.mem.eql(u8, name, "has_feature")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
-                    if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects feature leaves and a feature flag", .{name});
-                    _ = try ctx.genExpr(@intCast(args[0]), diag);
-                    const feature_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const feature_arg: NodeIndex = if (std.mem.eql(u8, name, "has_feature")) blk: {
+                        if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "has_feature expects one feature flag", .{});
+                        break :blk @intCast(args[0]);
+                    } else blk: {
+                        if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "check_feature expects feature leaves and a feature flag", .{});
+                        _ = try ctx.genExpr(@intCast(args[0]), diag);
+                        break :blk @intCast(args[1]);
+                    };
+                    const feature_reg = try ctx.genExpr(feature_arg, diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     try proc.instructions.append(program.allocator, .{ .opcode = .cpu_has_feature, .dest = reg, .arg1 = feature_reg, .source_node = expr });
