@@ -3891,6 +3891,8 @@ const GenContext = struct {
                     std.mem.eql(u8, name, "thread_deinit") or
                     std.mem.eql(u8, name, "thread_destroy") or
                     std.mem.eql(u8, name, "do_error_checking") or
+                    std.mem.eql(u8, name, "advance") or
+                    std.mem.eql(u8, name, "log_error") or
                     std.mem.eql(u8, name, "init") or
                     std.mem.eql(u8, name, "start") or
                     std.mem.eql(u8, name, "add_work") or

@@ -1495,7 +1495,8 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "build_cpp") or
         std.mem.eql(u8, name, "build_cpp_dynamic_lib") or
         std.mem.eql(u8, name, "cpp_link_library") or
-        std.mem.eql(u8, name, "generate_bindings"))
+        std.mem.eql(u8, name, "generate_bindings") or
+        std.mem.eql(u8, name, "init"))
     {
         return Type.boolType();
     }
@@ -1510,14 +1511,15 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "compiler_set_workspace_status") or
         std.mem.eql(u8, name, "compiler_report") or
         std.mem.eql(u8, name, "do_error_checking") or
+        std.mem.eql(u8, name, "log_error") or
         std.mem.eql(u8, name, "add_build_file") or
         std.mem.eql(u8, name, "add_build_string") or
         std.mem.eql(u8, name, "print_expression") or
         std.mem.eql(u8, name, "init_string_builder") or
         std.mem.eql(u8, name, "free_buffers") or
         std.mem.eql(u8, name, "append") or
+        std.mem.eql(u8, name, "advance") or
         std.mem.eql(u8, name, "print_to_builder") or
-        std.mem.eql(u8, name, "init") or
         std.mem.eql(u8, name, "start") or
         std.mem.eql(u8, name, "add_work") or
         std.mem.eql(u8, name, "shutdown") or

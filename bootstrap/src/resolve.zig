@@ -529,6 +529,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         "split",                 "read",              "release",             "start",
                         "lock",                  "proc",
                     });
+                    try r.putRealSymbol("advance", .{ .const_value = @import("Ast.zig").null_node });
+                    try r.putRealSymbol("log_error", .{ .const_value = @import("Ast.zig").null_node });
                     try r.symbols.put(allocator, "equal", .builtin_compare);
                     for (&[_][]const u8{ "make_vector2", "make_vector3", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
@@ -768,9 +770,19 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
                     } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
-                        try putExternalSymbols(&r, &.{ "init_sound_player", "play_sound", "Sound_Player" });
+                        try putExternalSymbols(&r, &.{
+                            "init_sound_player",
+                            "play_sound",
+                            "Sound_Player",
+                            "Mixer_Sound_Data",
+                            "Sound_Stream",
+                            "init",
+                            "make_stream",
+                            "pre_entity_update",
+                            "post_entity_update",
+                        });
                     } else if (std.mem.eql(u8, module_name, "Wav_File")) {
-                        try putExternalSymbols(&r, &.{ "load_wav_file", "Wav_File" });
+                        try putExternalSymbols(&r, &.{ "load_wav_file", "get_wav_header", "Wav_File", "WAVE_FORMAT_PCM", "WAVE_FORMAT_DVI_ADPCM" });
                     } else if (std.mem.eql(u8, module_name, "glfw")) {
                         try putExternalSymbols(&r, &.{ "glfwInit", "glfwTerminate", "glfwCreateWindow", "glfwMakeContextCurrent", "glfwWindowShouldClose", "glfwSwapBuffers", "glfwPollEvents", "glfwGetKey", "glfwWindowHint", "glfwSetWindowShouldClose", "GLFW_PRESS", "GLFW_TRUE", "GLFW_KEY_ESCAPE", "GLFW_CONTEXT_VERSION_MAJOR", "GLFW_CONTEXT_VERSION_MINOR", "GLFWwindow", "GLFWmonitor" });
                     } else if (std.mem.eql(u8, module_name, "TestScope")) {
