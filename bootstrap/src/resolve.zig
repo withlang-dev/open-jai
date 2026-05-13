@@ -808,6 +808,8 @@ fn resolveProc(ast: *const Ast, r: *Resolved, proc: NodeIndex, file_id: u32, dia
     defer declared.deinit(r.allocator);
     var restores = std.ArrayList(BindingRestore).empty;
     defer restores.deinit(r.allocator);
+    const old_this = try r.symbols.fetchPut(r.allocator, "#this", .{ .proc = proc });
+    try restores.append(r.allocator, .{ .name = "#this", .old = if (old_this) |entry| entry.value else undefined, .had_old = old_this != null });
     const sig = procSignature(ast, proc);
     if (sig) |s| {
         for (ast.extraSlice(s.params_extra)) |param_idx| {

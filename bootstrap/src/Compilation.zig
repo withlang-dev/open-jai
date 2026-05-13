@@ -1047,10 +1047,13 @@ pub const Compilation = struct {
     }
 
     fn loadSourceWithLoads(comp: *Compilation, path: []const u8) anyerror![]u8 {
-        const source = std.Io.Dir.cwd().readFileAlloc(comp.io, path, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        const raw_source = std.Io.Dir.cwd().readFileAlloc(comp.io, path, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
             std.debug.print("{s}: error: unable to read source file: {s}\n", .{ path, @errorName(err) });
             return error.SourceReadFailed;
         };
+        defer comp.allocator.free(raw_source);
+        const source = try comp.normalizeSpacedDirectives(raw_source);
+        defer comp.allocator.free(source);
         var out = std.ArrayList(u8).empty;
         defer out.deinit(comp.allocator);
         const dir = std.fs.path.dirname(path) orelse ".";
@@ -1085,7 +1088,6 @@ pub const Compilation = struct {
                 defer comp.allocator.free(module_path);
                 const module_src = std.Io.Dir.cwd().readFileAlloc(comp.io, module_path, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
                     std.debug.print("{s}: error: unable to read module: {s}\n", .{ module_path, @errorName(err) });
-                    comp.allocator.free(source);
                     return error.SourceReadFailed;
                 };
                 defer comp.allocator.free(module_src);
@@ -1118,7 +1120,6 @@ pub const Compilation = struct {
             try out.appendSlice(comp.allocator, rest[0..idx]);
             const start = idx + "#load \"".len;
             const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse {
-                comp.allocator.free(source);
                 return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #load path", .{});
             };
             const rel = rest[start .. start + end_rel];
@@ -1126,7 +1127,6 @@ pub const Compilation = struct {
             defer comp.allocator.free(full);
             const loaded = std.Io.Dir.cwd().readFileAlloc(comp.io, full, comp.allocator, .limited(64 * 1024 * 1024)) catch |err| {
                 std.debug.print("{s}: error: unable to read #load file: {s}\n", .{ full, @errorName(err) });
-                comp.allocator.free(source);
                 return error.SourceReadFailed;
             };
             defer comp.allocator.free(loaded);
@@ -1142,7 +1142,26 @@ pub const Compilation = struct {
             rest = if (after < rest.len) rest[after + 1 ..] else rest[after..];
         }
         try out.appendSlice(comp.allocator, rest);
-        comp.allocator.free(source);
+        return try out.toOwnedSlice(comp.allocator);
+    }
+
+    fn normalizeSpacedDirectives(comp: *Compilation, source: []const u8) ![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(comp.allocator);
+        var i: usize = 0;
+        while (i < source.len) {
+            if (source[i] == '#') {
+                var cursor = i + 1;
+                while (cursor < source.len and (source[cursor] == ' ' or source[cursor] == '\t')) cursor += 1;
+                if (cursor > i + 1 and cursor < source.len and (std.ascii.isAlphabetic(source[cursor]) or source[cursor] == '_')) {
+                    try out.append(comp.allocator, '#');
+                    i = cursor;
+                    continue;
+                }
+            }
+            try out.append(comp.allocator, source[i]);
+            i += 1;
+        }
         return try out.toOwnedSlice(comp.allocator);
     }
 };

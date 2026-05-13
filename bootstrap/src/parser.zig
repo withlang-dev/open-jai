@@ -1671,13 +1671,13 @@ const Parser = struct {
         if (p.match(.directive_type) != null) return p.parseTypeExpr();
         if (p.match(.directive_code)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
         if (p.match(.directive_insert)) |tok| return try p.parseOpaqueDirectiveExpr(tok);
-        if (p.match(.directive_this)) |_| {
+        if (p.match(.directive_this)) |tok| {
             if (p.matchDiscard(.l_paren)) {
                 const operand = try p.parseExpr();
                 _ = try p.expect(.r_paren, "expected ')' after #this", .{});
                 return operand;
             }
-            return try p.ast.addNode(.identifier, 0, .{});
+            return try p.ast.addNode(.identifier, tok, .{});
         }
         if (p.match(.directive_procedure_of_call)) |_| {
             const operand = try p.parseExpr();
