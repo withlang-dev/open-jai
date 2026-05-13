@@ -1185,7 +1185,9 @@ pub const Compilation = struct {
             const line_start = if (std.mem.lastIndexOfScalar(u8, rest[0..idx], '\n')) |newline| newline + 1 else 0;
             const import_prefix = std.mem.trim(u8, rest[line_start..idx], " \t\r\n");
             const assigned_import = import_prefix.len != 0;
-            if (std.mem.indexOfScalar(u8, line, '(')) |param_start_rel| {
+            const comment_start = std.mem.indexOf(u8, line, "//") orelse line.len;
+            const import_syntax = line[0..comment_start];
+            if (std.mem.indexOfScalar(u8, import_syntax, '(')) |param_start_rel| {
                 try out.appendSlice(comp.allocator, rest[0..idx]);
                 if (assigned_import) {
                     try out.appendSlice(comp.allocator, rest[idx .. idx + line_end]);
