@@ -611,7 +611,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
                     std.mem.eql(u8, module_name, "Mail") or
-                    std.mem.eql(u8, module_name, "POSIX") or
                     std.mem.eql(u8, module_name, "Debug") or
                     std.mem.eql(u8, module_name, "Sort") or
                     std.mem.eql(u8, module_name, "Hash_Table") or
@@ -644,11 +643,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STD_INPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_OUTPUT_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STD_ERROR_HANDLE", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "POSIX")) {
-                        try r.symbols.put(allocator, "read", .builtin_posix_read);
-                        try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("STDOUT_FILENO", .{ .const_value = @import("Ast.zig").null_node });
-                        try r.putRealSymbol("STDERR_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putExternalSymbols(&r, &.{
                             "events_this_frame",          "update_window_events",

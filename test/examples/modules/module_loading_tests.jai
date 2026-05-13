@@ -29,3 +29,7 @@ file_utilities_module_import_loads_real_source :: () {
 build_cpp_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/build_cpp_module_import_value.jai", "build-cpp:true\n");
 } @TestProcedure
+
+posix_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/posix_module_import_value.jai", "posix:0 1 2\n");
+} @TestProcedure
