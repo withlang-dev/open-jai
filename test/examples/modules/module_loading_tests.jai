@@ -85,3 +85,7 @@ hash_table_module_import_loads_real_source_and_finds_values :: () {
 input_module_import_loads_real_source_and_event_defaults_work :: () {
     expect_compile_output("test/examples/modules/input_module_import_value.jai", "input:1 1 true true true 640 480 0 0 false\n");
 } @TestProcedure
+
+window_creation_module_import_loads_real_source_and_tracks_dimensions :: () {
+    expect_compile_output("test/examples/modules/window_creation_module_import_value.jai", "window:1 2 800 600 320 240 0 0\n");
+} @TestProcedure

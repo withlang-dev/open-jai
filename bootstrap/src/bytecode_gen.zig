@@ -2441,10 +2441,18 @@ const GenContext = struct {
                         const handle_name = firstTypeWord(stripPointerText(text));
                         break :blk std.mem.eql(u8, handle_name, "Type_Info_Struct") or std.mem.eql(u8, handle_name, "Type_Info_Pointer") or std.mem.eql(u8, handle_name, "Type_Info_Struct_Member");
                     } else false;
+                    const init_is_plain_identifier_value = if (init_type_text) |text| blk: {
+                        const clean = std.mem.trim(u8, text, " \t\r\n");
+                        break :blk ast.tag(init) == .identifier and
+                            !isDynamicArrayTypeText(clean) and
+                            !isStaticArrayTypeText(clean) and
+                            !(try typeTextIsEmbeddedStruct(ctx, clean, diag));
+                    } else false;
                     const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
+                        (init_type_text != null and try typeTextIsAddressableScalar(ctx, init_type_text.?, diag)) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
                     var bind_reg = reg;
-                    if (!init_is_code_node and !init_is_compiler_message and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar)) {
+                    if (!init_is_code_node and !init_is_compiler_message and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar or init_is_plain_identifier_value)) {
                         bind_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
@@ -8979,6 +8987,23 @@ fn isAddressableScalarTypeWord(name: []const u8) bool {
         std.mem.eql(u8, name, "float32") or
         std.mem.eql(u8, name, "float64") or
         std.mem.eql(u8, name, "string");
+}
+
+fn typeTextIsAddressableScalar(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerror!bool {
+    const clean = std.mem.trim(u8, stripPointerText(raw_type), " \t\r\n");
+    const name = firstTypeWord(clean);
+    if (isAddressableScalarTypeWord(name)) return true;
+    if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+        .const_value => |decl| {
+            if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) return false;
+            if (ctx.ast.tag(decl) != .const_decl) return false;
+            const type_expr = ctx.ast.data(decl).lhs;
+            if (type_expr == @import("Ast.zig").null_node) return false;
+            return try typeTextIsAddressableScalar(ctx, ctx.nodeSource(type_expr), diag);
+        },
+        else => {},
+    };
+    return false;
 }
 
 fn externalNameForSourceName(name: []const u8) []const u8 {
