@@ -640,6 +640,8 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         for (&[_][]const u8{ "get_number_of_processors", "max" }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
+                    } else if (std.mem.eql(u8, module_name, "Debug")) {
+                        try putExternalSymbols(&r, &.{ "init", "attach_to_debugger", "breakpoint" });
                     } else if (std.mem.eql(u8, module_name, "Windows")) {
                         try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
                         try r.symbols.put(allocator, "GetStdHandle", .builtin_get_std_handle);
@@ -1078,6 +1080,8 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             if (std.mem.eql(u8, module_name, "Compiler")) {
                 try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
                 try putCompilerModuleSymbols(r);
+            } else if (std.mem.eql(u8, module_name, "Debug")) {
+                try putExternalSymbols(r, &.{ "init", "attach_to_debugger", "breakpoint" });
             } else if (std.mem.eql(u8, module_name, "String")) {
                 try r.symbols.put(r.allocator, "to_upper", .builtin_to_upper);
                 try r.symbols.put(r.allocator, "to_lower", .builtin_to_lower);
