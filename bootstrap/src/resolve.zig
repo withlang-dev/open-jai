@@ -481,6 +481,10 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "EndDrawing",       "ClearBackground", "DrawText",     "DrawRectangle",
                             "DrawRectangleRec", "DrawCircle",      "PI",
                         });
+                    } else if (std.mem.eql(u8, module_name, "Basic")) {
+                        r.imports_basic = true;
+                        try r.symbols.put(allocator, "memcpy", .builtin_memcpy);
+                        try r.symbols.put(allocator, "memset", .builtin_memset);
                     }
                     continue;
                 }
@@ -861,9 +865,13 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
             },
             .run_expr, .meta_stmt, .add_context_decl => {},
             .const_decl => {
-                if (file_scope and !global_main_scope_started) continue;
+                const is_import_const = ast.data(decl).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).lhs) == .import_decl;
+                if (file_scope and !global_main_scope_started and !is_import_const) continue;
                 const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
                 try r.putRealSymbol(name, .{ .const_value = ast.data(decl).lhs });
+                if (is_import_const) {
+                    try resolveNode(ast, &r, ast.data(decl).lhs, current_file, diag);
+                }
             },
             .var_decl => {
                 if (file_scope and !global_main_scope_started) continue;
@@ -1145,7 +1153,11 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         },
         .import_decl => {
             const module_name = ast.stringTokenContents(ast.data(node).lhs);
-            if (std.mem.eql(u8, module_name, "Compiler")) {
+            if (std.mem.eql(u8, module_name, "Basic")) {
+                r.imports_basic = true;
+                try r.symbols.put(r.allocator, "memcpy", .builtin_memcpy);
+                try r.symbols.put(r.allocator, "memset", .builtin_memset);
+            } else if (std.mem.eql(u8, module_name, "Compiler")) {
                 try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
                 try putCompilerModuleSymbols(r);
             } else if (std.mem.eql(u8, module_name, "Debug")) {
