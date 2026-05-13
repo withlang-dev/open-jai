@@ -563,6 +563,32 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend source-location load out of range", .{});
                 registers[inst.dest] = .{ .kind = .{ .source_location = .{ .file = inst.arg1, .line = inst.arg2 } } };
             },
+            .load_calendar => {
+                if (inst.dest >= registers.len or inst.arg1 >= env.program.calendar_literals.items.len) return diag.failAt(0, "LLVM backend calendar literal load out of range", .{});
+                const calendar = env.program.calendar_literals.items[inst.arg1];
+                const fields = [_]c.LLVMValueRef{
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.year), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.month_starting_at_0), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.day_of_month_starting_at_0), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.day_of_week_starting_at_0), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.hour), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.minute), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.second), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.millisecond), 1),
+                    c.LLVMConstInt(env.llvm_i64, @bitCast(calendar.time_zone), 1),
+                };
+                const calendar_ty = c.LLVMArrayType(env.llvm_i64, fields.len);
+                const calendar_init = c.LLVMConstArray(env.llvm_i64, @constCast(&fields), fields.len);
+                const name_tmp = try std.fmt.allocPrint(env.allocator, "calendar.{d}", .{inst.arg1});
+                defer env.allocator.free(name_tmp);
+                const name = try env.allocator.dupeZ(u8, name_tmp);
+                defer env.allocator.free(name);
+                const global = c.LLVMAddGlobal(env.module, calendar_ty, name.ptr);
+                c.LLVMSetInitializer(global, calendar_init);
+                c.LLVMSetGlobalConstant(global, 1);
+                c.LLVMSetLinkage(global, c.LLVMPrivateLinkage);
+                registers[inst.dest] = .{ .llvm_value = global, .kind = .calendar };
+            },
             .load_bytes => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend byte-array load destination register out of range", .{});
                 if (inst.arg1 >= env.program.byte_arrays.items.len) return diag.failAt(0, "LLVM backend byte-array index out of range", .{});

@@ -1473,6 +1473,7 @@ const GenContext = struct {
                 .fully_pathed_filename = value.fully_pathed_filename,
                 .line_number = value.line_number,
             } };
+            if (typed.comptime_calendars.get(expr)) |value| return .{ .calendar = comptimeCalendarToVm(value) };
         }
         return switch (ast.tag(expr)) {
             .run_expr => try ctx.executeRunValue(ast.data(expr).lhs, bindings, diag),
@@ -1533,6 +1534,7 @@ const GenContext = struct {
                         .fully_pathed_filename = value.fully_pathed_filename,
                         .line_number = value.line_number,
                     } };
+                    if (typed.comptime_calendars.get(decl)) |value| break :blk .{ .calendar = comptimeCalendarToVm(value) };
                 }
                 if (ast.tag(decl) == .const_decl or ast.tag(decl) == .var_decl) {
                     const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
@@ -3848,6 +3850,9 @@ const GenContext = struct {
                     if (typed.comptime_source_locations.get(expr)) |value| {
                         return try ctx.emitSourceLocationValue(expr, value, diag);
                     }
+                    if (typed.comptime_calendars.get(expr)) |value| {
+                        return try ctx.emitCalendarValue(expr, value);
+                    }
                 }
                 const value = try ctx.executeRunValue(expr, &[_]MacroCodeBinding{}, diag);
                 switch (value) {
@@ -3866,6 +3871,17 @@ const GenContext = struct {
                         .fully_pathed_filename = loc.fully_pathed_filename,
                         .line_number = loc.line_number,
                     }, diag),
+                    .calendar => |calendar| return try ctx.emitCalendarValue(expr, .{
+                        .year = calendar.year,
+                        .month_starting_at_0 = calendar.month_starting_at_0,
+                        .day_of_month_starting_at_0 = calendar.day_of_month_starting_at_0,
+                        .day_of_week_starting_at_0 = calendar.day_of_week_starting_at_0,
+                        .hour = calendar.hour,
+                        .minute = calendar.minute,
+                        .second = calendar.second,
+                        .millisecond = calendar.millisecond,
+                        .time_zone = calendar.time_zone,
+                    }),
                     .bytes => |bytes_value| {
                         const idx = try program.addByteArray(bytes_value);
                         const reg = proc.num_registers;
@@ -4023,6 +4039,11 @@ const GenContext = struct {
                     if (ctx.typed) |typed| {
                         if (typed.comptime_source_locations.get(decl)) |value| {
                             const reg = try ctx.emitSourceLocationValue(expr, value, diag);
+                            try ctx.decl_registers.put(program.allocator, decl, reg);
+                            return reg;
+                        }
+                        if (typed.comptime_calendars.get(decl)) |value| {
+                            const reg = try ctx.emitCalendarValue(expr, value);
                             try ctx.decl_registers.put(program.allocator, decl, reg);
                             return reg;
                         }
@@ -6499,6 +6520,29 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitCalendarValue(ctx: *GenContext, source_node: NodeIndex, value: @import("Sema.zig").CalendarValue) !Bytecode.Register {
+        const calendar_idx = try ctx.program.addCalendarLiteral(.{
+            .year = value.year,
+            .month_starting_at_0 = value.month_starting_at_0,
+            .day_of_month_starting_at_0 = value.day_of_month_starting_at_0,
+            .day_of_week_starting_at_0 = value.day_of_week_starting_at_0,
+            .hour = value.hour,
+            .minute = value.minute,
+            .second = value.second,
+            .millisecond = value.millisecond,
+            .time_zone = value.time_zone,
+        });
+        const reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .load_calendar,
+            .dest = reg,
+            .arg1 = calendar_idx,
+            .source_node = source_node,
+        });
+        return reg;
+    }
+
     fn locationTargetNode(ctx: *GenContext, node: NodeIndex) NodeIndex {
         const ast = ctx.ast;
         if (node == @import("Ast.zig").null_node) return node;
@@ -7483,6 +7527,20 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
     }
 }
 
+fn comptimeCalendarToVm(value: @import("Sema.zig").CalendarValue) vm_mod.CalendarValue {
+    return .{
+        .year = value.year,
+        .month_starting_at_0 = value.month_starting_at_0,
+        .day_of_month_starting_at_0 = value.day_of_month_starting_at_0,
+        .day_of_week_starting_at_0 = value.day_of_week_starting_at_0,
+        .hour = value.hour,
+        .minute = value.minute,
+        .second = value.second,
+        .millisecond = value.millisecond,
+        .time_zone = value.time_zone,
+    };
+}
+
 fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
     const ast = ctx.ast;
     if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
@@ -7500,6 +7558,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     if (ctx.typed) |typed| {
         if (typed.comptime_strings.contains(expr) or typed.comptime_bytes.contains(expr)) return "string";
         if (typed.comptime_source_locations.contains(expr)) return "Source_Code_Location";
+        if (typed.comptime_calendars.contains(expr)) return "Calendar";
     }
     switch (ast.tag(expr)) {
         .string_literal => return "string",
@@ -7543,6 +7602,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
                 if (typed.comptime_source_locations.contains(decl)) return "Source_Code_Location";
+                if (typed.comptime_calendars.contains(decl)) return "Calendar";
             }
             if (ast.tag(decl) == .var_decl or ast.tag(decl) == .const_decl) {
                 const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else @import("Ast.zig").null_node;

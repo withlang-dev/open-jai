@@ -9,6 +9,7 @@ pub const Opcode = enum(u8) {
     load_string,
     load_code,
     load_source_location,
+    load_calendar,
     load_bytes,
     load_bool,
     load_null_ptr,
@@ -252,6 +253,18 @@ pub const CodeLiteral = struct {
     line_number: i64,
 };
 
+pub const CalendarLiteral = struct {
+    year: i64,
+    month_starting_at_0: i64,
+    day_of_month_starting_at_0: i64,
+    day_of_week_starting_at_0: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    millisecond: i64,
+    time_zone: i64,
+};
+
 pub const ProcBytecode = struct {
     name: []const u8,
     instructions: std.ArrayList(Instruction) = .empty,
@@ -284,6 +297,7 @@ pub const Program = struct {
     allocator: std.mem.Allocator,
     strings: std.ArrayList([]const u8) = .empty,
     code_literals: std.ArrayList(CodeLiteral) = .empty,
+    calendar_literals: std.ArrayList(CalendarLiteral) = .empty,
     byte_arrays: std.ArrayList([]const u8) = .empty,
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
@@ -320,6 +334,7 @@ pub const Program = struct {
         p.call_args.deinit(p.allocator);
         p.strings.deinit(p.allocator);
         p.code_literals.deinit(p.allocator);
+        p.calendar_literals.deinit(p.allocator);
         p.byte_arrays.deinit(p.allocator);
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
@@ -369,6 +384,12 @@ pub const Program = struct {
             .path = owned_path,
             .line_number = line_number,
         });
+        return idx;
+    }
+
+    pub fn addCalendarLiteral(p: *Program, calendar: CalendarLiteral) !u32 {
+        const idx: u32 = @intCast(p.calendar_literals.items.len);
+        try p.calendar_literals.append(p.allocator, calendar);
         return idx;
     }
 

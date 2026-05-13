@@ -28,6 +28,7 @@ pub const Typed = struct {
     owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
     comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
     owned_source_location_paths: std.ArrayList([]const u8) = .empty,
+    comptime_calendars: std.AutoHashMapUnmanaged(NodeIndex, CalendarValue) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -45,6 +46,7 @@ pub const Typed = struct {
         t.comptime_source_locations.deinit(t.allocator);
         for (t.owned_source_location_paths.items) |value| t.allocator.free(value);
         t.owned_source_location_paths.deinit(t.allocator);
+        t.comptime_calendars.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
@@ -75,11 +77,27 @@ pub const Typed = struct {
             .line_number = value.line_number,
         });
     }
+
+    pub fn putComptimeCalendar(t: *Typed, node: NodeIndex, value: CalendarValue) !void {
+        try t.comptime_calendars.put(t.allocator, node, value);
+    }
 };
 
 pub const SourceLocationValue = struct {
     fully_pathed_filename: []const u8,
     line_number: i64,
+};
+
+pub const CalendarValue = struct {
+    year: i64,
+    month_starting_at_0: i64,
+    day_of_month_starting_at_0: i64,
+    day_of_week_starting_at_0: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    millisecond: i64,
+    time_zone: i64,
 };
 
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, ip: *InternPool, diag: Diagnostic) !Typed {

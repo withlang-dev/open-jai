@@ -23,6 +23,7 @@ pub const Value = union(enum) {
     bytes: []const u8,
     code: CodeValue,
     source_location: SourceLocation,
+    calendar: CalendarValue,
     type_text: []const u8,
 };
 
@@ -82,7 +83,7 @@ pub const SourceLocation = struct {
     line_number: i64,
 };
 
-const CalendarValue = struct {
+pub const CalendarValue = struct {
     year: i64,
     month_starting_at_0: i64,
     day_of_month_starting_at_0: i64,
@@ -364,6 +365,21 @@ pub const VM = struct {
                     regs[inst.dest] = .{ .source_location = .{
                         .fully_pathed_filename = vm.program.strings.items[inst.arg1],
                         .line_number = @intCast(inst.arg2),
+                    } };
+                },
+                .load_calendar => {
+                    if (inst.dest >= regs.len or inst.arg1 >= vm.program.calendar_literals.items.len) return diag.failAt(0, "VM load_calendar register/calendar index out of range", .{});
+                    const calendar = vm.program.calendar_literals.items[inst.arg1];
+                    regs[inst.dest] = .{ .calendar = .{
+                        .year = calendar.year,
+                        .month_starting_at_0 = calendar.month_starting_at_0,
+                        .day_of_month_starting_at_0 = calendar.day_of_month_starting_at_0,
+                        .day_of_week_starting_at_0 = calendar.day_of_week_starting_at_0,
+                        .hour = calendar.hour,
+                        .minute = calendar.minute,
+                        .second = calendar.second,
+                        .millisecond = calendar.millisecond,
+                        .time_zone = calendar.time_zone,
                     } };
                 },
                 .load_bytes => {
@@ -4865,7 +4881,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => |v| .{ .source_location = v },
-        .calendar => diag.failAt(0, "VM cannot pass Calendar across non-inlined procedure calls yet", .{}),
+        .calendar => |v| .{ .calendar = v },
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
@@ -4889,7 +4905,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
         .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
         .source_location => |v| .{ .source_location = v },
-        .calendar => diag.failAt(0, "expression-form #run cannot materialize Calendar values", .{}),
+        .calendar => |v| .{ .calendar = v },
         .build_options, .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options values", .{}),
     };
 }
@@ -4903,6 +4919,7 @@ fn registerValueFromValue(value: Value, diag: Diagnostic) !RegisterValue {
         .bytes => |v| .{ .bytes = v },
         .code => |v| .{ .code = v },
         .source_location => |v| .{ .source_location = v },
+        .calendar => |v| .{ .calendar = v },
         .type_text => |v| .{ .type_text = v },
         .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),
     };
