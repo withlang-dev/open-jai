@@ -605,13 +605,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (
-                    std.mem.eql(u8, module_name, "Sound_Player") or
-                    std.mem.eql(u8, module_name, "Bindings_Generator") or
-                    std.mem.eql(u8, module_name, "Wav_File"))
-                {
-                    // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
+                } else if (std.mem.eql(u8, module_name, "Bindings_Generator")) {
                         for (&[_][]const u8{
                             "Generate_Bindings_Options",
                             "GENERATOR_DEFAULT_SYSTEM_INCLUDE_PATH",
@@ -628,21 +622,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                         }
-                    } else if (std.mem.eql(u8, module_name, "Sound_Player")) {
-                        try putExternalSymbols(&r, &.{
-                            "init_sound_player",
-                            "play_sound",
-                            "Sound_Player",
-                            "Mixer_Sound_Data",
-                            "Sound_Stream",
-                            "init",
-                            "make_stream",
-                            "pre_entity_update",
-                            "post_entity_update",
-                        });
-                    } else if (std.mem.eql(u8, module_name, "Wav_File")) {
-                        try putExternalSymbols(&r, &.{ "load_wav_file", "get_wav_header", "Wav_File", "WAVE_FORMAT_PCM", "WAVE_FORMAT_DVI_ADPCM" });
-                    }
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
             .load_decl => {

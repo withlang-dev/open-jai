@@ -2289,6 +2289,10 @@ const GenContext = struct {
         ctx.pending_inline_result_regs = previous_pending;
         ctx.pending_inline_results_consumed = previous_consumed;
 
+        var result_type_texts = std.ArrayList([]const u8).empty;
+        defer result_type_texts.deinit(ctx.program.allocator);
+        try ctx.inferMultiReturnTypeTexts(shared_rhs, children.len, &result_type_texts, diag);
+
         for (children, 0..) |child_idx, i| {
             const child: NodeIndex = @intCast(child_idx);
             const value_reg = result_regs.items[i];
@@ -2301,9 +2305,76 @@ const GenContext = struct {
                     .source_node = child,
                 });
             }
+            if (i < result_type_texts.items.len) try ctx.bindStmtTargetType(child, result_type_texts.items[i], diag);
             try ctx.bindStmtTarget(child, value_reg, diag);
         }
         return true;
+    }
+
+    fn inferMultiReturnTypeTexts(ctx: *GenContext, call_expr: NodeIndex, expected_count: usize, out: *std.ArrayList([]const u8), diag: Diagnostic) !void {
+        const ast = ctx.ast;
+        if (call_expr == @import("Ast.zig").null_node or call_expr >= ast.node_tags.items.len or ast.tag(call_expr) != .call_expr) return;
+        const callee = ast.data(call_expr).lhs;
+        const args = if (ast.data(call_expr).rhs < ast.extra_data.items.len) ast.extraSlice(ast.data(call_expr).rhs) else &[_]u32{};
+        const target = if (ast.tag(callee) == .proc_decl)
+            callee
+        else if (ast.tag(callee) == .identifier)
+            ctx.resolveProcCallTarget(callee, ast.tokenSlice(ast.mainToken(callee)), args.len) orelse return
+        else
+            return;
+        const return_stmt = firstReturnStmt(ast, ast.data(target).lhs) orelse return;
+        const value = ast.data(return_stmt).lhs;
+        if (value == @import("Ast.zig").null_node or value >= ast.node_tags.items.len or ast.tag(value) != .stmt_list) return;
+        const returns = ast.extraSlice(ast.data(value).lhs);
+        if (returns.len != expected_count) return;
+        for (returns) |return_idx| {
+            const return_node: NodeIndex = @intCast(return_idx);
+            const type_text = typeTextForExpr(ctx, return_node, diag) orelse return;
+            try out.append(ctx.program.allocator, type_text);
+        }
+    }
+
+    fn firstReturnStmt(ast: *const Ast, node: NodeIndex) ?NodeIndex {
+        if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return null;
+        switch (ast.tag(node)) {
+            .return_stmt => return node,
+            .block, .stmt_list => {
+                for (ast.extraSlice(ast.data(node).lhs)) |child| {
+                    if (firstReturnStmt(ast, @intCast(child))) |ret| return ret;
+                }
+                return null;
+            },
+            .if_stmt => {
+                const data = ast.data(node);
+                if (firstReturnStmt(ast, data.lhs)) |ret| return ret;
+                if (data.rhs < ast.extra_data.items.len) {
+                    for (ast.extraSlice(data.rhs)) |child| {
+                        if (firstReturnStmt(ast, @intCast(child))) |ret| return ret;
+                    }
+                }
+                return null;
+            },
+            .while_stmt, .for_stmt, .defer_stmt, .expr_stmt => {
+                const data = ast.data(node);
+                return firstReturnStmt(ast, data.lhs) orelse firstReturnStmt(ast, data.rhs);
+            },
+            else => return null,
+        }
+    }
+
+    fn bindStmtTargetType(ctx: *GenContext, stmt: NodeIndex, type_text: []const u8, diag: Diagnostic) !void {
+        _ = diag;
+        const ast = ctx.ast;
+        switch (ast.tag(stmt)) {
+            .var_decl, .const_decl => try ctx.type_overrides.put(ctx.program.allocator, stmt, type_text),
+            .assign_stmt => {
+                const lhs = ast.data(stmt).lhs;
+                if (ctx.resolved.local_values.get(lhs)) |decl| {
+                    try ctx.type_overrides.put(ctx.program.allocator, decl, type_text);
+                }
+            },
+            else => {},
+        }
     }
 
     fn bindStmtTarget(ctx: *GenContext, stmt: NodeIndex, reg: Bytecode.Register, diag: Diagnostic) !void {
@@ -2312,11 +2383,32 @@ const GenContext = struct {
             .var_decl, .const_decl => try ctx.decl_registers.put(ctx.program.allocator, stmt, reg),
             .assign_stmt => {
                 const lhs = ast.data(stmt).lhs;
-                const decl = ctx.resolved.local_values.get(lhs) orelse return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "assignment target must resolve to a local variable", .{});
-                if (ctx.decl_registers.get(decl)) |old_reg| {
-                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = reg, .source_node = stmt });
-                } else {
-                    try ctx.decl_registers.put(ctx.program.allocator, decl, reg);
+                if (ctx.resolved.local_values.get(lhs)) |decl| {
+                    if (ctx.decl_registers.get(decl)) |old_reg| {
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = reg, .source_node = stmt });
+                    } else {
+                        try ctx.decl_registers.put(ctx.program.allocator, decl, reg);
+                    }
+                    return;
+                }
+                switch (ast.tag(lhs)) {
+                    .field_access, .index_expr => {
+                        const type_text = typeTextForExpr(ctx, lhs, diag) orelse "int";
+                        const addr = try genAddressOfLvalue(ctx, lhs, diag);
+                        if (try typeTextIsEmbeddedStruct(ctx, type_text, diag)) {
+                            const size_reg = try ctx.emitInt(stmt, @intCast(try typeTextSize(ctx, type_text, diag)));
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = reg, .arg2 = size_reg, .source_node = stmt });
+                        } else {
+                            try emitStoreToAddressForType(ctx, addr, reg, type_text, stmt, diag);
+                        }
+                    },
+                    .unary_expr => {
+                        const tok = ast.tokens[ast.mainToken(lhs)].tag;
+                        if (tok != .shift_left and tok != .dot_star) return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "assignment target must be assignable", .{});
+                        const ptr = try ctx.genExpr(ast.data(lhs).lhs, diag);
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = ptr, .arg1 = reg, .source_node = stmt });
+                    },
+                    else => return diag.failAt(ast.tokens[ast.mainToken(lhs)].start, "assignment target must resolve to a local variable", .{}),
                 }
             },
             else => return diag.failAt(ast.tokens[ast.mainToken(stmt)].start, "internal error: unsupported multi-return target", .{}),
@@ -4925,7 +5017,19 @@ const GenContext = struct {
                     const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_ty, diag);
                     var last_reg: ?Bytecode.Register = null;
                     if (args.len == 1) {
-                        last_reg = try ctx.genDefaultValue(@import("Ast.zig").null_node, expr, diag);
+                        const item_reg = try ctx.genDefaultValueFromText(elem_ty, expr, diag);
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{
+                            .opcode = .array_add,
+                            .dest = reg,
+                            .arg1 = array_slot,
+                            .arg2 = item_reg,
+                            .arg3 = @intCast(elem_size),
+                            .arg4 = if (elem_is_struct) 1 else 0,
+                            .source_node = expr,
+                        });
+                        last_reg = reg;
                     } else {
                         for (args[1..]) |item_idx| {
                             const item_node: NodeIndex = @intCast(item_idx);

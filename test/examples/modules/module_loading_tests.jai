@@ -97,3 +97,7 @@ simp_module_import_loads_real_source_and_tracks_render_state :: () {
 gl_module_import_loads_real_source_and_tracks_state :: () {
     expect_compile_output("test/examples/modules/gl_module_import_value.jai", "gl:true 1 OpenJai OpenJai GL 1.0 1 2 3 640 true\n");
 } @TestProcedure
+
+sound_modules_import_real_source_and_track_streams :: () {
+    expect_compile_output("test/examples/modules/sound_module_import_value.jai", "sound:1 true true true true 1 4 2\n");
+} @TestProcedure
