@@ -527,19 +527,70 @@ const GenContext = struct {
 
     fn emitForeignProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
-        for (args) |arg_idx| {
-            const arg: NodeIndex = @intCast(arg_idx);
-            if (ast.tag(arg) == .assign_stmt)
-                _ = try ctx.genExpr(ast.data(arg).rhs, diag)
+        if (ctx.compile_time_host) {
+            return diag.failAt(ast.tokens[ast.mainToken(call_expr)].start, "compile-time execution cannot call foreign procedure '{s}'", .{ast.tokenSlice(ast.mainToken(proc_node))});
+        }
+        const sig = procSignature(ast, proc_node) orelse return diag.failAt(ast.tokens[ast.mainToken(proc_node)].start, "foreign procedure '{s}' has no procedure signature", .{ast.tokenSlice(ast.mainToken(proc_node))});
+        const params = ast.extraSlice(sig.params_extra);
+        if (args.len > params.len) return diag.failAt(ast.tokens[ast.mainToken(call_expr)].start, "foreign procedure '{s}' got {d} argument(s), expected {d}", .{ ast.tokenSlice(ast.mainToken(proc_node)), args.len, params.len });
+
+        var arg_regs = std.ArrayList(Bytecode.Register).empty;
+        defer arg_regs.deinit(ctx.program.allocator);
+        var param_types = std.ArrayList(u32).empty;
+        defer param_types.deinit(ctx.program.allocator);
+        for (params, 0..) |param_idx, param_i| {
+            const param: NodeIndex = @intCast(param_idx);
+            const param_type = ast.data(param).lhs;
+            const param_type_id: u32 = if (param_type != @import("Ast.zig").null_node)
+                try typeIdFromTypeExpr(ast, param_type, diag)
             else
-                _ = try genCallArg(ctx, arg, diag);
-        }
-        if (procSignature(ast, proc_node)) |sig| {
-            if (sig.return_type != @import("Ast.zig").null_node) {
-                return try ctx.genDefaultValue(sig.return_type, call_expr, diag);
+                16;
+            if (!typeIdCanUseDirectCall(param_type_id) and !typeNodeCanUseDirectCall(ast, param_type)) {
+                return diag.failAt(ast.tokens[ast.mainToken(param)].start, "foreign procedure '{s}' parameter '{s}' has unsupported ABI type '{s}'", .{
+                    ast.tokenSlice(ast.mainToken(proc_node)),
+                    ast.tokenSlice(ast.mainToken(param)),
+                    if (param_type != @import("Ast.zig").null_node) ctx.nodeSource(param_type) else "<inferred>",
+                });
             }
+            try param_types.append(ctx.program.allocator, param_type_id);
+            const source = if (param_i < args.len) blk: {
+                const arg: NodeIndex = @intCast(args[param_i]);
+                break :blk if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
+            } else blk: {
+                const default_value = ast.data(param).rhs;
+                if (default_value == @import("Ast.zig").null_node) {
+                    return diag.failAt(ast.tokens[ast.mainToken(call_expr)].start, "foreign procedure '{s}' is missing argument for parameter '{s}'", .{ ast.tokenSlice(ast.mainToken(proc_node)), ast.tokenSlice(ast.mainToken(param)) });
+                }
+                break :blk default_value;
+            };
+            try arg_regs.append(ctx.program.allocator, try genCallArg(ctx, source, diag));
         }
-        return try ctx.emitInt(call_expr, 0);
+        const return_type = if (sig.return_type != @import("Ast.zig").null_node)
+            try typeIdFromTypeExpr(ast, sig.return_type, diag)
+        else
+            0;
+        if (!typeIdCanUseDirectCall(return_type) and !typeNodeCanUseDirectCall(ast, sig.return_type)) {
+            return diag.failAt(ast.tokens[ast.mainToken(proc_node)].start, "foreign procedure '{s}' has unsupported ABI return type '{s}'", .{
+                ast.tokenSlice(ast.mainToken(proc_node)),
+                if (sig.return_type != @import("Ast.zig").null_node) ctx.nodeSource(sig.return_type) else "void",
+            });
+        }
+        const foreign_index = try ctx.program.addForeignFunction(ast.tokenSlice(ast.mainToken(proc_node)), param_types.items, return_type);
+        const dest: Bytecode.Register = if (return_type == 0) 0 else blk: {
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            break :blk reg;
+        };
+        const arg_start = try ctx.program.addCallArgs(arg_regs.items);
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .call_foreign,
+            .dest = dest,
+            .arg1 = foreign_index,
+            .arg2 = @intCast(arg_regs.items.len),
+            .arg3 = arg_start,
+            .source_node = call_expr,
+        });
+        return if (sig.return_type != @import("Ast.zig").null_node) dest else 0;
     }
 
     fn isStringBuilderPointerType(ast: *const Ast, type_node: NodeIndex) bool {

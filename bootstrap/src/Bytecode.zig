@@ -37,6 +37,7 @@ pub const Opcode = enum(u8) {
     format_int_value,
     format_float_value,
     call,
+    call_foreign,
     call_proc0,
     call_extern,
     ret,
@@ -267,6 +268,12 @@ pub const ProcBytecode = struct {
     }
 };
 
+pub const ForeignFunction = struct {
+    name: []const u8,
+    param_types: []const u32,
+    return_type: u32 = 0,
+};
+
 pub const Global = struct {
     source_node: u32,
     size: u32,
@@ -281,6 +288,7 @@ pub const Program = struct {
     globals: std.ArrayList(Global) = .empty,
     procs: std.ArrayList(ProcBytecode) = .empty,
     proc_nodes: std.ArrayList(u32) = .empty,
+    foreign_functions: std.ArrayList(ForeignFunction) = .empty,
     type_infos: std.ArrayList(TypeInfo) = .empty,
     call_args: std.ArrayList(Register) = .empty,
     main_proc: ?u32 = null,
@@ -297,6 +305,10 @@ pub const Program = struct {
         }
         for (p.byte_arrays.items) |b| p.allocator.free(b);
         for (p.procs.items) |*proc| proc.deinit(p.allocator);
+        for (p.foreign_functions.items) |foreign| {
+            p.allocator.free(foreign.name);
+            p.allocator.free(foreign.param_types);
+        }
         for (p.type_infos.items) |info| {
             p.allocator.free(info.name);
             for (info.members) |member| {
@@ -312,6 +324,7 @@ pub const Program = struct {
         p.globals.deinit(p.allocator);
         p.procs.deinit(p.allocator);
         p.proc_nodes.deinit(p.allocator);
+        p.foreign_functions.deinit(p.allocator);
         p.type_infos.deinit(p.allocator);
     }
 
@@ -320,6 +333,20 @@ pub const Program = struct {
         try p.procs.append(p.allocator, proc);
         errdefer _ = p.procs.pop();
         try p.proc_nodes.append(p.allocator, source_node);
+        return idx;
+    }
+
+    pub fn addForeignFunction(p: *Program, name: []const u8, param_types: []const u32, return_type: u32) !u32 {
+        const owned_name = try p.allocator.dupe(u8, name);
+        errdefer p.allocator.free(owned_name);
+        const owned_params = try p.allocator.dupe(u32, param_types);
+        errdefer p.allocator.free(owned_params);
+        const idx: u32 = @intCast(p.foreign_functions.items.len);
+        try p.foreign_functions.append(p.allocator, .{
+            .name = owned_name,
+            .param_types = owned_params,
+            .return_type = return_type,
+        });
         return idx;
     }
 

@@ -769,6 +769,11 @@ pub const VM = struct {
                         regs[inst.dest] = result;
                     }
                 },
+                .call_foreign => {
+                    if (inst.arg1 >= vm.program.foreign_functions.items.len) return diag.failAt(0, "VM foreign call target out of range", .{});
+                    const foreign = vm.program.foreign_functions.items[inst.arg1];
+                    return diag.failAt(0, "compile-time execution cannot call foreign procedure '{s}'", .{foreign.name});
+                },
                 .format_print => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM format_print register out of range", .{});
                     try vm.printValue(regs[inst.arg1], diag, "format_print");

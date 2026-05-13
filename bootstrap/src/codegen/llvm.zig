@@ -1850,6 +1850,34 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     try setTypedResult(env, registers, inst.dest, result, target_proc.return_type);
                 }
             },
+            .call_foreign => {
+                if (inst.arg1 >= env.program.foreign_functions.items.len) return diag.failAt(0, "LLVM backend foreign call target out of range", .{});
+                const foreign = env.program.foreign_functions.items[inst.arg1];
+                if (inst.arg2 != foreign.param_types.len) return diag.failAt(0, "LLVM backend foreign call argument count mismatch for '{s}'", .{foreign.name});
+                if (inst.arg3 + inst.arg2 > env.program.call_args.items.len) return diag.failAt(0, "LLVM backend foreign call argument table out of range", .{});
+                var param_types = try env.allocator.alloc(c.LLVMTypeRef, foreign.param_types.len);
+                defer env.allocator.free(param_types);
+                for (foreign.param_types, 0..) |type_id, param_index| {
+                    param_types[param_index] = llvmTypeForTypeId(env.context, env.llvm_i64, env.llvm_f64, env.ptr_ty, type_id);
+                }
+                const return_ty = llvmTypeForTypeId(env.context, env.llvm_i64, env.llvm_f64, env.ptr_ty, foreign.return_type);
+                const foreign_ty = c.LLVMFunctionType(return_ty, if (param_types.len == 0) null else param_types.ptr, @intCast(param_types.len), 0);
+                const name_z = try env.allocator.dupeZ(u8, foreign.name);
+                defer env.allocator.free(name_z);
+                const foreign_fn = c.LLVMGetNamedFunction(env.module, name_z.ptr) orelse c.LLVMAddFunction(env.module, name_z.ptr, foreign_ty);
+                const args = try env.allocator.alloc(c.LLVMValueRef, inst.arg2);
+                defer env.allocator.free(args);
+                for (args, 0..) |*arg, arg_index| {
+                    const reg_index = env.program.call_args.items[inst.arg3 + arg_index];
+                    if (reg_index >= registers.len) return diag.failAt(0, "LLVM backend foreign call argument register out of range", .{});
+                    arg.* = try callArgValueForType(env, registers[reg_index], foreign.param_types[arg_index], diag);
+                }
+                const result = c.LLVMBuildCall2(env.builder, foreign_ty, foreign_fn, if (args.len == 0) null else args.ptr, @intCast(args.len), if (foreign.return_type == 0) "" else "foreign_call");
+                if (foreign.return_type != 0) {
+                    if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend foreign call destination out of range", .{});
+                    try setTypedResult(env, registers, inst.dest, result, foreign.return_type);
+                }
+            },
             .tuple_extract => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend tuple_extract register out of range", .{});
                 const tuple_types = switch (registers[inst.arg1].kind) {
