@@ -4234,6 +4234,32 @@ const GenContext = struct {
                     if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "reset_temporary_storage expects no arguments", .{});
                     return try ctx.emitInt(expr, 0);
                 }
+                if (std.mem.eql(u8, name, "talloc_string")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "talloc_string expects one byte count", .{});
+                    const size_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const data_reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .alloc_heap_reg, .dest = data_reg, .arg1 = size_reg, .source_node = expr });
+                    const string_reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .string_from_parts, .dest = string_reg, .arg1 = data_reg, .arg2 = size_reg, .source_node = expr });
+                    return string_reg;
+                }
+                if (std.mem.eql(u8, name, "make_leak_report")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "make_leak_report expects no arguments", .{});
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .new_array, .dest = reg, .arg1 = 0, .arg2 = 8, .arg3 = 8, .source_node = expr });
+                    return reg;
+                }
+                if (std.mem.eql(u8, name, "log_leak_report")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "log_leak_report expects one report", .{});
+                    _ = try ctx.genExpr(@intCast(args[0]), diag);
+                    return try ctx.emitInt(expr, 0);
+                }
                 if (std.mem.eql(u8, name, "equal")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "equal expects two arguments", .{});
