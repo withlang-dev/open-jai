@@ -2250,7 +2250,8 @@ const GenContext = struct {
                             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = rhs, .arg2 = size_reg, .source_node = stmt });
                         } else {
                             const opcode: Bytecode.Opcode = if (std.mem.eql(u8, firstTypeWord(clean_field_type), "float") or std.mem.eql(u8, firstTypeWord(clean_field_type), "float32") or std.mem.eql(u8, firstTypeWord(clean_field_type), "float64")) .store_ptr_float else .store_ptr;
-                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = rhs, .source_node = stmt });
+                            const field_size = if (opcode == .store_ptr_float) try typeTextSize(ctx, clean_field_type, diag) else 0;
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = rhs, .arg2 = @intCast(field_size), .source_node = stmt });
                         }
                     } else {
                         const base = try ctx.genExpr(ast.data(lhs).lhs, diag);
@@ -2273,7 +2274,8 @@ const GenContext = struct {
                         .store_ptr_float
                     else
                         .store_ptr;
-                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = store_opcode, .dest = addr, .arg1 = rhs, .source_node = stmt });
+                    const elem_size = if (store_opcode == .store_ptr_float and elem_text != null) try typeTextSize(ctx, elem_text.?, diag) else 0;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = store_opcode, .dest = addr, .arg1 = rhs, .arg2 = @intCast(elem_size), .source_node = stmt });
                     return;
                 }
                 if (ast.tag(lhs) == .unary_expr and (ast.tokens[ast.mainToken(lhs)].tag == .shift_left or ast.tokens[ast.mainToken(lhs)].tag == .dot_star)) {
@@ -2711,7 +2713,8 @@ const GenContext = struct {
             .store_ptr_byte
         else
             .store_ptr;
-        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = rhs, .source_node = source_node });
+        const size = if (opcode == .store_ptr_float) try typeTextSize(ctx, type_text, diag) else 0;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = rhs, .arg2 = @intCast(size), .source_node = source_node });
     }
 
     fn visibleRegisterForName(ctx: *GenContext, name: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
@@ -2810,7 +2813,7 @@ const GenContext = struct {
                     .store_ptr_float
                 else
                     .store_ptr;
-                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = value_reg, .source_node = source_node });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = value_reg, .arg2 = if (opcode == .store_ptr_float) @intCast(elem_size) else 0, .source_node = source_node });
             }
         }
     }
@@ -2918,7 +2921,7 @@ const GenContext = struct {
             break :blk reg;
         } else try ctx.emitInt(source_node, rhs);
         const opcode: Bytecode.Opcode = if (std.mem.eql(u8, firstTypeWord(elem_text), "float") or std.mem.eql(u8, firstTypeWord(elem_text), "float32") or std.mem.eql(u8, firstTypeWord(elem_text), "float64")) .store_ptr_float else .store_ptr;
-        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = value, .source_node = source_node });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = opcode, .dest = addr, .arg1 = value, .arg2 = if (opcode == .store_ptr_float) @intCast(elem_size) else 0, .source_node = source_node });
     }
 
     fn emitTypeText(ctx: *GenContext, source_node: NodeIndex, raw_type: []const u8, diag: Diagnostic) !Bytecode.Register {
@@ -8994,7 +8997,8 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
                     .format_static_string_array
                 else
                     return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "formatted static array output does not support element type '{s}'", .{elem_type});
-                try proc.instructions.append(program.allocator, .{ .opcode = opcode, .arg1 = arg_reg, .arg2 = @intCast(count), .source_node = arg_node });
+                const elem_size = try typeTextSize(ctx, elem_type, diag);
+                try proc.instructions.append(program.allocator, .{ .opcode = opcode, .arg1 = arg_reg, .arg2 = @intCast(count), .arg3 = @intCast(elem_size), .source_node = arg_node });
             } else {
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
                 try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = arg_reg, .source_node = arg_node });

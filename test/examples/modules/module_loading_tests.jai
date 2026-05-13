@@ -73,3 +73,7 @@ windows_resources_module_import_loads_real_source_from_local_alias :: () {
 mail_module_import_loads_real_source_from_local_alias :: () {
     expect_compile_output("test/examples/modules/mail_module_import_value.jai", "mail:true false\n");
 } @TestProcedure
+
+sort_module_import_loads_real_source_and_runtime_sorting_works :: () {
+    expect_compile_output("test/examples/modules/sort_module_import_value.jai", "sort:[-272, -5, 3.14, 5, 8, 17, 42, 108] [\"brown\", \"dog\", \"fox\", \"jumped\", \"lazy\", \"over\", \"quick\", \"the\", \"the\"]\n");
+} @TestProcedure

@@ -607,7 +607,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Simp") or
                     std.mem.eql(u8, module_name, "GL") or
                     std.mem.eql(u8, module_name, "SDL") or
-                    std.mem.eql(u8, module_name, "Sort") or
                     std.mem.eql(u8, module_name, "Hash_Table") or
                     std.mem.eql(u8, module_name, "Pool") or
                     std.mem.eql(u8, module_name, "Flat_Pool") or
@@ -660,10 +659,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "default_theme_procs",
                             "getrect_theme",
                         });
-                    } else if (std.mem.eql(u8, module_name, "Sort")) {
-                        for (&[_][]const u8{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" }) |sort_symbol| {
-                            try r.putRealSymbol(sort_symbol, .{ .const_value = @import("Ast.zig").null_node });
-                        }
                     } else if (std.mem.eql(u8, module_name, "Hash_Table")) {
                         for (&[_][]const u8{ "Table", "table_add", "table_find", "table_remove" }) |name| {
                             try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
