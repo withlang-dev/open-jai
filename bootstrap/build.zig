@@ -4,10 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sdk_path = std.mem.trim(u8, b.run(&.{ "xcrun", "--show-sdk-path" }), " \t\r\n");
     const llvm_link_flags = b.run(&.{
-        "/usr/local/llvm/bin/llvm-config",
-        "--link-static",
+        "llvm-config",
+        // "--link-static",
         "--ldflags",
         "--libs",
         "--system-libs",
@@ -21,8 +20,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .stack_check = false,
     });
-    configureLlvmImports(exe_mod);
+    configureLlvmImports(b, exe_mod);
 
     const exe_obj = b.addObject(.{
         .name = "openjai_main",
@@ -34,27 +34,37 @@ pub fn build(b: *std.Build) void {
     // Mach-O link path cannot consume them directly, while LLVM's own clang++/ld64.lld
     // can. Compile Zig to an object, then perform only the final LLVM-static link with
     // the matching toolchain from /usr/local/llvm.
+
+    var sdk_path: ?[]const u8 = null;
+    if (target.result.os.tag == .macos)
+        sdk_path = std.mem.trim(u8, b.run(&.{ "xcrun", "--show-sdk-path" }), " \t\r\n");
     const link_exe = b.addSystemCommand(&.{
-        "/usr/local/llvm/bin/clang++",
+        b.graph.zig_exe, // zig comes with a c++ compiler
+        "c++",
         "-isysroot",
-        sdk_path,
+        sdk_path orelse "",
         "-fuse-ld=lld",
     });
     link_exe.addFileArg(exe_obj.getEmittedBin());
     addTokenizedArgs(link_exe, llvm_link_flags);
     link_exe.addArg("-o");
     const linked_exe = link_exe.addOutputFileArg("openjai");
-    link_exe.addArgs(&.{
-        "-lc++",
-        "-lc++abi",
-        "-Wl,-rpath,/usr/local/llvm/lib",
-    });
+    const llvm_libdir = std.mem.trim(
+        u8,
+        b.run(&.{ "llvm-config", "--libdir" }),
+        " \t\r\n",
+    );
+    link_exe.addArg(b.fmt("-Wl,-rpath,{s}", .{llvm_libdir}));
     const install_exe = b.addInstallBinFile(linked_exe, "openjai");
     b.getInstallStep().dependOn(&install_exe.step);
 
     const runtime_mod = createRuntimeModule(b, target, optimize, "rt/runtime.zig");
     const runtime_core_mod = createRuntimeModule(b, target, optimize, "rt/core.zig");
-    const runtime_platform_mod = createRuntimeModule(b, target, optimize, "rt/platform_darwin.zig");
+    const runtime_platform_mod = createRuntimeModule(b, target, optimize, switch (target.result.os.tag) {
+        .macos => "rt/platform_darwin.zig",
+        .linux => "rt/platform_linux.zig",
+        else => unreachable,
+    });
     const runtime_start_mod = createRuntimeModule(b, target, optimize, "rt/start_exe.zig");
 
     // Direct-object compatibility for --runtime path/to/openjai_runtime.o.
@@ -113,8 +123,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/test_main.zig"),
         .target = target,
         .optimize = optimize,
+        .stack_check = false,
     });
-    configureLlvmImports(test_mod);
+    configureLlvmImports(b, test_mod);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod, .use_llvm = true, .use_lld = false });
     const run_unit_tests = b.addRunArtifact(unit_tests);
@@ -127,6 +138,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tools/test_runner.zig"),
         .target = target,
         .optimize = optimize,
+        .stack_check = false,
     });
     const test_runner_exe = b.addExecutable(.{
         .name = "test_runner",
@@ -150,6 +162,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/openjai_test_runner.zig"),
         .target = target,
         .optimize = optimize,
+        .stack_check = false,
     });
     const openjai_test_runner_exe = b.addExecutable(.{
         .name = "openjai_test_runner",
@@ -166,8 +179,13 @@ pub fn build(b: *std.Build) void {
     test_jai_step.dependOn(&run_openjai_tests.step);
 }
 
-fn configureLlvmImports(mod: *std.Build.Module) void {
-    mod.addIncludePath(.{ .cwd_relative = "/usr/local/llvm/include" });
+fn configureLlvmImports(b: *std.Build, mod: *std.Build.Module) void {
+    // this runs multiple times, but llvm's include path probably doesnt change between runs
+    mod.addIncludePath(.{ .cwd_relative = (std.mem.trim(
+        u8,
+        b.run(&.{ "llvm-config", "--includedir" }),
+        " \t\r\n",
+    )) });
     mod.link_libc = true;
 }
 
@@ -176,6 +194,7 @@ fn createRuntimeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .root_source_file = b.path(root_source_file),
         .target = target,
         .optimize = optimize,
+        .stack_check = false,
     });
     mod.link_libc = true;
     return mod;
