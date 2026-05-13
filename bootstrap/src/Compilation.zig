@@ -1177,6 +1177,7 @@ pub const Compilation = struct {
     }
 
     fn expandModuleSource(comp: *Compilation, source: []const u8, params: []const u8, module_path: []const u8) ![]const u8 {
+        if (std.mem.trim(u8, params, " \t\r\n").len == 0) return try comp.stripModuleParameters(source);
         const mp_idx = std.mem.indexOf(u8, source, "#module_parameters(") orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(0, "parameterized import requires module to declare #module_parameters", .{});
         const mp_start = mp_idx + "#module_parameters(".len;
         const mp_end_rel = std.mem.indexOfScalar(u8, source[mp_start..], ')') orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "unterminated #module_parameters", .{});
@@ -1202,12 +1203,29 @@ pub const Compilation = struct {
         return try out.toOwnedSlice(comp.allocator);
     }
 
+    fn stripModuleParameters(comp: *Compilation, source: []const u8) ![]const u8 {
+        const mp_idx = std.mem.indexOf(u8, source, "#module_parameters(") orelse return try comp.allocator.dupe(u8, source);
+        const mp_start = mp_idx + "#module_parameters(".len;
+        const mp_end_rel = std.mem.indexOfScalar(u8, source[mp_start..], ')') orelse return try comp.allocator.dupe(u8, source);
+        const after = mp_start + mp_end_rel + 1;
+        var line_after = after;
+        while (line_after < source.len and source[line_after] != '\n') line_after += 1;
+        if (line_after < source.len) line_after += 1;
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(comp.allocator);
+        try out.appendSlice(comp.allocator, source[0..mp_idx]);
+        try out.appendSlice(comp.allocator, source[line_after..]);
+        return try out.toOwnedSlice(comp.allocator);
+    }
+
     fn appendLoadedModule(comp: *Compilation, out: *std.ArrayList(u8), module_path: []const u8, source_path: []const u8) anyerror!void {
         if (comp.loaded_module_paths.contains(module_path)) return;
         const owned_module_path = try comp.allocator.dupe(u8, module_path);
         errdefer comp.allocator.free(owned_module_path);
         try comp.loaded_module_paths.put(comp.allocator, owned_module_path, {});
-        const loaded = try comp.loadSourceWithLoads(module_path);
+        const loaded_raw = try comp.loadSourceWithLoads(module_path);
+        defer comp.allocator.free(loaded_raw);
+        const loaded = try comp.stripModuleParameters(loaded_raw);
         defer comp.allocator.free(loaded);
         try out.appendSlice(comp.allocator, "#load \"");
         try out.appendSlice(comp.allocator, module_path);
@@ -1280,6 +1298,8 @@ pub const Compilation = struct {
         defer comp.allocator.free(source);
         var module_prelude = std.ArrayList(u8).empty;
         defer module_prelude.deinit(comp.allocator);
+        var module_postlude = std.ArrayList(u8).empty;
+        defer module_postlude.deinit(comp.allocator);
         var out = std.ArrayList(u8).empty;
         defer out.deinit(comp.allocator);
         const dir = std.fs.path.dirname(path) orelse ".";
@@ -1333,7 +1353,7 @@ pub const Compilation = struct {
                 if (comp.findModule(module_name, path)) |module_path| {
                     defer comp.allocator.free(module_path);
                     if (isTopLevelImportPosition(source, absolute_idx))
-                        try comp.appendLoadedModule(&out, module_path, path)
+                        try comp.appendLoadedModule(&module_postlude, module_path, path)
                     else
                         try comp.appendLoadedModule(&module_prelude, module_path, path);
                 } else |_| {}
@@ -1344,7 +1364,10 @@ pub const Compilation = struct {
                 defer comp.allocator.free(module_path);
                 if (isTopLevelImportPosition(source, absolute_idx)) {
                     try out.appendSlice(comp.allocator, rest[0..idx]);
-                    try comp.appendLoadedModule(&out, module_path, path);
+                    try out.appendSlice(comp.allocator, "// ");
+                    try out.appendSlice(comp.allocator, rest[idx .. idx + line_end]);
+                    if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
+                    try comp.appendLoadedModule(&module_postlude, module_path, path);
                 } else {
                     try out.appendSlice(comp.allocator, rest[0 .. idx + line_end]);
                     if (idx + line_end < rest.len) try out.append(comp.allocator, '\n');
@@ -1384,12 +1407,18 @@ pub const Compilation = struct {
             rest = if (after < rest.len) rest[after + 1 ..] else rest[after..];
         }
         try out.appendSlice(comp.allocator, rest);
-        if (module_prelude.items.len == 0) return try out.toOwnedSlice(comp.allocator);
+        if (module_prelude.items.len == 0 and module_postlude.items.len == 0) return try out.toOwnedSlice(comp.allocator);
         var combined = std.ArrayList(u8).empty;
         defer combined.deinit(comp.allocator);
-        try combined.appendSlice(comp.allocator, module_prelude.items);
-        if (combined.items.len != 0 and combined.items[combined.items.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+        if (module_prelude.items.len != 0) {
+            try combined.appendSlice(comp.allocator, module_prelude.items);
+            if (combined.items.len != 0 and combined.items[combined.items.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+        }
         try combined.appendSlice(comp.allocator, out.items);
+        if (module_postlude.items.len != 0) {
+            if (combined.items.len != 0 and combined.items[combined.items.len - 1] != '\n') try combined.append(comp.allocator, '\n');
+            try combined.appendSlice(comp.allocator, module_postlude.items);
+        }
         return try combined.toOwnedSlice(comp.allocator);
     }
 

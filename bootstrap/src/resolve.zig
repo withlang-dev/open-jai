@@ -325,32 +325,42 @@ fn markImplicitPlaceholderUse(r: *Resolved, allocator: std.mem.Allocator, name: 
     if (r.explicit_placeholders.contains(name)) try r.used_explicit_placeholders.put(allocator, name, {});
 }
 
-fn putStringBuiltins(r: *Resolved) !void {
-    try r.putRealSymbol("sprint", .builtin_sprint);
-    try r.putRealSymbol("tprint", .builtin_tprint);
-    try r.putRealSymbol("to_string", .builtin_to_string);
-    try r.putRealSymbol("to_c_string", .builtin_to_c_string);
-    try r.putRealSymbol("copy_string", .builtin_copy_string);
-    try r.putRealSymbol("String_Builder", .builtin_string_builder_type);
-    try r.putRealSymbol("init_string_builder", .builtin_init_string_builder);
-    try r.putRealSymbol("free_buffers", .builtin_free_buffers);
-    try r.putRealSymbol("append", .builtin_append);
-    try r.putRealSymbol("print_to_builder", .builtin_print_to_builder);
-    try r.putRealSymbol("builder_string_length", .builtin_builder_string_length);
-    try r.putRealSymbol("builder_to_string", .builtin_builder_to_string);
-    try r.putRealSymbol("compare", .builtin_compare);
-    try r.putRealSymbol("contains", .builtin_contains);
-    try r.putRealSymbol("split", .builtin_split);
-    try r.putRealSymbol("trim", .builtin_trim);
-    try r.putRealSymbol("join", .builtin_join);
-    try r.putRealSymbol("string_to_int", .builtin_string_to_int);
-    try r.putRealSymbol("string_to_float", .builtin_string_to_float);
-    try r.putRealSymbol("parse_int", .builtin_parse_int);
-    try r.putRealSymbol("to_integer", .builtin_to_integer);
-    try r.putRealSymbol("replace", .builtin_replace);
-    try r.putRealSymbol("slice", .builtin_slice);
-    try r.putRealSymbol("path_strip_filename", .builtin_path_strip_filename);
-    try r.putRealSymbol("c_style_strlen", .builtin_c_style_strlen);
+fn isSourceModuleName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "Basic") or
+        std.mem.eql(u8, name, "Bindings_Generator") or
+        std.mem.eql(u8, name, "BuildCpp") or
+        std.mem.eql(u8, name, "Check") or
+        std.mem.eql(u8, name, "Compiler") or
+        std.mem.eql(u8, name, "Debug") or
+        std.mem.eql(u8, name, "File") or
+        std.mem.eql(u8, name, "File_Utilities") or
+        std.mem.eql(u8, name, "Flat_Pool") or
+        std.mem.eql(u8, name, "GL") or
+        std.mem.eql(u8, name, "GetRect") or
+        std.mem.eql(u8, name, "Hash_Table") or
+        std.mem.eql(u8, name, "Input") or
+        std.mem.eql(u8, name, "Machine_X64") or
+        std.mem.eql(u8, name, "Mail") or
+        std.mem.eql(u8, name, "Math") or
+        std.mem.eql(u8, name, "POSIX") or
+        std.mem.eql(u8, name, "Pool") or
+        std.mem.eql(u8, name, "Process") or
+        std.mem.eql(u8, name, "Program_Print") or
+        std.mem.eql(u8, name, "Random") or
+        std.mem.eql(u8, name, "SDL") or
+        std.mem.eql(u8, name, "Simp") or
+        std.mem.eql(u8, name, "Sort") or
+        std.mem.eql(u8, name, "Sound_Player") or
+        std.mem.eql(u8, name, "String") or
+        std.mem.eql(u8, name, "System") or
+        std.mem.eql(u8, name, "TestModule_Params") or
+        std.mem.eql(u8, name, "TestScope") or
+        std.mem.eql(u8, name, "Thread") or
+        std.mem.eql(u8, name, "Wav_File") or
+        std.mem.eql(u8, name, "Window_Creation") or
+        std.mem.eql(u8, name, "Windows") or
+        std.mem.eql(u8, name, "Windows_Resources") or
+        std.mem.eql(u8, name, "rpmalloc");
 }
 
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool, external_names: []const []const u8) !Resolved {
@@ -362,6 +372,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     try r.symbols.put(allocator, "write_strings", .builtin_write_strings);
     try r.symbols.put(allocator, "write_number", .builtin_write_number);
     try r.symbols.put(allocator, "write_nonnegative_number", .builtin_write_nonnegative_number);
+    try r.symbols.put(allocator, "exit", .builtin_exit);
     try r.symbols.put(allocator, "New", .builtin_new);
     try r.symbols.put(allocator, "NewArray", .builtin_new_array);
     try r.symbols.put(allocator, "free", .builtin_free);
@@ -443,70 +454,11 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "EndDrawing",       "ClearBackground", "DrawText",     "DrawRectangle",
                             "DrawRectangleRec", "DrawCircle",      "PI",
                         });
-                    } else if (std.mem.eql(u8, module_name, "Basic")) {
-                        r.imports_basic = true;
-                        try r.symbols.put(allocator, "memcpy", .builtin_memcpy);
-                        try r.symbols.put(allocator, "memset", .builtin_memset);
-                    }
+                    } else if (isSourceModuleName(module_name)) continue;
                     continue;
                 }
-                if (std.mem.eql(u8, module_name, "Basic")) {
-                    r.imports_basic = true;
-                    try r.symbols.put(allocator, "print", .builtin_print);
-                    try r.symbols.put(allocator, "exit", .builtin_exit);
-                    try r.symbols.put(allocator, "memcpy", .builtin_memcpy);
-                    try r.symbols.put(allocator, "memset", .builtin_memset);
-                    try r.symbols.put(allocator, "assert", .builtin_assert);
-                    try r.symbols.put(allocator, "swap", .builtin_swap);
-                    try r.symbols.put(allocator, "formatInt", .builtin_format_int);
-                    try r.symbols.put(allocator, "formatFloat", .builtin_format_float);
-                    try r.symbols.put(allocator, "current_time_consensus", .builtin_current_time_consensus);
-                    try r.symbols.put(allocator, "current_time_monotonic", .builtin_current_time_monotonic);
-                    try r.symbols.put(allocator, "to_calendar", .builtin_to_calendar);
-                    try r.symbols.put(allocator, "calendar_to_string", .builtin_calendar_to_string);
-                    try r.symbols.put(allocator, "get_time", .builtin_get_time);
-                    try r.symbols.put(allocator, "seconds_since_init", .builtin_seconds_since_init);
-                    try r.symbols.put(allocator, "sleep_milliseconds", .builtin_sleep_milliseconds);
-                    try r.symbols.put(allocator, "to_float64_seconds", .builtin_to_float64_seconds);
-                    try r.symbols.put(allocator, "formatStruct", .builtin_format_struct);
-                    try r.symbols.put(allocator, "alloc", .builtin_alloc);
-                    try r.symbols.put(allocator, "NewArray", .builtin_new_array);
-                    try r.symbols.put(allocator, "array_add", .builtin_array_add);
-                    try r.symbols.put(allocator, "array_free", .builtin_array_free);
-                    try r.symbols.put(allocator, "peek", .builtin_peek);
-                    try r.symbols.put(allocator, "pop", .builtin_pop);
-                    try r.symbols.put(allocator, "array_reset", .builtin_array_reset);
-                    try r.symbols.put(allocator, "array_reserve", .builtin_array_reserve);
-                    try r.symbols.put(allocator, "array_ordered_remove_by_index", .builtin_array_ordered_remove_by_index);
-                    try r.symbols.put(allocator, "array_find", .builtin_array_find);
-                    try r.symbols.put(allocator, "array_copy", .builtin_array_copy);
-                    try r.putRealSymbol("Allocator", .{ .const_value = @import("Ast.zig").null_node });
-                    try r.putRealSymbol("Context", .{ .const_value = @import("Ast.zig").null_node });
-                    try r.putRealSymbol("get_capabilities", .{ .const_value = @import("Ast.zig").null_node });
-                    try r.symbols.put(allocator, "talloc_string", .builtin_talloc_string);
-                    try r.symbols.put(allocator, "make_leak_report", .builtin_make_leak_report);
-                    try r.symbols.put(allocator, "log_leak_report", .builtin_log_leak_report);
-                    try r.symbols.put(allocator, "write_string", .builtin_write_string);
-                    try r.symbols.put(allocator, "log", .builtin_log);
-                    try r.symbols.put(allocator, "get_field", .builtin_get_field);
-                    try r.symbols.put(allocator, "type_to_string", .builtin_type_to_string);
-                    try r.symbols.put(allocator, "enum_range", .builtin_enum_range);
-                    try r.symbols.put(allocator, "enum_values_as_s64", .builtin_enum_values_as_s64);
-                    try r.symbols.put(allocator, "enum_names", .builtin_enum_names);
-                    try r.putRealSymbol("advance", .{ .const_value = @import("Ast.zig").null_node });
-                    try r.putRealSymbol("log_error", .{ .const_value = @import("Ast.zig").null_node });
-                    try putExternalSymbols(&r, &.{"get_mouse_pointer_position"});
-                    try r.symbols.put(allocator, "equal", .builtin_compare);
-                    for (&[_][]const u8{ "make_vector2", "make_vector3", "make_vector4", "PI", "sqrt", "cos", "min", "max", "clamp", "get_number_of_processors" }) |name| {
-                        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                    }
-                    try putStringBuiltins(&r);
-                    try r.symbols.put(allocator, "get_command_line_arguments", .builtin_get_command_line_arguments);
-                    try r.symbols.put(allocator, "file_exists", .builtin_file_exists);
-                } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
-                    r.imports_basic = true;
-                    try r.symbols.put(allocator, "print", .builtin_print);
-                } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
+                if (isSourceModuleName(module_name)) continue;
+                return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
             .load_decl => {
                 const load_name = ast.stringTokenContents(ast.data(decl).lhs);
@@ -832,11 +784,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         },
         .import_decl => {
             const module_name = ast.stringTokenContents(ast.data(node).lhs);
-            if (std.mem.eql(u8, module_name, "Basic")) {
-                r.imports_basic = true;
-                try r.symbols.put(r.allocator, "memcpy", .builtin_memcpy);
-                try r.symbols.put(r.allocator, "memset", .builtin_memset);
-            }
+            _ = module_name;
         },
         .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .load_decl, .scope_decl => {},
         .proc_decl => try resolveProc(ast, r, node, file_id, diag),

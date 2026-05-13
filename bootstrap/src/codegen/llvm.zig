@@ -506,7 +506,7 @@ fn llvmTypeForTypeId(context: c.LLVMContextRef, llvm_i64: c.LLVMTypeRef, llvm_f6
         1 => c.LLVMInt1TypeInContext(context),
         12, 13 => llvm_f64,
         14 => ptr_ty,
-        10 => ptr_ty,
+        10, 17 => ptr_ty,
         else => llvm_i64,
     };
 }
@@ -1935,7 +1935,7 @@ fn registerValueForTypedLlvmValue(value: c.LLVMValueRef, type_id: u32) RegisterV
     return switch (type_id) {
         1 => .{ .llvm_value = value, .kind = .bool },
         12, 13 => .{ .llvm_value = value, .kind = .float },
-        10 => .{ .llvm_value = value, .kind = .pointer },
+        10, 17 => .{ .llvm_value = value, .kind = .pointer },
         14 => .{ .llvm_value = value, .kind = .runtime_string },
         0 => .{ .llvm_value = value, .kind = .void_value },
         else => .{ .llvm_value = value, .kind = .int },
@@ -1946,7 +1946,7 @@ fn defaultLlvmValueForTypeId(env: *LlvmEnv, type_id: u32) c.LLVMValueRef {
     return switch (type_id) {
         1 => c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), 0, 0),
         12, 13 => c.LLVMConstReal(env.llvm_f64, 0.0),
-        10, 14 => c.LLVMConstPointerNull(env.ptr_ty),
+        10, 14, 17 => c.LLVMConstPointerNull(env.ptr_ty),
         else => c.LLVMConstInt(env.llvm_i64, 0, 0),
     };
 }
@@ -1960,6 +1960,13 @@ fn pointerValue(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic, context: 
         .string => c.LLVMBuildPointerCast(env.builder, value.llvm_value, env.ptr_ty, "string_ptr"),
         .int, .int_addr, .bool, .bool_addr, .type_id => c.LLVMBuildIntToPtr(env.builder, try valueAsInt(env, value, diag), env.ptr_ty, "inttoptr"),
         else => diag.failAt(0, "{s} requires pointer-compatible register, got {s}", .{ context, @tagName(value.kind) }),
+    };
+}
+
+fn builderSlotPointerValue(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValueRef {
+    return switch (value.kind) {
+        .pointer, .pointer_addr => value.llvm_value,
+        else => pointerValue(env, value, diag, "String_Builder procedure call argument"),
     };
 }
 
@@ -2054,6 +2061,7 @@ fn callArgValueForType(env: *LlvmEnv, value: RegisterValue, type_id: u32, diag: 
         1 => valueAsBool(env, value, diag),
         12, 13 => valueAsFloat(env, value, diag),
         10 => pointerValue(env, value, diag, "procedure call argument"),
+        17 => builderSlotPointerValue(env, value, diag),
         14 => runtimeStringValue(env, value, diag),
         else => valueAsInt(env, value, diag),
     };
@@ -2063,7 +2071,7 @@ fn setTypedResult(env: *LlvmEnv, registers: []RegisterValue, dest: u32, value: c
     switch (type_id) {
         1 => try setBoolResult(env, registers, dest, value),
         12, 13 => registers[dest] = .{ .llvm_value = value, .kind = .float },
-        10 => try setPointerResult(env, registers, dest, value),
+        10, 17 => try setPointerResult(env, registers, dest, value),
         14 => registers[dest] = .{ .llvm_value = value, .kind = .runtime_string },
         else => try setIntResult(env, registers, dest, value),
     }
