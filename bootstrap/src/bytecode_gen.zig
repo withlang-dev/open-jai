@@ -1469,6 +1469,10 @@ const GenContext = struct {
             if (typed.comptime_floats.get(expr)) |value| return .{ .float = value };
             if (typed.comptime_strings.get(expr)) |value| return .{ .string = value };
             if (typed.comptime_bytes.get(expr)) |value| return .{ .bytes = value };
+            if (typed.comptime_source_locations.get(expr)) |value| return .{ .source_location = .{
+                .fully_pathed_filename = value.fully_pathed_filename,
+                .line_number = value.line_number,
+            } };
         }
         return switch (ast.tag(expr)) {
             .run_expr => try ctx.executeRunValue(ast.data(expr).lhs, bindings, diag),
@@ -1525,6 +1529,10 @@ const GenContext = struct {
                     if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
                     if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
                     if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
+                    if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
+                        .fully_pathed_filename = value.fully_pathed_filename,
+                        .line_number = value.line_number,
+                    } };
                 }
                 if (ast.tag(decl) == .const_decl or ast.tag(decl) == .var_decl) {
                     const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
@@ -3837,6 +3845,9 @@ const GenContext = struct {
                         try proc.instructions.append(program.allocator, .{ .opcode = .load_bytes, .dest = reg, .arg1 = idx, .source_node = expr });
                         return reg;
                     }
+                    if (typed.comptime_source_locations.get(expr)) |value| {
+                        return try ctx.emitSourceLocationValue(expr, value, diag);
+                    }
                 }
                 const value = try ctx.executeRunValue(expr, &[_]MacroCodeBinding{}, diag);
                 switch (value) {
@@ -3851,6 +3862,10 @@ const GenContext = struct {
                     .bool => |bool_value| return try ctx.emitBool(expr, bool_value),
                     .string => |string_value| return try ctx.emitString(expr, string_value),
                     .code => |code_value| return try ctx.emitCodeValue(expr, code_value),
+                    .source_location => |loc| return try ctx.emitSourceLocationValue(expr, .{
+                        .fully_pathed_filename = loc.fully_pathed_filename,
+                        .line_number = loc.line_number,
+                    }, diag),
                     .bytes => |bytes_value| {
                         const idx = try program.addByteArray(bytes_value);
                         const reg = proc.num_registers;
@@ -4005,6 +4020,13 @@ const GenContext = struct {
                         return try emitLoadFromAddressForType(ctx, addr, type_text, expr, diag);
                     }
                     if (ctx.decl_registers.get(decl)) |reg| return reg;
+                    if (ctx.typed) |typed| {
+                        if (typed.comptime_source_locations.get(decl)) |value| {
+                            const reg = try ctx.emitSourceLocationValue(expr, value, diag);
+                            try ctx.decl_registers.put(program.allocator, decl, reg);
+                            return reg;
+                        }
+                    }
                     if (ctx.isTopLevelVarDecl(decl)) {
                         const type_node = ast.data(decl).lhs;
                         const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, expr, diag) orelse "int";
@@ -6462,6 +6484,21 @@ const GenContext = struct {
         return reg;
     }
 
+    fn emitSourceLocationValue(ctx: *GenContext, source_node: NodeIndex, value: @import("Sema.zig").SourceLocationValue, diag: Diagnostic) !Bytecode.Register {
+        _ = diag;
+        const string_idx = try ctx.program.addString(value.fully_pathed_filename);
+        const reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{
+            .opcode = .load_source_location,
+            .dest = reg,
+            .arg1 = string_idx,
+            .arg2 = @intCast(@max(value.line_number, 0)),
+            .source_node = source_node,
+        });
+        return reg;
+    }
+
     fn locationTargetNode(ctx: *GenContext, node: NodeIndex) NodeIndex {
         const ast = ctx.ast;
         if (node == @import("Ast.zig").null_node) return node;
@@ -7462,6 +7499,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     }
     if (ctx.typed) |typed| {
         if (typed.comptime_strings.contains(expr) or typed.comptime_bytes.contains(expr)) return "string";
+        if (typed.comptime_source_locations.contains(expr)) return "Source_Code_Location";
     }
     switch (ast.tag(expr)) {
         .string_literal => return "string",
@@ -7504,6 +7542,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (ctx.type_overrides.get(decl)) |actual_type| return actual_type;
             if (ctx.typed) |typed| {
                 if (typed.comptime_strings.contains(decl) or typed.comptime_bytes.contains(decl)) return "string";
+                if (typed.comptime_source_locations.contains(decl)) return "Source_Code_Location";
             }
             if (ast.tag(decl) == .var_decl or ast.tag(decl) == .const_decl) {
                 const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else @import("Ast.zig").null_node;

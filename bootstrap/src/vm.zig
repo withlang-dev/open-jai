@@ -22,6 +22,7 @@ pub const Value = union(enum) {
     string: []const u8,
     bytes: []const u8,
     code: CodeValue,
+    source_location: SourceLocation,
     type_text: []const u8,
 };
 
@@ -76,7 +77,7 @@ const CodeTree = struct {
     arguments: []CodeArgument,
 };
 
-const SourceLocation = struct {
+pub const SourceLocation = struct {
     fully_pathed_filename: []const u8,
     line_number: i64,
 };
@@ -4863,7 +4864,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .type_info_member => diag.failAt(0, "VM cannot pass Type_Info member values across procedure calls yet", .{}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
-        .source_location => diag.failAt(0, "VM cannot pass Source_Code_Location across non-inlined procedure calls yet", .{}),
+        .source_location => |v| .{ .source_location = v },
         .calendar => diag.failAt(0, "VM cannot pass Calendar across non-inlined procedure calls yet", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
@@ -4887,7 +4888,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .tuple => diag.failAt(0, "expression-form #run cannot materialize undestructured multi-return values", .{}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
         .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
-        .source_location => diag.failAt(0, "expression-form #run cannot materialize Source_Code_Location values", .{}),
+        .source_location => |v| .{ .source_location = v },
         .calendar => diag.failAt(0, "expression-form #run cannot materialize Calendar values", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options values", .{}),
     };
@@ -4901,6 +4902,7 @@ fn registerValueFromValue(value: Value, diag: Diagnostic) !RegisterValue {
         .string => |v| .{ .string = v },
         .bytes => |v| .{ .bytes = v },
         .code => |v| .{ .code = v },
+        .source_location => |v| .{ .source_location = v },
         .type_text => |v| .{ .type_text = v },
         .void => diag.failAt(0, "VM #run arguments cannot be void", .{}),
     };

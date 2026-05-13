@@ -316,6 +316,14 @@ pub const Compilation = struct {
                 try typed.putComptimeString(value_node, code_value.text);
                 try typed.putComptimeString(decl_node, code_value.text);
             },
+            .source_location => |loc| {
+                const location_value = sema.SourceLocationValue{
+                    .fully_pathed_filename = loc.fully_pathed_filename,
+                    .line_number = loc.line_number,
+                };
+                try typed.putComptimeSourceLocation(value_node, location_value);
+                try typed.putComptimeSourceLocation(decl_node, location_value);
+            },
             .type_text => return diag.failAt(source_offset, "expression-form #run cannot materialize a Type value as a runtime constant", .{}),
             .void => return diag.failAt(source_offset, "expression-form #run requires a value but procedure returned void", .{}),
         }
@@ -424,7 +432,7 @@ pub const Compilation = struct {
                     _ = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                     return;
                 }
-                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node)) return;
+                if (typed.comptime_ints.contains(node) or typed.comptime_floats.contains(node) or typed.comptime_strings.contains(node) or typed.comptime_bytes.contains(node) or typed.comptime_source_locations.contains(node)) return;
                 const value = try comp.executeRunCall(ast, typed, resolved, node, ast.data(node).lhs, diag);
                 switch (value) {
                     .int => |int_value| try typed.comptime_ints.put(comp.allocator, node, int_value),
@@ -433,6 +441,10 @@ pub const Compilation = struct {
                     .string => |string_value| try typed.putComptimeString(node, string_value),
                     .bytes => |bytes_value| try typed.putComptimeBytes(node, bytes_value),
                     .code => |code_value| try typed.putComptimeString(node, code_value.text),
+                    .source_location => |loc| try typed.putComptimeSourceLocation(node, .{
+                        .fully_pathed_filename = loc.fully_pathed_filename,
+                        .line_number = loc.line_number,
+                    }),
                     .type_text => {},
                     .void => {},
                 }
@@ -640,6 +652,11 @@ pub const Compilation = struct {
                 try arg_values.append(comp.allocator, .{ .string = value });
             } else if (typed.comptime_bytes.get(arg)) |value| {
                 try arg_values.append(comp.allocator, .{ .bytes = value });
+            } else if (typed.comptime_source_locations.get(arg)) |value| {
+                try arg_values.append(comp.allocator, .{ .source_location = .{
+                    .fully_pathed_filename = value.fully_pathed_filename,
+                    .line_number = value.line_number,
+                } });
             } else if (ast.tag(arg) == .integer_literal or ast.tag(arg) == .char_literal) {
                 try arg_values.append(comp.allocator, .{ .int = try parseRunIntLiteral(ast, arg, diag) });
             } else if (ast.tag(arg) == .float_literal) {
@@ -671,6 +688,11 @@ pub const Compilation = struct {
                     try arg_values.append(comp.allocator, .{ .string = value });
                 } else if (typed.comptime_bytes.get(decl)) |value| {
                     try arg_values.append(comp.allocator, .{ .bytes = value });
+                } else if (typed.comptime_source_locations.get(decl)) |value| {
+                    try arg_values.append(comp.allocator, .{ .source_location = .{
+                        .fully_pathed_filename = value.fully_pathed_filename,
+                        .line_number = value.line_number,
+                    } });
                 } else {
                     if (decl == @import("Ast.zig").null_node) {
                         return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time procedure argument", .{});
@@ -691,6 +713,11 @@ pub const Compilation = struct {
                         try arg_values.append(comp.allocator, .{ .string = value });
                     } else if (typed.comptime_bytes.get(initializer_node)) |value| {
                         try arg_values.append(comp.allocator, .{ .bytes = value });
+                    } else if (typed.comptime_source_locations.get(initializer_node)) |value| {
+                        try arg_values.append(comp.allocator, .{ .source_location = .{
+                            .fully_pathed_filename = value.fully_pathed_filename,
+                            .line_number = value.line_number,
+                        } });
                     } else {
                         const value = comp.executeRunConstExpr(ast, typed, resolved, initializer_node, diag) catch |err| {
                             if (target_is_expand) {
@@ -821,6 +848,7 @@ pub const Compilation = struct {
             .string => |v| std.debug.print("{s}", .{v}),
             .bytes => |v| std.debug.print("{s}", .{v}),
             .code => |v| std.debug.print("{s}", .{v.text}),
+            .source_location => |v| std.debug.print("{s}:{d}", .{ v.fully_pathed_filename, v.line_number }),
             .type_text => |v| std.debug.print("{s}", .{v}),
         }
     }
@@ -893,6 +921,10 @@ pub const Compilation = struct {
                 const owned_path = try comp.ownRunString(code_value.path);
                 break :blk .{ .code = .{ .text = owned_text, .path = owned_path, .line_number = code_value.line_number } };
             },
+            .source_location => |loc| blk: {
+                const owned_path = try comp.ownRunString(loc.fully_pathed_filename);
+                break :blk .{ .source_location = .{ .fully_pathed_filename = owned_path, .line_number = loc.line_number } };
+            },
             else => value,
         };
     }
@@ -905,6 +937,10 @@ pub const Compilation = struct {
         if (typed.comptime_floats.get(arg)) |value| return .{ .float = value };
         if (typed.comptime_strings.get(arg)) |value| return .{ .string = value };
         if (typed.comptime_bytes.get(arg)) |value| return .{ .bytes = value };
+        if (typed.comptime_source_locations.get(arg)) |value| return .{ .source_location = .{
+            .fully_pathed_filename = value.fully_pathed_filename,
+            .line_number = value.line_number,
+        } };
         return switch (ast.tag(arg)) {
             .integer_literal => .{ .int = try evalComptimeIntExpr(ast, typed, resolved, arg, diag) },
             .float_literal => .{ .float = try evalComptimeFloatExpr(ast, typed, resolved, arg, diag) },
@@ -918,7 +954,27 @@ pub const Compilation = struct {
                 try comp.owned_run_result_strings.append(comp.allocator, decoded);
                 break :blk .{ .string = decoded };
             },
-            .identifier => .{ .string = ast.tokenSlice(ast.mainToken(arg)) },
+            .identifier => blk: {
+                const name = ast.tokenSlice(ast.mainToken(arg));
+                const decl = resolved.local_values.get(arg) orelse lookup_decl: {
+                    if (resolved.lookup(name)) |sym| switch (sym) {
+                        .const_value => |node| break :lookup_decl node,
+                        else => {},
+                    };
+                    break :lookup_decl @import("Ast.zig").null_node;
+                };
+                if (decl != @import("Ast.zig").null_node) {
+                    if (typed.comptime_ints.get(decl)) |value| break :blk .{ .int = value };
+                    if (typed.comptime_floats.get(decl)) |value| break :blk .{ .float = value };
+                    if (typed.comptime_strings.get(decl)) |value| break :blk .{ .string = value };
+                    if (typed.comptime_bytes.get(decl)) |value| break :blk .{ .bytes = value };
+                    if (typed.comptime_source_locations.get(decl)) |value| break :blk .{ .source_location = .{
+                        .fully_pathed_filename = value.fully_pathed_filename,
+                        .line_number = value.line_number,
+                    } };
+                }
+                break :blk .{ .string = name };
+            },
             else => return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "unsupported compile-time host argument expression {s}", .{@tagName(ast.tag(arg))}),
         };
     }

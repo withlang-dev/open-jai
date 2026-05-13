@@ -26,6 +26,8 @@ pub const Typed = struct {
     owned_comptime_strings: std.ArrayList([]const u8) = .empty,
     comptime_bytes: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
     owned_comptime_bytes: std.ArrayList([]const u8) = .empty,
+    comptime_source_locations: std.AutoHashMapUnmanaged(NodeIndex, SourceLocationValue) = .empty,
+    owned_source_location_paths: std.ArrayList([]const u8) = .empty,
     main_proc: ?NodeIndex,
 
     pub fn deinit(t: *Typed) void {
@@ -40,6 +42,9 @@ pub const Typed = struct {
         t.comptime_bytes.deinit(t.allocator);
         for (t.owned_comptime_bytes.items) |value| t.allocator.free(value);
         t.owned_comptime_bytes.deinit(t.allocator);
+        t.comptime_source_locations.deinit(t.allocator);
+        for (t.owned_source_location_paths.items) |value| t.allocator.free(value);
+        t.owned_source_location_paths.deinit(t.allocator);
         t.allocator.free(t.node_types);
     }
 
@@ -60,6 +65,21 @@ pub const Typed = struct {
         try t.owned_comptime_bytes.append(t.allocator, owned);
         try t.comptime_bytes.put(t.allocator, node, owned);
     }
+
+    pub fn putComptimeSourceLocation(t: *Typed, node: NodeIndex, value: SourceLocationValue) !void {
+        const owned_path = try t.allocator.dupe(u8, value.fully_pathed_filename);
+        errdefer t.allocator.free(owned_path);
+        try t.owned_source_location_paths.append(t.allocator, owned_path);
+        try t.comptime_source_locations.put(t.allocator, node, .{
+            .fully_pathed_filename = owned_path,
+            .line_number = value.line_number,
+        });
+    }
+};
+
+pub const SourceLocationValue = struct {
+    fully_pathed_filename: []const u8,
+    line_number: i64,
 };
 
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, resolved: *const Resolved, ip: *InternPool, diag: Diagnostic) !Typed {
