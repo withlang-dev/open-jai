@@ -353,54 +353,6 @@ fn putStringBuiltins(r: *Resolved) !void {
     try r.putRealSymbol("c_style_strlen", .builtin_c_style_strlen);
 }
 
-fn putCompilerModuleSymbols(r: *Resolved) !void {
-    try putStringBuiltins(r);
-    for (&[_][]const u8{
-        "compiler_create_workspace",
-        "get_build_options",
-        "set_build_options",
-        "set_build_options_dc",
-        "compiler_begin_intercept",
-        "compiler_wait_for_message",
-        "compiler_end_intercept",
-        "add_build_file",
-        "add_build_string",
-        "run_command",
-        "set_optimization",
-        "compiler_get_nodes",
-        "compiler_get_code",
-        "print_expression",
-        "is_subclass_of",
-        "get_current_workspace",
-        "Optimization_Type",
-        "Message_Complete",
-        "compiler_set_workspace_status",
-        "compiler_custom_link_command_is_complete",
-        "compiler_report",
-        "make_location",
-        "add_global_data",
-        "code_to_string",
-        "Message",
-        "Message_File",
-        "Message_Import",
-        "Message_Phase",
-        "Message_Typechecked",
-        "Message_Debug_Dump",
-        "Workspace",
-        "Build_Options",
-        "Code",
-        "Code_Node",
-        "Code_Literal",
-        "Code_Argument",
-        "Code_Procedure_Call",
-        "Code_Declaration",
-        "Source_Code_Location",
-        "Type_Info_Pointer",
-    }) |name| {
-        try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-    }
-}
-
 pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, require_main: bool, external_names: []const []const u8) !Resolved {
     var r = Resolved{ .allocator = allocator, .require_main = require_main };
     errdefer r.deinit();
@@ -554,9 +506,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
                     r.imports_basic = true;
                     try r.symbols.put(allocator, "print", .builtin_print);
-                } else if (std.mem.eql(u8, module_name, "Compiler")) {
-                    try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
-                    try putCompilerModuleSymbols(&r);
                 } else return diag.failAt(ast.tokens[ast.data(decl).lhs].start, "unknown Phase 1 import '{s}'", .{module_name});
             },
             .load_decl => {
@@ -887,9 +836,6 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                 r.imports_basic = true;
                 try r.symbols.put(r.allocator, "memcpy", .builtin_memcpy);
                 try r.symbols.put(r.allocator, "memset", .builtin_memset);
-            } else if (std.mem.eql(u8, module_name, "Compiler")) {
-                try r.symbols.put(r.allocator, "get_type_table", .builtin_get_type_table);
-                try putCompilerModuleSymbols(r);
             }
         },
         .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .load_decl, .scope_decl => {},
@@ -1313,15 +1259,14 @@ test "resolver does not globally seed compiler APIs as placeholders" {
     try resolved.failIfImplicitPlaceholders(diag);
 }
 
-test "implemented module imports do not create implicit placeholders" {
+test "basic import does not create implicit placeholders" {
     const lexer = @import("lexer.zig");
     const parser = @import("parser.zig");
 
     const source =
         "#import \"Basic\";\n" ++
-        "#import \"Compiler\";\n" ++
         "main :: () { print(\"ok\\n\"); }\n";
-    const diag = Diagnostic.init(std.testing.allocator, "implemented_imports_no_placeholders.jai", source);
+    const diag = Diagnostic.init(std.testing.allocator, "basic_import_no_placeholders.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
     defer tokens.deinit(std.testing.allocator);

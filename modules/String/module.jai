@@ -18,7 +18,7 @@ free_buffers :: (builder: *String_Builder) #foreign;
 append :: (builder: *String_Builder, value: Any) -> bool #foreign;
 print_to_builder :: (builder: *String_Builder, format: string, args: ..Any) -> bool #foreign;
 builder_string_length :: (builder: *String_Builder) -> int #foreign;
-builder_to_string :: (builder: *String_Builder) -> string #foreign;
+builder_to_string :: (builder: *String_Builder, allocator := temp) -> string #foreign;
 
 compare :: (a: string, b: string) -> int #foreign;
 compare_strings :: (a: string, b: string) -> int #foreign;

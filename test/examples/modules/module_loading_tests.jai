@@ -121,3 +121,7 @@ random_module_import_loads_real_source_and_random_intrinsics_lower :: () {
 string_module_import_loads_real_source_and_string_intrinsics_lower :: () {
     expect_compile_output("test/examples/modules/string_module_import_value.jai", "string:true true true true true true\n");
 } @TestProcedure
+
+compiler_module_import_loads_real_source_and_meta_intrinsics_lower :: () {
+    expect_compile_output("test/examples/modules/compiler_module_import_value.jai", "compiler:ROOT 3 value :: 42\n");
+} @TestProcedure

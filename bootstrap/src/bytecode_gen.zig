@@ -451,22 +451,33 @@ const GenContext = struct {
         const sig = procSignature(ast, proc_node) orelse return null;
         if (procSignatureContainsPolymorphicType(ast, sig)) return null;
         const params = ast.extraSlice(sig.params_extra);
-        if (args.len != params.len) return null;
+        if (args.len > params.len) return null;
 
         const target_index = ctx.procIndexForNode(proc_node) orelse return null;
         var arg_regs = std.ArrayList(Bytecode.Register).empty;
         defer arg_regs.deinit(ctx.program.allocator);
-        for (args) |arg_idx| {
-            const arg: NodeIndex = @intCast(arg_idx);
-            const source = if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
-            try arg_regs.append(ctx.program.allocator, try genCallArg(ctx, source, diag));
+        for (params, 0..) |param_idx, param_i| {
+            const source = if (param_i < args.len) blk: {
+                const arg: NodeIndex = @intCast(args[param_i]);
+                break :blk if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
+            } else blk: {
+                const param: NodeIndex = @intCast(param_idx);
+                const default_value = ast.data(param).rhs;
+                if (default_value == @import("Ast.zig").null_node) return null;
+                break :blk default_value;
+            };
+            const reg = if (isCallerLocationExpr(ast, source))
+                try ctx.emitSourceLocation(call_expr, call_expr, diag)
+            else
+                try genCallArg(ctx, source, diag);
+            try arg_regs.append(ctx.program.allocator, reg);
         }
 
         const return_type = if (sig.return_type != @import("Ast.zig").null_node)
             try typeIdFromTypeExpr(ast, sig.return_type, diag)
         else
             0;
-        if (!typeIdCanUseDirectCall(return_type)) return null;
+        if (!typeIdCanUseDirectCall(return_type) and !typeNodeCanUseDirectCall(ast, sig.return_type)) return null;
         for (params) |param_idx| {
             const param: NodeIndex = @intCast(param_idx);
             const param_type = ast.data(param).lhs;
@@ -474,7 +485,7 @@ const GenContext = struct {
                 try typeIdFromTypeExpr(ast, param_type, diag)
             else
                 16;
-            if (!typeIdCanUseDirectCall(param_type_id)) return null;
+            if (!typeIdCanUseDirectCall(param_type_id) and !typeNodeCanUseDirectCall(ast, param_type) and !isCallerLocationExpr(ast, ast.data(param).rhs)) return null;
         }
         const dest: Bytecode.Register = if (return_type == 0) 0 else blk: {
             const reg = ctx.proc.num_registers;
@@ -495,6 +506,11 @@ const GenContext = struct {
 
     fn typeIdCanUseDirectCall(type_id: u32) bool {
         return type_id == 0 or type_id == 1 or (type_id >= 2 and type_id <= 15);
+    }
+
+    fn typeNodeCanUseDirectCall(ast: *const Ast, type_node: NodeIndex) bool {
+        if (type_node == @import("Ast.zig").null_node or type_node >= ast.node_tags.items.len) return false;
+        return typeTextCanUseDirectCall(nodeSourceText(ast, type_node));
     }
 
     fn procIndexForNode(ctx: *GenContext, proc_node: NodeIndex) ?u32 {
@@ -1710,9 +1726,12 @@ const GenContext = struct {
         for (decls) |decl_idx| {
             const decl: NodeIndex = @intCast(decl_idx);
             if (decl >= ast.node_tags.items.len or ast.tag(decl) != .proc_decl) continue;
+            if (ast.data(decl).lhs == @import("Ast.zig").null_node or ast.tag(ast.data(decl).lhs) != .block) continue;
             if (decl == ctx.current_proc_node and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(decl)), "main")) continue;
             if ((procHasExpandModifierLocal(ast, decl) and !procHasReturnValue(ast, decl)) or procIsCompileTimeOnlyHost(ast, decl)) continue;
-            try out.appendSlice(ctx.program.allocator, topLevelDeclSourceText(ast, decl));
+            const decl_source = topLevelDeclSourceText(ast, decl);
+            if (std.mem.indexOfScalar(u8, decl_source, '{') == null) continue;
+            try out.appendSlice(ctx.program.allocator, decl_source);
             try out.appendSlice(ctx.program.allocator, "\n");
         }
     }
@@ -4391,10 +4410,10 @@ const GenContext = struct {
                 if (ast.tag(callee) == .proc_decl) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (std.mem.eql(u8, ast.tokenSlice(ast.mainToken(callee)), "string_slice")) return try ctx.emitStringSliceCall(args, expr, diag);
-                    if (!procIsCompileTimeOnlyHost(ast, callee)) {
-                        if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
+                    if (try ctx.tryEmitDirectProcCall(callee, args, expr, diag)) |reg| return reg;
+                    if (!procIsCompileTimeOnlyHost(ast, callee) or procHasBody(ast, callee)) {
+                        if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
                     }
-                    if (try ctx.tryInlineProcCall(callee, args, expr, diag)) |reg| return reg;
                     for (args) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
                         if (ast.tag(arg) == .assign_stmt)
@@ -4411,17 +4430,17 @@ const GenContext = struct {
                         if (try ctx.genCompilerIntrinsicCall(field_name, expr, diag)) |intrinsic_reg| return intrinsic_reg;
                         if (ctx.resolved.lookup(field_name)) |field_sym| switch (field_sym) {
                             .proc => |proc_node| {
-                                if (!procIsCompileTimeOnlyHost(ast, proc_node)) {
-                                    if (try ctx.tryEmitDirectProcCall(proc_node, args, expr, diag)) |reg| return reg;
+                                if (try ctx.tryEmitDirectProcCall(proc_node, args, expr, diag)) |reg| return reg;
+                                if (!procIsCompileTimeOnlyHost(ast, proc_node) or procHasBody(ast, proc_node)) {
+                                    if (try ctx.tryInlineProcCall(proc_node, args, expr, diag)) |reg| return reg;
                                 }
-                                if (try ctx.tryInlineProcCall(proc_node, args, expr, diag)) |reg| return reg;
                             },
                             .const_value => |value_node| {
                                 if (value_node != @import("Ast.zig").null_node and ast.tag(value_node) == .proc_decl) {
-                                    if (!procIsCompileTimeOnlyHost(ast, value_node)) {
-                                        if (try ctx.tryEmitDirectProcCall(value_node, args, expr, diag)) |reg| return reg;
+                                    if (try ctx.tryEmitDirectProcCall(value_node, args, expr, diag)) |reg| return reg;
+                                    if (!procIsCompileTimeOnlyHost(ast, value_node) or procHasBody(ast, value_node)) {
+                                        if (try ctx.tryInlineProcCall(value_node, args, expr, diag)) |reg| return reg;
                                     }
-                                    if (try ctx.tryInlineProcCall(value_node, args, expr, diag)) |reg| return reg;
                                 }
                             },
                             else => {},
@@ -5418,10 +5437,10 @@ const GenContext = struct {
                     }
                     if (is_user_proc_call) {
                         if (ctx.resolveProcCallTarget(callee, name, args.len)) |target_proc| {
-                            if (!procIsCompileTimeOnlyHost(ast, target_proc)) {
-                                if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
+                            if (try ctx.tryEmitDirectProcCall(target_proc, args, expr, diag)) |reg| return reg;
+                            if (!procIsCompileTimeOnlyHost(ast, target_proc) or procHasBody(ast, target_proc)) {
+                                if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
                             }
-                            if (try ctx.tryInlineProcCall(target_proc, args, expr, diag)) |reg| return reg;
                         }
                         for (args) |arg_idx| {
                             const arg: NodeIndex = @intCast(arg_idx);
@@ -8374,9 +8393,27 @@ fn parseIntLiteral(ast: *const Ast, expr: NodeIndex, diag: Diagnostic) !i64 {
 }
 
 fn sourceLineNumber(source: []const u8, offset: u32) i64 {
+    const limit: usize = @min(offset, source.len);
+    const resume_marker = "#load \"__main_resume\"";
+    if (std.mem.lastIndexOf(u8, source[0..limit], resume_marker)) |resume_pos| {
+        var resume_count: i64 = 0;
+        var rest = source[0..limit];
+        while (std.mem.indexOf(u8, rest, resume_marker)) |pos| {
+            resume_count += 1;
+            rest = rest[pos + resume_marker.len ..];
+        }
+        var logical_start = resume_pos;
+        while (logical_start < limit and source[logical_start] != '\n') logical_start += 1;
+        if (logical_start < limit) logical_start += 1;
+        var line: i64 = 1;
+        var i = logical_start;
+        while (i < limit) : (i += 1) {
+            if (source[i] == '\n') line += 1;
+        }
+        return line + resume_count;
+    }
     var line: i64 = 1;
     var i: usize = 0;
-    const limit: usize = @min(offset, source.len);
     while (i < limit) : (i += 1) {
         if (source[i] == '\n') line += 1;
     }
@@ -8559,6 +8596,12 @@ fn procIsCompileTimeOnlyHost(ast: *const Ast, proc: NodeIndex) bool {
     return procContainsCompileTimeOnlyCompilerApi(ast, proc);
 }
 
+fn procHasBody(ast: *const Ast, proc: NodeIndex) bool {
+    if (proc == @import("Ast.zig").null_node or proc >= ast.node_tags.items.len or ast.tag(proc) != .proc_decl) return false;
+    const body = ast.data(proc).lhs;
+    return body != @import("Ast.zig").null_node and body < ast.node_tags.items.len and ast.tag(body) == .block;
+}
+
 fn procContainsCompileTimeOnlyCompilerApi(ast: *const Ast, proc: NodeIndex) bool {
     if (proc == @import("Ast.zig").null_node or ast.tag(proc) != .proc_decl) return false;
     var seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
@@ -8588,6 +8631,13 @@ fn isCompileTimeOnlyHostTypeText(text: []const u8) bool {
         std.mem.eql(u8, name, "Build_Options_LLVM_Options") or
         std.mem.eql(u8, name, "Message") or
         std.mem.startsWith(u8, name, "Message_");
+}
+
+fn typeTextCanUseDirectCall(text: []const u8) bool {
+    const name = firstTypeWord(stripPointerText(text));
+    return std.mem.eql(u8, name, "Source_Code_Location") or
+        std.mem.eql(u8, name, "Build_Options") or
+        std.mem.eql(u8, name, "Build_Options_LLVM_Options");
 }
 
 fn nodeSourceText(ast: *const Ast, node: NodeIndex) []const u8 {
@@ -9660,6 +9710,10 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
 
 fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, quote_strings: bool, diag: Diagnostic) anyerror!void {
     const clean_type = std.mem.trim(u8, raw_type, " \t\r\n");
+    if (std.mem.eql(u8, firstTypeWord(clean_type), "Build_Options") or std.mem.eql(u8, firstTypeWord(clean_type), "Build_Options_LLVM_Options")) {
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+        return;
+    }
     if (try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
         try emitFormattedStructValue(ctx, value_reg, clean_type, source_node, diag);
         return;
