@@ -388,11 +388,103 @@ pub const VM = struct {
                 },
                 .string_data => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_data register out of range", .{});
-                    _ = switch (regs[inst.arg1]) {
-                        .string => |v| v,
+                    regs[inst.dest] = .{ .ptr = switch (regs[inst.arg1]) {
+                        .string, .bytes => try vm.materializeRegister(regs[inst.arg1], diag),
+                        .ptr => |ptr| ptr,
                         else => return diag.failAt(0, "VM string_data requires string operand", .{}),
-                    };
-                    regs[inst.dest] = .{ .int = 0 };
+                    } };
+                },
+                .string_to_c => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_to_c register out of range", .{});
+                    regs[inst.dest] = .{ .ptr = switch (regs[inst.arg1]) {
+                        .string => |text| try vm.materializeCString(text, diag),
+                        .bytes => |bytes| try vm.materializeCString(bytes, diag),
+                        .ptr => |ptr| ptr,
+                        else => return diag.failAt(0, "VM to_c_string requires string operand", .{}),
+                    } };
+                },
+                .string_from_parts => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_from_parts register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "to_string data pointer");
+                    const len = try registerInt(regs[inst.arg2], diag, "to_string byte count");
+                    if (len < 0) return diag.failAt(0, "VM to_string byte count cannot be negative", .{});
+                    regs[inst.dest] = .{ .string = try vm.stringFromPointer(ptr, @intCast(len), diag) };
+                },
+                .string_from_c => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_from_c register out of range", .{});
+                    const ptr = try registerPointer(regs[inst.arg1], diag, "to_string C string pointer");
+                    regs[inst.dest] = .{ .string = try vm.stringFromCString(ptr, diag) };
+                },
+                .string_copy => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_copy register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "copy_string source");
+                    const owned = try vm.allocator.dupe(u8, text);
+                    errdefer vm.allocator.free(owned);
+                    try vm.rendered_code_strings.append(vm.allocator, owned);
+                    regs[inst.dest] = .{ .string = owned };
+                },
+                .string_slice => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM string_slice register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "string_slice source");
+                    const start = try registerInt(regs[inst.arg2], diag, "string_slice start");
+                    const count = try registerInt(regs[inst.arg3], diag, "string_slice count");
+                    if (start < 0 or count < 0) return diag.failAt(0, "VM string_slice requires non-negative start and count", .{});
+                    const start_usize: usize = @intCast(start);
+                    const count_usize: usize = @intCast(count);
+                    if (start_usize > text.len or count_usize > text.len - start_usize) return diag.failAt(0, "VM string_slice out of bounds", .{});
+                    const owned = try vm.allocator.dupe(u8, text[start_usize .. start_usize + count_usize]);
+                    errdefer vm.allocator.free(owned);
+                    try vm.rendered_code_strings.append(vm.allocator, owned);
+                    regs[inst.dest] = .{ .string = owned };
+                },
+                .string_compare => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_compare register out of range", .{});
+                    const lhs = try vm.registerText(regs[inst.arg1], diag, "compare lhs");
+                    const rhs = try vm.registerText(regs[inst.arg2], diag, "compare rhs");
+                    regs[inst.dest] = .{ .int = switch (std.mem.order(u8, lhs, rhs)) {
+                        .lt => -1,
+                        .eq => 0,
+                        .gt => 1,
+                    } };
+                },
+                .string_contains, .string_begins_with => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string predicate register out of range", .{});
+                    const haystack = try vm.registerText(regs[inst.arg1], diag, "string predicate haystack");
+                    const needle = try vm.registerText(regs[inst.arg2], diag, "string predicate needle");
+                    regs[inst.dest] = .{ .bool = if (inst.opcode == .string_contains)
+                        std.mem.indexOf(u8, haystack, needle) != null
+                    else
+                        std.mem.startsWith(u8, haystack, needle) };
+                },
+                .string_find => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_find register out of range", .{});
+                    const haystack = try vm.registerText(regs[inst.arg1], diag, "find haystack");
+                    const needle = try vm.registerText(regs[inst.arg2], diag, "find needle");
+                    const found = if (inst.arg3 == 0) std.mem.indexOf(u8, haystack, needle) else std.mem.lastIndexOf(u8, haystack, needle);
+                    regs[inst.dest] = .{ .int = if (found) |idx| @intCast(idx) else -1 };
+                },
+                .string_trim => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_trim register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "trim source");
+                    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+                    const owned = try vm.allocator.dupe(u8, trimmed);
+                    errdefer vm.allocator.free(owned);
+                    try vm.rendered_code_strings.append(vm.allocator, owned);
+                    regs[inst.dest] = .{ .string = owned };
+                },
+                .string_parse_int => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_parse_int register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "string_to_int source");
+                    const parsed = std.fmt.parseInt(i64, std.mem.trim(u8, text, " \t\r\n"), 10) catch null;
+                    regs[inst.arg2] = .{ .bool = parsed != null };
+                    regs[inst.dest] = .{ .int = parsed orelse 0 };
+                },
+                .string_parse_float => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_parse_float register out of range", .{});
+                    const text = try vm.registerText(regs[inst.arg1], diag, "string_to_float source");
+                    const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, text, " \t\r\n")) catch null;
+                    regs[inst.arg2] = .{ .bool = parsed != null };
+                    regs[inst.dest] = .{ .float = parsed orelse 0 };
                 },
                 .string_index => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string_index register out of range", .{});
@@ -406,39 +498,6 @@ pub const VM = struct {
                     };
                     if (index < 0 or index >= bytes.len) return diag.failAt(0, "VM string index out of bounds", .{});
                     regs[inst.dest] = .{ .int = bytes[@intCast(index)] };
-                },
-                .string_compare, .string_contains, .string_begins_with, .string_find => {
-                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM string operation register out of range", .{});
-                    const lhs = try vm.registerText(regs[inst.arg1], diag, "string operation lhs");
-                    const rhs = try vm.registerText(regs[inst.arg2], diag, "string operation rhs");
-                    switch (inst.opcode) {
-                        .string_compare => regs[inst.dest] = .{ .int = switch (std.mem.order(u8, lhs, rhs)) {
-                            .lt => -1,
-                            .eq => 0,
-                            .gt => 1,
-                        } },
-                        .string_contains => regs[inst.dest] = .{ .bool = std.mem.indexOf(u8, lhs, rhs) != null },
-                        .string_begins_with => regs[inst.dest] = .{ .bool = std.mem.startsWith(u8, lhs, rhs) },
-                        .string_find => {
-                            const found = if (inst.arg3 != 0)
-                                std.mem.lastIndexOf(u8, lhs, rhs)
-                            else
-                                std.mem.indexOf(u8, lhs, rhs);
-                            regs[inst.dest] = .{ .int = if (found) |index| @intCast(index) else -1 };
-                        },
-                        else => unreachable,
-                    }
-                },
-                .string_slice => {
-                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len or inst.arg3 >= regs.len) return diag.failAt(0, "VM string_slice register out of range", .{});
-                    const text = try vm.registerText(regs[inst.arg1], diag, "string_slice source");
-                    const start = try registerInt(regs[inst.arg2], diag, "string_slice start");
-                    const count = try registerInt(regs[inst.arg3], diag, "string_slice count");
-                    if (start < 0 or count < 0) return diag.failAt(0, "VM string_slice requires non-negative start and count", .{});
-                    const start_usize: usize = @intCast(start);
-                    const count_usize: usize = @intCast(count);
-                    if (start_usize > text.len or count_usize > text.len - start_usize) return diag.failAt(0, "VM string_slice out of bounds", .{});
-                    regs[inst.dest] = .{ .string = text[start_usize .. start_usize + count_usize] };
                 },
                 .path_strip_filename => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM path_strip_filename register out of range", .{});
@@ -1409,14 +1468,6 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_builder_length register out of range", .{});
                     regs[inst.dest] = .{ .int = @intCast((try vm.builderString(try registerPointer(regs[inst.arg1], diag, "string_builder_length slot"))).len) };
                 },
-                .string_copy => {
-                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM string_copy register out of range", .{});
-                    const text = try vm.registerText(regs[inst.arg1], diag, "copy_string source");
-                    const owned = try vm.allocator.dupe(u8, text);
-                    errdefer vm.allocator.free(owned);
-                    try vm.rendered_code_strings.append(vm.allocator, owned);
-                    regs[inst.dest] = .{ .string = owned };
-                },
                 .store_ptr => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr register out of range", .{});
                     try vm.storeRegister(try registerPointer(regs[inst.dest], diag, "store_ptr destination"), regs[inst.arg1], diag);
@@ -1544,6 +1595,13 @@ pub const VM = struct {
         }
     }
 
+    fn materializeCString(vm: *VM, text: []const u8, diag: Diagnostic) !Pointer {
+        const ptr = try vm.allocBlock(text.len + 1);
+        if (text.len != 0) @memcpy(try vm.blockSlice(ptr, text.len, diag), text);
+        (try vm.blockSlice(.{ .block = ptr.block, .offset = ptr.offset + text.len }, 1, diag))[0] = 0;
+        return ptr;
+    }
+
     fn blockSlice(vm: *VM, ptr: Pointer, len: usize, diag: Diagnostic) ![]u8 {
         if (ptr.block >= vm.memory_blocks.items.len) return diag.failAt(0, "VM pointer block out of range", .{});
         const block = vm.memory_blocks.items[ptr.block];
@@ -1561,6 +1619,24 @@ pub const VM = struct {
         const block = vm.memory_blocks.items[ptr.block];
         if (ptr.offset > block.len) return diag.failAt(0, "VM pointer access out of bounds", .{});
         return block[ptr.offset..];
+    }
+
+    fn stringFromPointer(vm: *VM, ptr: Pointer, len: usize, diag: Diagnostic) ![]const u8 {
+        const bytes = try vm.blockSlice(ptr, len, diag);
+        const owned = try vm.allocator.dupe(u8, bytes);
+        errdefer vm.allocator.free(owned);
+        try vm.rendered_code_strings.append(vm.allocator, owned);
+        return owned;
+    }
+
+    fn stringFromCString(vm: *VM, ptr: Pointer, diag: Diagnostic) ![]const u8 {
+        const bytes = try vm.readRemainingBytes(ptr, diag);
+        const len = std.mem.indexOfScalar(u8, bytes, 0) orelse
+            return diag.failAt(0, "VM to_string C string pointer does not reference a NUL-terminated buffer", .{});
+        const owned = try vm.allocator.dupe(u8, bytes[0..len]);
+        errdefer vm.allocator.free(owned);
+        try vm.rendered_code_strings.append(vm.allocator, owned);
+        return owned;
     }
 
     fn requireIo(vm: *VM, diag: Diagnostic, context: []const u8) !std.Io {
