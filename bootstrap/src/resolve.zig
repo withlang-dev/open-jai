@@ -619,7 +619,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Flat_Pool") or
                     std.mem.eql(u8, module_name, "rpmalloc") or
                     std.mem.eql(u8, module_name, "Program_Print") or
-                    std.mem.eql(u8, module_name, "BuildCpp") or
                     std.mem.eql(u8, module_name, "GetRect") or
                     std.mem.eql(u8, module_name, "TestScope") or
                     std.mem.eql(u8, module_name, "Machine_X64") or
@@ -650,10 +649,6 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                         try r.putRealSymbol("STDIN_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STDOUT_FILENO", .{ .const_value = @import("Ast.zig").null_node });
                         try r.putRealSymbol("STDERR_FILENO", .{ .const_value = @import("Ast.zig").null_node });
-                    } else if (std.mem.eql(u8, module_name, "BuildCpp")) {
-                        for (&[_][]const u8{ "build_cpp", "build_cpp_dynamic_lib", "cpp_link_library" }) |name| {
-                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                        }
                     } else if (std.mem.eql(u8, module_name, "Input")) {
                         try putExternalSymbols(&r, &.{
                             "events_this_frame",          "update_window_events",

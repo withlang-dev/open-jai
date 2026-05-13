@@ -25,3 +25,7 @@ process_module_import_loads_real_source :: () {
 file_utilities_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/file_utilities_module_import_value.jai", "file-utilities:true true copied\n");
 } @TestProcedure
+
+build_cpp_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/build_cpp_module_import_value.jai", "build-cpp:true\n");
+} @TestProcedure
