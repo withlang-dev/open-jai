@@ -695,14 +695,15 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "get_mouse_pointer_position",
                         });
                     } else if (std.mem.eql(u8, module_name, "Window_Creation")) {
-                        try putExternalSymbols(&r, &.{"create_window"});
+                        try putExternalSymbols(&r, &.{ "create_window", "get_render_dimensions" });
                     } else if (std.mem.eql(u8, module_name, "Windows_Resources")) {
                         try putExternalSymbols(&r, &.{"gl"});
                     } else if (std.mem.eql(u8, module_name, "Simp")) {
                         try putExternalSymbols(&r, &.{
                             "get_font_at_size",  "texture_load_from_file", "gl_load",             "DrawTexturePro", "immediate_quad", "gl",
                             "set_render_target", "set_shader_for_color",   "clear_render_target", "swap_buffers",   "update_window",  "immediate_triangle",
-                            "load_font",         "draw_text",
+                            "load_font",         "draw_text",              "set_shader_for_images", "immediate_begin",
+                            "immediate_flush",
                         });
                     } else if (std.mem.eql(u8, module_name, "GL")) {
                         try putExternalSymbols(&r, &.{
