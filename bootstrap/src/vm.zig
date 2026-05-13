@@ -1929,7 +1929,9 @@ pub const VM = struct {
 
     fn hostGetExecutablePath(vm: *VM, diag: Diagnostic) ![]const u8 {
         const io = try vm.requireIo(diag, "get_path_of_running_executable");
-        const path = std.process.executablePathAlloc(io, vm.allocator) catch |err| return diag.failAt(0, "VM get_path_of_running_executable failed: {s}", .{@errorName(err)});
+        const sentinel_path = std.process.executablePathAlloc(io, vm.allocator) catch |err| return diag.failAt(0, "VM get_path_of_running_executable failed: {s}", .{@errorName(err)});
+        defer vm.allocator.free(sentinel_path);
+        const path = try vm.allocator.dupe(u8, sentinel_path);
         errdefer vm.allocator.free(path);
         try vm.rendered_code_strings.append(vm.allocator, path);
         return path;

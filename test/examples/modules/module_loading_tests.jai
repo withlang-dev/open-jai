@@ -33,3 +33,7 @@ build_cpp_module_import_loads_real_source :: () {
 posix_module_import_loads_real_source :: () {
     expect_compile_output("test/examples/modules/posix_module_import_value.jai", "posix:0 1 2\n");
 } @TestProcedure
+
+system_module_import_loads_real_source :: () {
+    expect_compile_output("test/examples/modules/system_module_import_value.jai", "system:true true\n");
+} @TestProcedure

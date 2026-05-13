@@ -602,8 +602,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 } else if (std.mem.eql(u8, module_name, "Compiler")) {
                     try r.symbols.put(allocator, "get_type_table", .builtin_get_type_table);
                     try putCompilerModuleSymbols(&r);
-                } else if (std.mem.eql(u8, module_name, "System") or
-                    std.mem.eql(u8, module_name, "Windows") or
+                } else if (std.mem.eql(u8, module_name, "Windows") or
                     std.mem.eql(u8, module_name, "Input") or
                     std.mem.eql(u8, module_name, "Window_Creation") or
                     std.mem.eql(u8, module_name, "Windows_Resources") or
@@ -628,14 +627,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     std.mem.eql(u8, module_name, "Wav_File"))
                 {
                     // Placeholder module acceptance until real module loading lands.
-                    if (std.mem.eql(u8, module_name, "System")) {
-                        try r.symbols.put(allocator, "get_path_of_running_executable", .builtin_get_path_of_running_executable);
-                        try r.symbols.put(allocator, "set_working_directory", .builtin_set_working_directory);
-                        try r.symbols.put(allocator, "get_working_directory", .builtin_get_working_directory);
-                        for (&[_][]const u8{ "get_number_of_processors", "max" }) |name| {
-                            try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
-                        }
-                    } else if (std.mem.eql(u8, module_name, "Debug")) {
+                    if (std.mem.eql(u8, module_name, "Debug")) {
                         try putExternalSymbols(&r, &.{ "init", "attach_to_debugger", "breakpoint" });
                     } else if (std.mem.eql(u8, module_name, "Windows")) {
                         try r.putRealSymbol("HANDLE", .{ .const_value = @import("Ast.zig").null_node });
