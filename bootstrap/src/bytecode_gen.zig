@@ -3529,6 +3529,12 @@ const GenContext = struct {
                 const base_reg = try ctx.genExpr(ast.data(expr).lhs, diag);
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
                     const base_name = firstTypeWord(stripPointerText(base_text));
+                    if (std.mem.eql(u8, base_name, "Calendar")) {
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_calendar_field, .dest = reg, .arg1 = base_reg, .arg2 = try calendarFieldId(ast, ast.data(expr).rhs, diag), .source_node = expr });
+                        return reg;
+                    }
                     if (std.mem.eql(u8, firstTypeWord(base_text), "Type") or std.mem.eql(u8, base_name, "Type_Info_Pointer") or std.mem.eql(u8, base_name, "Type_Info_Struct")) {
                         const field_idx = try program.addString(field_name);
                         const reg = proc.num_registers;
@@ -6313,6 +6319,18 @@ fn calendarFieldId(ast: *const Ast, field_token: u32, diag: Diagnostic) !u32 {
     return diag.failAt(ast.tokens[field_token].start, "unsupported Calendar field '{s}'", .{name});
 }
 
+fn isCalendarFieldName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "year") or
+        std.mem.eql(u8, name, "month_starting_at_0") or
+        std.mem.eql(u8, name, "day_of_month_starting_at_0") or
+        std.mem.eql(u8, name, "day_of_week_starting_at_0") or
+        std.mem.eql(u8, name, "hour") or
+        std.mem.eql(u8, name, "minute") or
+        std.mem.eql(u8, name, "second") or
+        std.mem.eql(u8, name, "millisecond") or
+        std.mem.eql(u8, name, "time_zone");
+}
+
 fn timezoneLiteralValue(ast: *const Ast, node: NodeIndex, diag: Diagnostic) !u32 {
     if (ast.tag(node) != .field_access or ast.data(node).lhs != @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "timezone argument must be .UTC or .LOCAL", .{});
     const name = ast.tokenSlice(ast.data(node).rhs);
@@ -6615,6 +6633,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "fully_pathed_filename")) return "string";
                 if (std.mem.eql(u8, field_name, "line_number")) return "int";
             }
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Calendar")) {
+                if (isCalendarFieldName(field_name)) return "int";
+            }
             if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Struct")) {
                 if (std.mem.eql(u8, field_name, "type")) return "int";
                 if (std.mem.eql(u8, field_name, "name")) return "string";
@@ -6773,11 +6794,19 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     return "bool";
                 }
                 if (std.mem.eql(u8, name, "file_open")) return "*File";
-                if (std.mem.eql(u8, name, "string_to_float") or std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) return "float64";
+                if (std.mem.eql(u8, name, "string_to_float") or
+                    std.mem.eql(u8, name, "sqrt") or
+                    std.mem.eql(u8, name, "cos") or
+                    std.mem.eql(u8, name, "get_time") or
+                    std.mem.eql(u8, name, "seconds_since_init") or
+                    std.mem.eql(u8, name, "to_float64_seconds")) return "float64";
                 if (std.mem.eql(u8, name, "to_c_string")) return "*u8";
                 if (std.mem.eql(u8, name, "make_vector2")) return "Vector2";
                 if (std.mem.eql(u8, name, "make_vector3")) return "Vector3";
                 if (std.mem.eql(u8, name, "make_vector4")) return "Vector4";
+                if (std.mem.eql(u8, name, "current_time_consensus") or
+                    std.mem.eql(u8, name, "current_time_monotonic")) return "Apollo_Time";
+                if (std.mem.eql(u8, name, "to_calendar")) return "Calendar";
                 if (std.mem.eql(u8, name, "compiler_get_nodes")) return "*Code_Node";
                 if (std.mem.eql(u8, name, "compiler_get_code")) return "Code";
                 if (std.mem.eql(u8, name, "compiler_wait_for_message")) return "*Message";

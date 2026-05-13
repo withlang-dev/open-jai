@@ -4,6 +4,10 @@ const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 
+const time_c = @cImport({
+    @cInclude("time.h");
+});
+
 pub const CodeValue = struct {
     text: []const u8,
     path: []const u8 = "",
@@ -72,6 +76,18 @@ const SourceLocation = struct {
     line_number: i64,
 };
 
+const CalendarValue = struct {
+    year: i64,
+    month_starting_at_0: i64,
+    day_of_month_starting_at_0: i64,
+    day_of_week_starting_at_0: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    millisecond: i64,
+    time_zone: i64,
+};
+
 const CompilerMessage = struct {
     kind: []const u8,
     workspace: i64,
@@ -125,6 +141,7 @@ const RegisterValue = union(enum) {
     code_arg: CodeArgument,
     code_args: []const CodeArgument,
     source_location: SourceLocation,
+    calendar: CalendarValue,
     message: usize,
     build_options: usize,
     build_llvm_options: usize,
@@ -191,6 +208,7 @@ pub const VM = struct {
     current_workspace_build_strings: ?*std.ArrayList([]const u8) = null,
     next_workspace_id: ?*i64 = null,
     current_workspace_id: i64 = 2,
+    start_monotonic_ns: ?i64 = null,
 
     pub fn init(allocator: std.mem.Allocator, program: *const Bytecode.Program) VM {
         return .{ .allocator = allocator, .program = program };
@@ -654,21 +672,53 @@ pub const VM = struct {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM format_print register out of range", .{});
                     try vm.printValue(regs[inst.arg1], diag, "format_print");
                 },
-                .current_time_consensus_low, .current_time_monotonic_low => {
+                .current_time_consensus_low => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});
-                    regs[inst.dest] = .{ .int = 0 };
+                    regs[inst.dest] = .{ .int = try vm.hostRealtimeNs(diag) };
                 },
-                .get_time_seconds, .seconds_since_init, .to_float64_seconds => {
+                .current_time_monotonic_low => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});
+                    regs[inst.dest] = .{ .int = try vm.hostMonotonicNs(diag) };
+                },
+                .get_time_seconds => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM time float destination register out of range", .{});
-                    regs[inst.dest] = .{ .float = 0 };
+                    regs[inst.dest] = .{ .float = @as(f64, @floatFromInt(try vm.hostRealtimeNs(diag))) / @as(f64, @floatFromInt(std.time.ns_per_s)) };
+                },
+                .seconds_since_init => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM time float destination register out of range", .{});
+                    const now = try vm.hostMonotonicNs(diag);
+                    const start = vm.start_monotonic_ns orelse blk: {
+                        vm.start_monotonic_ns = now;
+                        break :blk now;
+                    };
+                    regs[inst.dest] = .{ .float = @as(f64, @floatFromInt(now - start)) / @as(f64, @floatFromInt(std.time.ns_per_s)) };
+                },
+                .to_float64_seconds => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_float64_seconds register out of range", .{});
+                    const low = try registerInt(regs[inst.arg1], diag, "to_float64_seconds");
+                    regs[inst.dest] = .{ .float = @as(f64, @floatFromInt(low)) / @as(f64, @floatFromInt(std.time.ns_per_s)) };
                 },
                 .to_calendar => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM to_calendar register out of range", .{});
-                    regs[inst.dest] = regs[inst.arg1];
+                    const low = try registerInt(regs[inst.arg1], diag, "to_calendar time");
+                    if (low < 0) return diag.failAt(0, "VM to_calendar requires nonnegative Apollo_Time.low", .{});
+                    regs[inst.dest] = .{ .calendar = try vm.hostToCalendar(@intCast(low), inst.arg2, diag) };
+                },
+                .load_calendar_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM load_calendar_field register out of range", .{});
+                    const calendar = switch (regs[inst.arg1]) {
+                        .calendar => |value| value,
+                        else => return diag.failAt(0, "Calendar field access requires Calendar value", .{}),
+                    };
+                    regs[inst.dest] = .{ .int = try calendarFieldValue(calendar, inst.arg2, diag) };
                 },
                 .calendar_to_string => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM calendar_to_string register out of range", .{});
-                    regs[inst.dest] = .{ .string = "" };
+                    const calendar = switch (regs[inst.arg1]) {
+                        .calendar => |value| value,
+                        else => return diag.failAt(0, "calendar_to_string requires Calendar value", .{}),
+                    };
+                    regs[inst.dest] = .{ .string = try vm.calendarToString(calendar) };
                 },
                 .ret => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM return register out of range", .{});
@@ -1488,6 +1538,7 @@ pub const VM = struct {
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot materialize compiler Code_Node values as raw bytes", .{}),
             .message => return diag.failAt(0, "VM cannot materialize compiler Message values as raw bytes", .{}),
             .source_location => return diag.failAt(0, "VM cannot materialize Source_Code_Location as raw bytes; access its fields instead", .{}),
+            .calendar => return diag.failAt(0, "VM cannot materialize Calendar as raw bytes; use field access or calendar_to_string instead", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot materialize Build_Options as raw bytes; access its fields instead", .{}),
             .empty => return diag.failAt(0, "VM cannot take address of an uninitialized register", .{}),
         }
@@ -1613,6 +1664,61 @@ pub const VM = struct {
         errdefer vm.allocator.free(path);
         try vm.rendered_code_strings.append(vm.allocator, path);
         return path;
+    }
+
+    fn hostRealtimeNs(vm: *VM, diag: Diagnostic) !i64 {
+        var ts: std.posix.timespec = undefined;
+        switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+            .SUCCESS => return @as(i64, @intCast(ts.sec)) * std.time.ns_per_s + @as(i64, @intCast(ts.nsec)),
+            .INTR => return vm.hostRealtimeNs(diag),
+            else => return diag.failAt(0, "VM realtime clock failed", .{}),
+        }
+    }
+
+    fn hostMonotonicNs(vm: *VM, diag: Diagnostic) !i64 {
+        var ts: std.posix.timespec = undefined;
+        switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &ts))) {
+            .SUCCESS => return @as(i64, @intCast(ts.sec)) * std.time.ns_per_s + @as(i64, @intCast(ts.nsec)),
+            .INTR => return vm.hostMonotonicNs(diag),
+            else => return diag.failAt(0, "VM monotonic clock failed", .{}),
+        }
+    }
+
+    fn hostToCalendar(vm: *VM, low_ns: u64, timezone: u32, diag: Diagnostic) !CalendarValue {
+        _ = vm;
+        const sec_u64 = low_ns / std.time.ns_per_s;
+        const nsec = low_ns % std.time.ns_per_s;
+        const seconds: time_c.time_t = @intCast(sec_u64);
+        var tm_value: time_c.struct_tm = undefined;
+        const tm_ptr = if (timezone == 1) time_c.localtime_r(&seconds, &tm_value) else time_c.gmtime_r(&seconds, &tm_value);
+        if (tm_ptr == null) return diag.failAt(0, "VM calendar conversion failed", .{});
+        return .{
+            .year = @as(i64, tm_value.tm_year) + 1900,
+            .month_starting_at_0 = @intCast(tm_value.tm_mon),
+            .day_of_month_starting_at_0 = @as(i64, tm_value.tm_mday) - 1,
+            .day_of_week_starting_at_0 = @intCast(tm_value.tm_wday),
+            .hour = @intCast(tm_value.tm_hour),
+            .minute = @intCast(tm_value.tm_min),
+            .second = @intCast(tm_value.tm_sec),
+            .millisecond = @intCast(nsec / std.time.ns_per_ms),
+            .time_zone = timezone,
+        };
+    }
+
+    fn calendarToString(vm: *VM, calendar: CalendarValue) ![]const u8 {
+        const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+        const month_idx: usize = if (calendar.month_starting_at_0 >= 0 and calendar.month_starting_at_0 < 12) @intCast(calendar.month_starting_at_0) else 0;
+        const text = try std.fmt.allocPrint(vm.allocator, "{d} {s} {d}, {d:0>2}:{d:0>2}:{d:0>2}", .{
+            calendar.day_of_month_starting_at_0 + 1,
+            months[month_idx],
+            calendar.year,
+            @as(u64, @intCast(calendar.hour)),
+            @as(u64, @intCast(calendar.minute)),
+            @as(u64, @intCast(calendar.second)),
+        });
+        errdefer vm.allocator.free(text);
+        try vm.rendered_code_strings.append(vm.allocator, text);
+        return text;
     }
 
     fn pathStripFilename(vm: *VM, path: []const u8) ![]const u8 {
@@ -2502,6 +2608,7 @@ pub const VM = struct {
             .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => return diag.failAt(0, "VM cannot store compiler Code_Node values into raw memory", .{}),
             .message => return diag.failAt(0, "VM cannot store compiler Message values into raw memory", .{}),
             .source_location => return diag.failAt(0, "VM cannot store Source_Code_Location into raw memory; use field assignment", .{}),
+            .calendar => return diag.failAt(0, "VM cannot store Calendar into raw memory; use field access or calendar_to_string instead", .{}),
             .build_options, .build_llvm_options => return diag.failAt(0, "VM cannot store Build_Options into raw memory; use field assignment", .{}),
             .empty => return diag.failAt(0, "VM cannot store an uninitialized register", .{}),
         }
@@ -2710,7 +2817,7 @@ pub const VM = struct {
             };
         }
         return switch (value) {
-            .int, .float, .bool, .string, .bytes, .code, .ptr, .type_id, .type_text, .type_info_member, .source_location, .build_options, .build_llvm_options => value,
+            .int, .float, .bool, .string, .bytes, .code, .ptr, .type_id, .type_text, .type_info_member, .source_location, .calendar, .build_options, .build_llvm_options => value,
             .empty => if (elem_size == 1)
                 .{ .int = try vm.loadByte(try vm.dynamicArrayItemPointer(array_index, index, diag), diag) }
             else
@@ -2846,6 +2953,7 @@ pub const VM = struct {
                 std.debug.print("{{{s}, {d}}}", .{ message.kind, message.workspace });
             },
             .source_location => |loc| std.debug.print("{s}:{d}", .{ loc.fully_pathed_filename, loc.line_number }),
+            .calendar => |calendar| std.debug.print("{s}", .{try vm.calendarToString(calendar)}),
             .build_options, .build_llvm_options => |index| try vm.printBuildOptions(index, diag),
             .empty => return diag.failAt(0, "VM {s} cannot print an uninitialized value", .{context}),
         }
@@ -3610,6 +3718,7 @@ pub const VM = struct {
                 defer vm.allocator.free(text);
                 try builder.appendSlice(vm.allocator, text);
             },
+            .calendar => |calendar| try builder.appendSlice(vm.allocator, try vm.calendarToString(calendar)),
             .build_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
             .build_llvm_options => |index| try vm.builderAppendBuildOptions(builder, index, diag),
             .ptr => |ptr| try builder.appendSlice(vm.allocator, try vm.readRemainingBytes(ptr, diag)),
@@ -4064,6 +4173,7 @@ fn numericAsFloatOrInt(value: RegisterValue, diag: Diagnostic, context: []const 
         .type_info_member => diag.failAt(0, "VM {s} cannot treat Type_Info member values as numbers", .{context}),
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM {s} cannot treat compiler Code_Node values as numbers", .{context}),
         .source_location => diag.failAt(0, "VM {s} cannot treat Source_Code_Location values as numbers", .{context}),
+        .calendar => diag.failAt(0, "VM {s} cannot treat Calendar values as numbers", .{context}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM {s} cannot treat Build_Options values as numbers", .{context}),
         else => diag.failAt(0, "VM {s} requires numeric or bool value", .{context}),
     };
@@ -4097,12 +4207,28 @@ fn registerTruthy(value: RegisterValue, diag: Diagnostic, context: []const u8) !
         .type_text => |v| v.len != 0,
         .type_info_member => true,
         .source_location => true,
+        .calendar => true,
         .build_options => true,
         .build_llvm_options => true,
         .message => true,
         .type_id => true,
         .ptr => true,
         .empty => false,
+    };
+}
+
+fn calendarFieldValue(calendar: CalendarValue, field_id: u32, diag: Diagnostic) !i64 {
+    return switch (field_id) {
+        0 => calendar.year,
+        1 => calendar.month_starting_at_0,
+        2 => calendar.day_of_month_starting_at_0,
+        3 => calendar.day_of_week_starting_at_0,
+        4 => calendar.hour,
+        5 => calendar.minute,
+        6 => calendar.second,
+        7 => calendar.millisecond,
+        8 => calendar.time_zone,
+        else => diag.failAt(0, "invalid Calendar field id", .{}),
     };
 }
 
@@ -4152,6 +4278,7 @@ fn registerValueToValue(value: RegisterValue, diag: Diagnostic) !Value {
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "VM cannot pass compiler Code_Node values across procedure calls yet", .{}),
         .message => diag.failAt(0, "VM cannot pass compiler Message values across procedure calls yet", .{}),
         .source_location => diag.failAt(0, "VM cannot pass Source_Code_Location across non-inlined procedure calls yet", .{}),
+        .calendar => diag.failAt(0, "VM cannot pass Calendar across non-inlined procedure calls yet", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "VM cannot pass Build_Options across procedure calls yet", .{}),
         .ptr => diag.failAt(0, "VM cannot pass a raw compile-time pointer across procedure calls without a typed value", .{}),
         .empty => diag.failAt(0, "VM call argument register was not initialized", .{}),
@@ -4174,6 +4301,7 @@ fn registerValueToRunValue(vm: *VM, value: RegisterValue, diag: Diagnostic) !Val
         .code_node, .code_nodes, .code_note, .code_notes, .code_arg, .code_args => diag.failAt(0, "expression-form #run cannot materialize compiler Code_Node values", .{}),
         .message => diag.failAt(0, "expression-form #run cannot materialize compiler Message values", .{}),
         .source_location => diag.failAt(0, "expression-form #run cannot materialize Source_Code_Location values", .{}),
+        .calendar => diag.failAt(0, "expression-form #run cannot materialize Calendar values", .{}),
         .build_options, .build_llvm_options => diag.failAt(0, "expression-form #run cannot materialize Build_Options values", .{}),
     };
 }
@@ -4250,6 +4378,10 @@ fn registerValuesEqual(lhs: RegisterValue, rhs: RegisterValue) bool {
         },
         .source_location => |l| switch (rhs) {
             .source_location => |r| std.mem.eql(u8, l.fully_pathed_filename, r.fully_pathed_filename) and l.line_number == r.line_number,
+            else => false,
+        },
+        .calendar => |l| switch (rhs) {
+            .calendar => |r| std.meta.eql(l, r),
             else => false,
         },
         .build_options => |l| switch (rhs) {
