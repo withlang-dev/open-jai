@@ -113,6 +113,10 @@ struct_align_output :: () {
     expect_program_output("examples/12/12.7_struct_align.jai", "size = 16, value = 1010\n");
 } @TestProcedure
 
+inner_module_output :: () {
+    expect_program_output("examples/12/12.8_inner_module_test.jai", "{42}");
+} @TestProcedure
+
 as_using_entities_output :: () {
     expect_example_annotations("examples/12/12.12_#as_using_entities.jai");
 } @TestProcedure
