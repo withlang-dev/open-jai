@@ -102,6 +102,7 @@ pub const Opcode = enum(u8) {
     code_node_location,
     compiler_report,
     memcpy,
+    memset,
     exit_process,
     free_heap,
     make_vector3,

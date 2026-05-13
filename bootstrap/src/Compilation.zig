@@ -951,7 +951,7 @@ pub const Compilation = struct {
                 const decl = resolved.local_values.get(node) orelse return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run constant expression identifier is unresolved", .{});
                 if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) break :blk 0;
                 if (typed.comptime_ints.get(decl)) |value| break :blk value;
-                const initializer = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else @import("Ast.zig").null_node;
+                const initializer = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else if (ast.tag(decl) == .var_decl) ast.data(decl).rhs else decl;
                 if (initializer == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "#run constant expression identifier has no initializer", .{});
                 break :blk try evalComptimeIntExpr(ast, typed, resolved, initializer, diag);
             },

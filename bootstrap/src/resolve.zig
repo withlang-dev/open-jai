@@ -19,6 +19,7 @@ pub const Symbol = union(enum) {
     builtin_free,
     builtin_exit,
     builtin_memcpy,
+    builtin_memset,
     builtin_assert,
     builtin_sin,
     builtin_current_time_consensus,
@@ -441,7 +442,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                 }
             },
             .const_decl, .var_decl, .proc_decl, .placeholder_decl => {
-                if (file_scope and !main_scope_started) {
+                if (file_scope) {
                     const raw = try r.normalizedName(ast.tokenSlice(ast.mainToken(decl)));
                     const scoped = try r.scopedName(current_file, raw);
                     try r.owned_names.append(allocator, scoped);
@@ -488,6 +489,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "print", .builtin_print);
                     try r.symbols.put(allocator, "exit", .builtin_exit);
                     try r.symbols.put(allocator, "memcpy", .builtin_memcpy);
+                    try r.symbols.put(allocator, "memset", .builtin_memset);
                     try r.symbols.put(allocator, "assert", .builtin_assert);
                     try r.symbols.put(allocator, "swap", .builtin_swap);
                     try r.symbols.put(allocator, "formatInt", .builtin_format_int);
@@ -531,8 +533,9 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     });
                     try r.putRealSymbol("advance", .{ .const_value = @import("Ast.zig").null_node });
                     try r.putRealSymbol("log_error", .{ .const_value = @import("Ast.zig").null_node });
+                    try putExternalSymbols(&r, &.{"get_mouse_pointer_position"});
                     try r.symbols.put(allocator, "equal", .builtin_compare);
-                    for (&[_][]const u8{ "make_vector2", "make_vector3", "make_vector4", "PI", "sqrt", "cos", "max", "get_number_of_processors" }) |name| {
+                    for (&[_][]const u8{ "make_vector2", "make_vector3", "make_vector4", "PI", "sqrt", "cos", "min", "max", "clamp", "get_number_of_processors" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                     }
                     try putStringBuiltins(&r);
@@ -588,7 +591,7 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                     try r.symbols.put(allocator, "abs", .builtin_abs);
                     try r.symbols.put(allocator, "Vector3", .{ .const_value = @import("Ast.zig").null_node });
                     try r.symbols.put(allocator, "Vector4", .{ .const_value = @import("Ast.zig").null_node });
-                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "make_vector4", "sqrt", "cos" }) |name| {
+                    for (&[_][]const u8{ "PI", "make_vector2", "make_vector3", "make_vector4", "sqrt", "cos", "min", "max", "clamp" }) |name| {
                         try r.putRealSymbol(name, .{ .const_value = @import("Ast.zig").null_node });
                     }
                 } else if (std.mem.eql(u8, module_name, "TestModule_Params")) {
@@ -718,7 +721,19 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
                             "GL_COLOR_BUFFER_BIT",
                         });
                     } else if (std.mem.eql(u8, module_name, "GetRect")) {
-                        try putExternalSymbols(&r, &.{ "button", "slider", "dropdown", "draw_popups", "getrect_theme" });
+                        try putExternalSymbols(&r, &.{
+                            "ui_init",
+                            "ui_per_frame_update",
+                            "getrect_handle_event",
+                            "get_rect",
+                            "button",
+                            "slider",
+                            "dropdown",
+                            "draw_popups",
+                            "set_default_theme",
+                            "default_theme_procs",
+                            "getrect_theme",
+                        });
                     } else if (std.mem.eql(u8, module_name, "Sort")) {
                         for (&[_][]const u8{ "compare_floats", "quick_sort", "bubble_sort", "compare", "compare_strings" }) |sort_symbol| {
                             try r.putRealSymbol(sort_symbol, .{ .const_value = @import("Ast.zig").null_node });
@@ -1327,11 +1342,11 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
         },
         .identifier => {
             const name = ast.tokenSlice(ast.mainToken(node));
-            const sym_opt = if (file_id != 0) blk: {
+            const sym_opt = blk: {
                 const scoped = try r.scopedName(file_id, name);
                 defer r.allocator.free(scoped);
                 break :blk r.lookup(scoped) orelse r.lookup(name);
-            } else r.lookup(name);
+            };
             if (sym_opt) |sym| {
                 switch (sym) {
                     .const_value => |value_node| {
@@ -1341,7 +1356,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     },
                     .proc => |proc_node| try r.local_values.put(r.allocator, node, proc_node),
                     .placeholder => try markImplicitPlaceholderUse(r, r.allocator, name),
-                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_get_cpu_info, .builtin_check_feature, .builtin_make_directory_if_it_does_not_exist, .builtin_delete_directory, .builtin_file_exists, .builtin_set_working_directory, .builtin_get_working_directory, .builtin_visit_files, .builtin_get_path_of_running_executable, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_talloc_string, .builtin_make_leak_report, .builtin_log_leak_report, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_path_strip_filename, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_peek, .builtin_pop, .builtin_array_reset, .builtin_array_reserve, .builtin_array_ordered_remove_by_index, .builtin_array_find, .builtin_array_copy, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
+                    .builtin_swap, .builtin_print, .builtin_write_string, .builtin_write_strings, .builtin_write_number, .builtin_write_nonnegative_number, .builtin_new, .builtin_new_array, .builtin_free, .builtin_exit, .builtin_memcpy, .builtin_memset, .builtin_assert, .builtin_sin, .builtin_current_time_consensus, .builtin_current_time_monotonic, .builtin_to_calendar, .builtin_calendar_to_string, .builtin_random_seed, .builtin_random_get, .builtin_random_get_zero_to_one, .builtin_random_get_within_range, .builtin_compiler_arg_count, .builtin_compiler_arg, .builtin_compiler_read_file, .builtin_compiler_write_file, .builtin_get_command_line_arguments, .builtin_get_cpu_info, .builtin_check_feature, .builtin_make_directory_if_it_does_not_exist, .builtin_delete_directory, .builtin_file_exists, .builtin_set_working_directory, .builtin_get_working_directory, .builtin_visit_files, .builtin_get_path_of_running_executable, .builtin_read_entire_file, .builtin_write_entire_file, .builtin_file_open, .builtin_file_close, .builtin_file_length, .builtin_file_set_position, .builtin_file_write, .builtin_file_read, .builtin_posix_read, .builtin_get_std_handle, .builtin_reset_temporary_storage, .builtin_talloc_string, .builtin_make_leak_report, .builtin_log_leak_report, .builtin_push_allocator, .builtin_sprint, .builtin_tprint, .builtin_to_string, .builtin_to_c_string, .builtin_copy_string, .builtin_string_builder_type, .builtin_init_string_builder, .builtin_free_buffers, .builtin_append, .builtin_print_to_builder, .builtin_builder_string_length, .builtin_builder_to_string, .builtin_compare, .builtin_contains, .builtin_begins_with, .builtin_split, .builtin_trim, .builtin_join, .builtin_find_index_from_left, .builtin_find_index_from_right, .builtin_string_to_int, .builtin_string_to_float, .builtin_parse_int, .builtin_to_integer, .builtin_replace, .builtin_slice, .builtin_path_strip_filename, .builtin_c_style_strlen, .builtin_format_int, .builtin_format_float, .builtin_get_type_table, .builtin_alloc, .builtin_array_add, .builtin_array_free, .builtin_peek, .builtin_pop, .builtin_array_reset, .builtin_array_reserve, .builtin_array_ordered_remove_by_index, .builtin_array_find, .builtin_array_copy, .builtin_get_time, .builtin_seconds_since_init, .builtin_sleep_milliseconds, .builtin_to_float64_seconds, .builtin_format_struct, .builtin_to_upper, .builtin_to_lower, .builtin_is_digit, .builtin_is_alpha, .builtin_is_alnum, .builtin_is_space, .builtin_is_any, .builtin_log, .builtin_get_field, .builtin_type_to_string, .builtin_enum_range, .builtin_enum_values_as_s64, .builtin_enum_names, .builtin_abs => {},
                 }
             } else if (r.using_fallbacks.items.len != 0) {
                 try r.local_values.put(r.allocator, node, r.using_fallbacks.items[r.using_fallbacks.items.len - 1]);

@@ -370,23 +370,12 @@ pub const VM = struct {
                     const path = try vm.registerText(regs[inst.arg1], diag, "path_strip_filename source");
                     regs[inst.dest] = .{ .string = try vm.pathStripFilename(path) };
                 },
-                .cmp_lt_int => {
-                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM cmp_lt_int register out of range", .{});
-                    const lhs = switch (regs[inst.arg1]) {
-                        .int => |v| v,
-                        else => return diag.failAt(0, "VM cmp_lt_int requires integer lhs", .{}),
-                    };
-                    const rhs = switch (regs[inst.arg2]) {
-                        .int => |v| v,
-                        else => return diag.failAt(0, "VM cmp_lt_int requires integer rhs", .{}),
-                    };
-                    regs[inst.dest] = .{ .bool = lhs < rhs };
-                },
-                .cmp_le_int, .cmp_gt_int, .cmp_ge_int => {
+                .cmp_lt_int, .cmp_le_int, .cmp_gt_int, .cmp_ge_int => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM integer comparison register out of range", .{});
-                    const lhs = try numericAsFloatOrInt(regs[inst.arg1], diag, "integer comparison lhs");
-                    const rhs = try numericAsFloatOrInt(regs[inst.arg2], diag, "integer comparison rhs");
+                    const lhs = try numericAsFloatOrInt(regs[inst.arg1], diag, "numeric comparison lhs");
+                    const rhs = try numericAsFloatOrInt(regs[inst.arg2], diag, "numeric comparison rhs");
                     regs[inst.dest] = .{ .bool = switch (inst.opcode) {
+                        .cmp_lt_int => lhs < rhs,
                         .cmp_le_int => lhs <= rhs,
                         .cmp_gt_int => lhs > rhs,
                         .cmp_ge_int => lhs >= rhs,
@@ -1313,6 +1302,19 @@ pub const VM = struct {
                     };
                     if (count < 0) return diag.failAt(0, "VM memcpy byte count cannot be negative", .{});
                     try vm.copyBytes(try registerPointer(regs[inst.dest], diag, "memcpy destination"), regs[inst.arg1], @intCast(count), diag);
+                },
+                .memset => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM memset register out of range", .{});
+                    const value = switch (regs[inst.arg1]) {
+                        .int => |v| v,
+                        else => return diag.failAt(0, "VM memset byte value must be an integer", .{}),
+                    };
+                    const count = switch (regs[inst.arg2]) {
+                        .int => |v| v,
+                        else => return diag.failAt(0, "VM memset byte count must be an integer", .{}),
+                    };
+                    if (count < 0) return diag.failAt(0, "VM memset byte count cannot be negative", .{});
+                    @memset(try vm.blockSlice(try registerPointer(regs[inst.dest], diag, "memset destination"), @intCast(count), diag), @intCast(value & 0xff));
                 },
                 .free_heap, .array_free => {},
                 else => return diag.failAt(0, "VM does not support opcode {s} in #run yet", .{@tagName(inst.opcode)}),
@@ -3521,7 +3523,7 @@ fn findTopLevelChar(text: []const u8, needle: u8) ?usize {
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         switch (text[i]) {
-            '"' , '\'' => {
+            '"', '\'' => {
                 const quote = text[i];
                 i += 1;
                 while (i < text.len) : (i += 1) {

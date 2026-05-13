@@ -1632,6 +1632,23 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 var args = [_]c.LLVMValueRef{ dst_ptr, src_ptr, count };
                 _ = c.LLVMBuildCall2(env.builder, env.memcpy_fn_ty, env.memcpy_fn, &args, args.len, "");
             },
+            .memset => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) return diag.failAt(0, "LLVM backend memset register out of range", .{});
+                const dst_ptr = switch (registers[inst.dest].kind) {
+                    .pointer => registers[inst.dest].llvm_value,
+                    .pointer_addr => blk: {
+                        const loaded = c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.dest].llvm_value, "memset_dst_load_ptr_addr");
+                        const slot = c.LLVMBuildPointerCast(env.builder, registers[inst.dest].llvm_value, env.ptr_ty, "memset_dst_ptr_slot");
+                        const is_null = c.LLVMBuildICmp(env.builder, c.LLVMIntEQ, loaded, c.LLVMConstPointerNull(env.ptr_ty), "memset_dst_ptr_is_null");
+                        break :blk c.LLVMBuildSelect(env.builder, is_null, slot, loaded, "memset_dst_ptr_or_slot");
+                    },
+                    .int_addr, .bool_addr => c.LLVMBuildPointerCast(env.builder, registers[inst.dest].llvm_value, env.ptr_ty, "memset_dst_scalar_slot"),
+                    else => return diag.failAt(0, "LLVM backend memset destination requires addressable storage, got {s}", .{@tagName(registers[inst.dest].kind)}),
+                };
+                const value = c.LLVMBuildTrunc(env.builder, try valueAsInt(env, registers[inst.arg1], diag), c.LLVMInt8TypeInContext(env.context), "memset_byte");
+                const count = try valueAsInt(env, registers[inst.arg2], diag);
+                _ = c.LLVMBuildMemSet(env.builder, dst_ptr, value, count, 1);
+            },
             .exit_process => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend exit_process register out of range", .{});
                 const status = c.LLVMBuildIntCast2(env.builder, registers[inst.arg1].llvm_value, env.llvm_i32, 1, "exit_status");

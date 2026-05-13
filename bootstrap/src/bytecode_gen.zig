@@ -4505,6 +4505,15 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .memcpy, .dest = dst, .arg1 = src, .arg2 = count, .source_node = expr });
                     return dst;
                 }
+                if (std.mem.eql(u8, name, "memset")) {
+                    const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "memset expects three arguments", .{});
+                    const dst = try ctx.genExpr(@intCast(args[0]), diag);
+                    const value = try ctx.genExpr(@intCast(args[1]), diag);
+                    const count = try ctx.genExpr(@intCast(args[2]), diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .memset, .dest = dst, .arg1 = value, .arg2 = count, .source_node = expr });
+                    return dst;
+                }
                 if (std.mem.eql(u8, name, "exit")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "exit expects one argument", .{});
@@ -4808,16 +4817,35 @@ const GenContext = struct {
             const count = std.Thread.getCpuCount() catch 1;
             return try ctx.emitInt(expr, @intCast(count));
         }
-        if (std.mem.eql(u8, name, "max")) {
-            if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "max expects two arguments", .{});
+        if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
+            if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects two arguments", .{name});
             const lhs = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
             const rhs = try ctx.genExpr(handleArgNode(ast, @intCast(args[1])), diag);
             const cmp = ctx.proc.num_registers;
             ctx.proc.num_registers += 1;
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .cmp_gt_int, .dest = cmp, .arg1 = lhs, .arg2 = rhs, .source_node = expr });
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = if (std.mem.eql(u8, name, "min")) .cmp_lt_int else .cmp_gt_int, .dest = cmp, .arg1 = lhs, .arg2 = rhs, .source_node = expr });
             const reg = ctx.proc.num_registers;
             ctx.proc.num_registers += 1;
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .select_value, .dest = reg, .arg1 = cmp, .arg2 = lhs, .arg3 = rhs, .source_node = expr });
+            return reg;
+        }
+        if (std.mem.eql(u8, name, "clamp")) {
+            if (args.len != 3) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "clamp expects three arguments", .{});
+            const value = try ctx.genExpr(handleArgNode(ast, @intCast(args[0])), diag);
+            const low = try ctx.genExpr(handleArgNode(ast, @intCast(args[1])), diag);
+            const high = try ctx.genExpr(handleArgNode(ast, @intCast(args[2])), diag);
+            const low_cmp = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .cmp_lt_int, .dest = low_cmp, .arg1 = value, .arg2 = low, .source_node = expr });
+            const lower_bounded = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .select_value, .dest = lower_bounded, .arg1 = low_cmp, .arg2 = low, .arg3 = value, .source_node = expr });
+            const high_cmp = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .cmp_gt_int, .dest = high_cmp, .arg1 = lower_bounded, .arg2 = high, .source_node = expr });
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .select_value, .dest = reg, .arg1 = high_cmp, .arg2 = high, .arg3 = lower_bounded, .source_node = expr });
             return reg;
         }
         if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
@@ -6527,7 +6555,9 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     std.mem.eql(u8, name, "to_integer") or
                     std.mem.eql(u8, name, "c_style_strlen") or
                     std.mem.eql(u8, name, "get_number_of_processors") or
-                    std.mem.eql(u8, name, "max"))
+                    std.mem.eql(u8, name, "min") or
+                    std.mem.eql(u8, name, "max") or
+                    std.mem.eql(u8, name, "clamp"))
                 {
                     return "int";
                 }
