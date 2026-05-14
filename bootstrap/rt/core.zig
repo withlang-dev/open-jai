@@ -86,6 +86,12 @@ export fn __openjai_print_int(value: i64) void {
     writeAll(text);
 }
 
+export fn __openjai_print_uint(value: u64) void {
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+    writeAll(text);
+}
+
 export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize) void {
     const base = data orelse {
         writeAll("[]");

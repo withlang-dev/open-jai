@@ -8429,7 +8429,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     switch (ast.tag(expr)) {
         .string_literal => return "string",
         .bool_literal => return "bool",
-        .char_literal => return "u8",
+        .char_literal => return "s64",
         .integer_literal => return "int",
         .float_literal => return "float32",
         .binary_expr => {

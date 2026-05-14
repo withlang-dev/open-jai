@@ -26,6 +26,12 @@ constants_output :: () {
     expect_program_output("examples/05/5.2_constants.jai", "The earth mass is 5972189887017193070000000\nI was computed at compile time: 3510\nfloat32\ntrue\ntrue\ntrue\n");
 } @TestProcedure
 
+variable_declarations_output :: () {
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "counter: 100\ncounter2: 0\npi2: 0\nvalid2: false\nfirst_name2: \ncounter2: 100\nfirst_name2: Jon\npi3 is of type float32, value 3.14159.\ncounter3: 100\n");
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "counter4 contains the value ");
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "average contains the value 0\nthe global var is 108\nf is 49 and has type s64\nvarv is void\n");
+} @TestProcedure
+
 variable_declarations_2_output :: () {
     expect_example_annotations("examples/05/5.4_variable_declarations2.jai");
 } @TestProcedure
@@ -58,12 +64,23 @@ bools_output :: () {
     expect_program_output("examples/06/6.1_bools.jai", "b1 is true and of type bool\nAre 1 and 1.0 equal? true\nAre Jai and Java different? true\ntrue\n! changes to false\nb2 is false\nb1 and b2 is false\nb1 or b2 is true\n");
 } @TestProcedure
 
+assert_output :: () {
+    expect_program_output("examples/06/6.2_assert.jai", "");
+} @TestProcedure
+
 numbers_output :: () {
     expect_program_output("examples/06/6.3_numbers.jai", "total_score is 55\n8 / 3 is 2\n8.0 / 3 is 2.666667\n8 % 3 is 2\nd is -5069095\ntotal_score has type s64\n74\na is -5069105 and b is 207\na is -5069104 and b is 208\ne is 3\ne is 1\ne is 0\nfalse\ntrue\n4\n4\n10\n");
 } @TestProcedure
 
 formatting_output :: () {
     expect_program_output("examples/06/6.5_formatting.jai", "108 6c i2 = ff\n07 2.252\n3.140\n3.14\nScientific-notation-formatted float: 1.234235e+10, Decimal value: 12342345234\n");
+} @TestProcedure
+
+random_output :: () {
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random integer: 16200662316097921210\nA random float between 0 and 1: 0.655336\nA random float between 0 and 100: 63.606159\n");
+    expect_program_output_contains("examples/06/6.6_random.jai", "\nA random integer: ");
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random float between 0 and 1: ");
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random float between 0 and 100: ");
 } @TestProcedure
 
 scope_output :: () {
