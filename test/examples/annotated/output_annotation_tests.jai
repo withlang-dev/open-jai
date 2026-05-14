@@ -76,6 +76,13 @@ formatting_output :: () {
     expect_program_output("examples/06/6.5_formatting.jai", "108 6c i2 = ff\n07 2.252\n3.140\n3.14\nScientific-notation-formatted float: 1.234235e+10, Decimal value: 12342345234\n");
 } @TestProcedure
 
+random_output :: () {
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random integer: 16200662316097921210\nA random float between 0 and 1: 0.655336\nA random float between 0 and 100: 63.606159\n");
+    expect_program_output_contains("examples/06/6.6_random.jai", "\nA random integer: ");
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random float between 0 and 1: ");
+    expect_program_output_contains("examples/06/6.6_random.jai", "A random float between 0 and 100: ");
+} @TestProcedure
+
 scope_output :: () {
     expect_example_annotations("examples/07/7.1_scope.jai");
 } @TestProcedure
