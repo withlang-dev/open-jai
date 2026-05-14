@@ -26,6 +26,12 @@ constants_output :: () {
     expect_program_output("examples/05/5.2_constants.jai", "The earth mass is 5972189887017193070000000\nI was computed at compile time: 3510\nfloat32\ntrue\ntrue\ntrue\n");
 } @TestProcedure
 
+variable_declarations_output :: () {
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "counter: 100\ncounter2: 0\npi2: 0\nvalid2: false\nfirst_name2: \ncounter2: 100\nfirst_name2: Jon\npi3 is of type float32, value 3.14159.\ncounter3: 100\n");
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "counter4 contains the value ");
+    expect_program_output_contains("examples/05/5.3_variable_declarations.jai", "average contains the value 0\nthe global var is 108\nf is 49 and has type s64\nvarv is void\n");
+} @TestProcedure
+
 variable_declarations_2_output :: () {
     expect_example_annotations("examples/05/5.4_variable_declarations2.jai");
 } @TestProcedure
