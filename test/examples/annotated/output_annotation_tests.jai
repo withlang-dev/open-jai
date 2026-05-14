@@ -64,6 +64,10 @@ bools_output :: () {
     expect_program_output("examples/06/6.1_bools.jai", "b1 is true and of type bool\nAre 1 and 1.0 equal? true\nAre Jai and Java different? true\ntrue\n! changes to false\nb2 is false\nb1 and b2 is false\nb1 or b2 is true\n");
 } @TestProcedure
 
+assert_output :: () {
+    expect_program_output("examples/06/6.2_assert.jai", "");
+} @TestProcedure
+
 numbers_output :: () {
     expect_program_output("examples/06/6.3_numbers.jai", "total_score is 55\n8 / 3 is 2\n8.0 / 3 is 2.666667\n8 % 3 is 2\nd is -5069095\ntotal_score has type s64\n74\na is -5069105 and b is 207\na is -5069104 and b is 208\ne is 3\ne is 1\ne is 0\nfalse\ntrue\n4\n4\n10\n");
 } @TestProcedure
