@@ -38,9 +38,21 @@ min :: (a: $T, b: T) -> T {
     return b;
 }
 
+min :: (a: $T, b: T, rest: ..T) -> T {
+    result := min(a, b);
+    for rest if it < result result = it;
+    return result;
+}
+
 max :: (a: $T, b: T) -> T {
     if a > b return a;
     return b;
+}
+
+max :: (a: $T, b: T, rest: ..T) -> T {
+    result := max(a, b);
+    for rest if it > result result = it;
+    return result;
 }
 
 clamp :: (value: $T, low: T, high: T) -> T {
@@ -72,3 +84,14 @@ abs :: (value: float64) -> float64 {
 sin :: (value: float64) -> float64 #foreign;
 sqrt :: (value: float64) -> float64 #foreign;
 cos :: (value: float64) -> float64 #foreign;
+tan :: (value: float64) -> float64 #foreign;
+asin :: (value: float64) -> float64 #foreign;
+acos :: (value: float64) -> float64 #foreign;
+atan :: (value: float64) -> float64 #foreign;
+atan2 :: (y: float64, x: float64) -> float64 #foreign;
+pow :: (base: float64, exponent: float64) -> float64 #foreign;
+exp :: (value: float64) -> float64 #foreign;
+log :: (value: float64) -> float64 #foreign;
+floor :: (value: float64) -> float64 #foreign;
+ceil :: (value: float64) -> float64 #foreign;
+round :: (value: float64) -> float64 #foreign;

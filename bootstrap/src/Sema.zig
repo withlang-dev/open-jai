@@ -6,6 +6,7 @@ const InternPool = @import("InternPool.zig").InternPool;
 const Type = @import("Type.zig").Type;
 const Resolved = @import("resolve.zig").Resolved;
 const Symbol = @import("resolve.zig").Symbol;
+const numeric_literal = @import("numeric_literal.zig");
 const using_param_sentinel: u32 = 0xfffffffe;
 
 var active_ip: ?*InternPool = null;
@@ -18,6 +19,7 @@ pub const Typed = struct {
     allocator: std.mem.Allocator,
     node_types: []Type,
     type_aliases: std.StringHashMapUnmanaged(Type) = .empty,
+    struct_type_aliases: std.StringHashMapUnmanaged(NodeIndex) = .empty,
     proc_type_aliases: std.StringHashMapUnmanaged(void) = .empty,
     inferred_param_types: std.AutoHashMapUnmanaged(NodeIndex, Type) = .empty,
     comptime_ints: std.AutoHashMapUnmanaged(NodeIndex, i64) = .empty,
@@ -48,6 +50,7 @@ pub const Typed = struct {
 
     pub fn deinit(t: *Typed) void {
         t.type_aliases.deinit(t.allocator);
+        t.struct_type_aliases.deinit(t.allocator);
         t.proc_type_aliases.deinit(t.allocator);
         t.inferred_param_types.deinit(t.allocator);
         t.comptime_ints.deinit(t.allocator);
@@ -328,6 +331,7 @@ fn collectTypeAliases(ast: *const Ast, typed: *Typed, stmts_extra: u32, diag: Di
             const name = ast.tokenSlice(ast.mainToken(stmt));
             const ty = try typeFromTypeExprWithAliases(ast, typed, ast.data(stmt).lhs, diag);
             try typed.type_aliases.put(typed.allocator, name, ty);
+            if (ast.tag(ast.data(stmt).lhs) == .struct_type or ast.tag(ast.data(stmt).lhs) == .union_type) try typed.struct_type_aliases.put(typed.allocator, name, ast.data(stmt).lhs);
             if (ty.isProcedure()) try typed.proc_type_aliases.put(typed.allocator, name, {});
             typed.node_types[stmt] = Type.init(InternPool.well_known.type_type);
             typed.node_types[ast.data(stmt).lhs] = Type.init(InternPool.well_known.type_type);
@@ -349,9 +353,18 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             break :blk Type.voidType();
         },
         .var_decl => blk: {
-            const explicit_ty = if (ast.data(node).lhs != @import("Ast.zig").null_node) try typeFromTypeExprWithAliases(ast, typed, ast.data(node).lhs, diag) else Type.voidType();
+            const explicit_ty = if (ast.data(node).lhs != @import("Ast.zig").null_node) try explicitValueTypeFromTypeExpr(ast, resolved, typed, ast.data(node).lhs, diag) else Type.voidType();
             if (ast.data(node).rhs != @import("Ast.zig").null_node) {
                 const init_ty = try analyzeNode(ast, resolved, typed, ast.data(node).rhs, diag);
+                if (ast.data(node).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(node).rhs) == .float_literal) {
+                    const raw = ast.tokenSlice(ast.mainToken(ast.data(node).rhs));
+                    if (numeric_literal.isBitPattern(raw)) {
+                        if (!explicit_ty.isFloat() and !explicit_ty.isInteger()) {
+                            return diag.failAt(ast.tokens[ast.mainToken(ast.data(node).rhs)].start, "hex bit-pattern literal requires an integer or float destination type", .{});
+                        }
+                        typed.node_types[ast.data(node).rhs] = explicit_ty;
+                    }
+                }
                 if (ast.data(node).lhs == @import("Ast.zig").null_node) break :blk init_ty;
             }
             if (ast.data(node).lhs != @import("Ast.zig").null_node) break :blk explicit_ty;
@@ -368,16 +381,25 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
         .import_decl, .load_decl => Type.init(InternPool.well_known.any_type),
         .struct_type, .union_type, .enum_type => Type.init(InternPool.well_known.type_type),
         .pointer_type => Type.init(try internPointerType(ast, try typeFromTypeExpr(ast, ast.data(node).lhs, diag), diag)),
-        .array_type => Type.init(InternPool.well_known.any_type),
+        .array_type => Type.init(InternPool.well_known.type_type),
         .proc_type => Type.init(try internProcType(ast, node, diag)),
         .string_literal => Type.string(),
         .integer_literal, .char_literal => Type.init(InternPool.well_known.s64_type),
-        .float_literal => Type.init(InternPool.well_known.float32_type),
+        .float_literal => blk: {
+            const raw = ast.tokenSlice(ast.mainToken(node));
+            if (numeric_literal.bitPatternInfo(raw) catch null) |pattern| {
+                break :blk Type.init(if (pattern.inferredFloatBits() == 64) InternPool.well_known.float64_type else InternPool.well_known.float32_type);
+            }
+            break :blk Type.init(InternPool.well_known.float32_type);
+        },
         .bool_literal => Type.boolType(),
         .null_literal => Type.init(try internPointerType(ast, Type.voidType(), diag)),
         .undefined_literal => Type.voidType(),
         .type_of_expr => blk: {
             _ = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+            if (ast.tokens[ast.mainToken(node)].tag == .keyword_type_info) {
+                break :blk Type.init(try internPointerType(ast, Type.init(InternPool.well_known.type_info_type), diag));
+            }
             break :blk Type.init(InternPool.well_known.type_type);
         },
         .is_constant_expr => blk: {
@@ -421,7 +443,11 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             break :blk try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
         },
         .size_of_expr => blk: {
-            _ = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+            const operand = ast.data(node).lhs;
+            switch (ast.tag(operand)) {
+                .pointer_type, .array_type, .proc_type, .type_expr, .struct_type, .union_type, .enum_type => _ = try typeFromTypeExprWithAliases(ast, typed, operand, diag),
+                else => _ = try analyzeNode(ast, resolved, typed, operand, diag),
+            }
             break :blk Type.init(InternPool.well_known.s64_type);
         },
         .unary_expr => blk: {
@@ -431,7 +457,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 .shift_left, .dot_star => break :blk Type.init(InternPool.well_known.s64_type),
                 .dot_dot => break :blk operand_ty,
                 .minus => {
-                    if (!(operand_ty.isInteger() or operand_ty.index == InternPool.well_known.float32_type or operand_ty.index == InternPool.well_known.float64_type)) {
+                    if (!(operand_ty.isInteger() or operand_ty.isFloat() or operand_ty.isVector())) {
                         return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unary '-' requires a numeric operand", .{});
                     }
                     break :blk operand_ty;
@@ -449,10 +475,14 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 },
                 .star => {
                     const operand = ast.data(node).lhs;
+                    if (isTypeValueExpr(ast, typed, operand)) {
+                        _ = try typeFromTypeExprWithAliases(ast, typed, operand, diag);
+                        break :blk Type.init(InternPool.well_known.type_type);
+                    }
                     const pointee = try analyzeNode(ast, resolved, typed, operand, diag);
                     if (ast.tag(operand) == .identifier) {
                         const decl = resolved.local_values.get(operand) orelse @import("Ast.zig").null_node;
-                        if (decl != @import("Ast.zig").null_node and ast.tag(decl) != .var_decl) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "address-of '*' requires a mutable local variable", .{});
+                        if (decl != @import("Ast.zig").null_node and ast.tag(decl) != .var_decl and ast.tag(decl) != .for_stmt) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "address-of '*' requires a mutable local variable", .{});
                     }
                     break :blk Type.init(try internPointerType(ast, pointee, diag));
                 },
@@ -505,7 +535,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                     if ((lhs_ty.isInteger() or lhs_ty.isFloat()) and (rhs_ty.isInteger() or rhs_ty.isFloat())) break :blk if (lhs_ty.isFloat() or rhs_ty.isFloat()) Type.init(InternPool.well_known.float32_type) else lhs_ty;
                     break :blk Type.init(InternPool.well_known.any_type);
                 },
-                .percent => {
+                .percent, .percent_equal => {
                     if ((lhs_ty.isInteger() and rhs_ty.isInteger()) or lhs_ty.isAny() or rhs_ty.isAny() or lhs_ty.isPointer() or rhs_ty.isPointer()) break :blk Type.init(InternPool.well_known.s64_type);
                     return diag.failAt(ast.tokens[ast.mainToken(node)].start, "'%' requires integer operands", .{});
                 },
@@ -529,7 +559,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "Phase 2 binary operator is not implemented yet", .{}),
             };
         },
-        .proc_decl => Type.voidType(),
+        .proc_decl => Type.init(try internProcType(ast, node, diag)),
         .ifx_expr => blk: {
             const cond_ty = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
             if (!cond_ty.isBool() and !cond_ty.isInteger() and !cond_ty.isFloat() and !cond_ty.isString() and !cond_ty.isPointer() and !cond_ty.isAny()) {
@@ -554,12 +584,18 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             if (resolved.local_values.get(node)) |value_node| {
                 if (value_node == @import("Ast.zig").null_node) break :blk Type.init(InternPool.well_known.any_type);
                 if (resolved.loop_indexes.contains(value_node)) break :blk Type.init(InternPool.well_known.s64_type);
-                if (resolved.loop_value_types.get(value_node)) |type_id| break :blk Type.init(type_id);
+                if (resolved.loop_value_types.get(value_node)) |type_id| {
+                    const loop_ty = Type.init(type_id);
+                    if (loop_ty.isAny() and isValidNode(ast, value_node) and ast.tag(value_node) == .for_stmt) {
+                        if (try inferLoopElementType(ast, resolved, typed, value_node, diag)) |inferred| break :blk inferred;
+                    }
+                    break :blk loop_ty;
+                }
                 break :blk switch (ast.tag(value_node)) {
                     .var_decl => if (ast.data(value_node).rhs == using_param_sentinel)
                         Type.init(InternPool.well_known.any_type)
                     else if (ast.data(value_node).lhs != @import("Ast.zig").null_node)
-                        try typeFromTypeExprWithAliases(ast, typed, ast.data(value_node).lhs, diag)
+                        try explicitValueTypeFromTypeExpr(ast, resolved, typed, ast.data(value_node).lhs, diag)
                     else if (typed.inferred_param_types.get(value_node)) |param_ty|
                         param_ty
                     else if (ast.data(value_node).rhs == @import("Ast.zig").null_node)
@@ -572,7 +608,13 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 };
             }
             if (resolved.loop_indexes.contains(node)) break :blk Type.init(InternPool.well_known.s64_type);
-            if (resolved.loop_value_types.get(node)) |type_id| break :blk Type.init(type_id);
+            if (resolved.loop_value_types.get(node)) |type_id| {
+                const loop_ty = Type.init(type_id);
+                if (loop_ty.isAny() and ast.tag(node) == .for_stmt) {
+                    if (try inferLoopElementType(ast, resolved, typed, node, diag)) |inferred| break :blk inferred;
+                }
+                break :blk loop_ty;
+            }
             const name = ast.tokenSlice(ast.mainToken(node));
             if (std.mem.eql(u8, name, "OS")) break :blk Type.string();
             if (std.mem.eql(u8, name, "STDIN_FILENO") or std.mem.eql(u8, name, "STDOUT_FILENO") or std.mem.eql(u8, name, "STDERR_FILENO") or
@@ -669,7 +711,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 _ = try analyzeNode(ast, resolved, typed, @intCast(operands[0]), diag);
                 _ = try analyzeNode(ast, resolved, typed, @intCast(operands[1]), diag);
                 try analyzeBlock(ast, resolved, typed, ast.data(node).rhs, diag);
-            } else if (operands.len == 1 or (operands.len == 2 and (operands[1] & 0x80000000) != 0) or operands.len == 3) {
+            } else if (operands.len == 1 or (operands.len == 2 and (operands[1] & 0x80000000) != 0) or operands.len == 3 or operands.len == 5) {
                 const iterable = @as(NodeIndex, @intCast(operands[0]));
                 _ = try analyzeNode(ast, resolved, typed, iterable, diag);
                 try analyzeBlock(ast, resolved, typed, ast.data(node).rhs, diag);
@@ -711,6 +753,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
             if (ast.data(node).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(node).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(node).lhs)), "Type_Info_Tag")) break :blk Type.init(InternPool.well_known.s64_type);
             const lhs_ty = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
             const field_name = ast.tokenSlice(ast.data(node).rhs);
+            if (try fieldTypeFromExpr(ast, resolved, typed, ast.data(node).lhs, field_name, diag)) |field_ty| break :blk field_ty;
             if (lhs_ty.isAny()) {
                 if (std.mem.eql(u8, field_name, "value_pointer") or std.mem.eql(u8, field_name, "type")) break :blk Type.init(try internPointerType(ast, Type.voidType(), diag));
                 if (std.mem.eql(u8, field_name, "members") or std.mem.eql(u8, field_name, "notes")) break :blk Type.init(InternPool.well_known.type_table_type);
@@ -741,6 +784,15 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 if (isCalendarField(field_name)) break :blk Type.init(InternPool.well_known.s64_type);
                 return diag.failAt(ast.tokens[ast.data(node).rhs].start, "unsupported Calendar field '{s}'", .{field_name});
             }
+            if (lhs_ty.isString()) {
+                if (std.mem.eql(u8, field_name, "count")) break :blk Type.init(InternPool.well_known.s64_type);
+                if (std.mem.eql(u8, field_name, "data")) break :blk Type.init(try internPointerType(ast, Type.init(InternPool.well_known.u8_type), diag));
+            }
+            if (lhs_ty.arrayChild()) |child_ty| {
+                if (std.mem.eql(u8, field_name, "count") or std.mem.eql(u8, field_name, "allocated")) break :blk Type.init(InternPool.well_known.s64_type);
+                if (std.mem.eql(u8, field_name, "data")) break :blk Type.init(try internPointerType(ast, child_ty, diag));
+                if (std.mem.eql(u8, field_name, "allocator")) break :blk Type.init(InternPool.well_known.any_type);
+            }
             if (std.mem.eql(u8, field_name, "count")) break :blk Type.init(InternPool.well_known.s64_type);
             if (std.mem.eql(u8, field_name, "data")) break :blk Type.init(try internPointerType(ast, Type.voidType(), diag));
             if (lhs_ty.index == InternPool.well_known.type_table_type) {
@@ -755,7 +807,18 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
         },
         .index_expr => blk: {
             _ = try analyzeNode(ast, resolved, typed, ast.data(node).rhs, diag);
-            break :blk try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+            const lhs_ty = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+            if (lhs_ty.isString()) break :blk Type.init(InternPool.well_known.u8_type);
+            if (lhs_ty.arrayChild()) |child| break :blk child;
+            if (lhs_ty.isPointer()) {
+                const ip = active_ip orelse break :blk Type.init(InternPool.well_known.any_type);
+                switch (ip.key(lhs_ty.index)) {
+                    .type_pointer => |child| break :blk Type.init(child),
+                    else => {},
+                }
+            }
+            if (lhs_ty.index == InternPool.well_known.vector3_type or lhs_ty.index == InternPool.well_known.vector4_type) break :blk Type.init(InternPool.well_known.float32_type);
+            break :blk lhs_ty;
         },
         .call_expr => blk: {
             const callee = ast.data(node).lhs;
@@ -805,7 +868,13 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 }
                 break :blk Type.voidType();
             }
-            if (ast.tag(callee) != .identifier) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "Phase 1 only supports calls by identifier", .{});
+            if (ast.tag(callee) != .identifier) {
+                const callee_ty = try analyzeNode(ast, resolved, typed, callee, diag);
+                for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                if (callee_ty.isProcedure()) break :blk try procedureTypeReturnType(ast, typed, callee_ty, diag);
+                if (callee_ty.isAny()) break :blk Type.init(InternPool.well_known.any_type);
+                return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "call callee must be a procedure value", .{});
+            }
             const name = ast.tokenSlice(ast.mainToken(callee));
             if (isOperatorIdentifierName(name)) {
                 if (args.len != 1 and args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "operator call expects one or two operands", .{});
@@ -832,8 +901,25 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl and ast.data(decl).rhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).rhs) and ast.tag(ast.data(decl).rhs) == .proc_decl) {
                     return try analyzeProcCall(ast, resolved, typed, ast.data(decl).rhs, args, diag, node);
                 }
+                if (isValidNode(ast, decl) and ast.tag(decl) == .for_stmt) {
+                    const callee_ty = if (resolved.loop_value_types.get(decl)) |type_id| Type.init(type_id) else Type.init(InternPool.well_known.any_type);
+                    for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                    if (callee_ty.isProcedure()) break :blk try procedureTypeReturnType(ast, typed, callee_ty, diag);
+                    break :blk Type.init(InternPool.well_known.any_type);
+                }
                 if (isValidNode(ast, decl) and ast.tag(decl) == .var_decl) {
                     const callee_ty = try analyzeNode(ast, resolved, typed, callee, diag);
+                    if (callee_ty.isAny()) {
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                        break :blk Type.init(InternPool.well_known.any_type);
+                    }
+                    if (callee_ty.isProcedure()) {
+                        for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
+                        break :blk try procedureTypeReturnType(ast, typed, callee_ty, diag);
+                    }
+                }
+                if (isValidNode(ast, decl) and ast.tag(decl) == .identifier and decl != callee) {
+                    const callee_ty = try analyzeNode(ast, resolved, typed, decl, diag);
                     if (callee_ty.isAny()) {
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.any_type);
@@ -850,7 +936,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         break :blk Type.init(InternPool.well_known.any_type);
                     }
-                    if (try varDeclHasProcedureType(ast, typed, decl, diag)) {
+                    if (try varDeclHasProcedureType(ast, resolved, typed, decl, diag)) {
                         for (args) |arg| _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, @intCast(arg)), diag);
                         const proc_ty = try typeFromTypeExprWithAliases(ast, typed, ast.data(decl).lhs, diag);
                         break :blk try procedureTypeReturnType(ast, typed, proc_ty, diag);
@@ -903,6 +989,12 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                         _ = try analyzeNode(ast, resolved, typed, first_arg, diag);
                     for (args[1..]) |arg| {
                         const arg_node: NodeIndex = @intCast(arg);
+                        if (callArgName(ast, arg_node)) |arg_name| {
+                            if (isCallSettingName(arg_name)) {
+                                _ = try analyzeNode(ast, resolved, typed, callArgValueNode(ast, arg_node), diag);
+                                continue;
+                            }
+                        }
                         const arg_ty = if (ast.tag(arg_node) == .unary_expr and ast.tokens[ast.mainToken(arg_node)].tag == .dot_dot)
                             try analyzeNode(ast, resolved, typed, ast.data(arg_node).lhs, diag)
                         else
@@ -1021,9 +1113,17 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for compiler_read_file", .{}),
             } else if (std.mem.eql(u8, name, "read_entire_file")) switch (sym) {
                 .builtin_read_entire_file => {
-                    if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "read_entire_file expects one path string", .{});
+                    if (args.len < 1) return diag.failAt(ast.tokens[ast.mainToken(node)].start, "read_entire_file expects one path string", .{});
                     const path_ty = try analyzeNode(ast, resolved, typed, @intCast(args[0]), diag);
                     if (!(path_ty.isString() or path_ty.isAny())) return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[0]))].start, "read_entire_file path must be a string", .{});
+                    for (args[1..]) |arg_idx| {
+                        const arg: NodeIndex = @intCast(arg_idx);
+                        if (ast.tag(arg) != .assign_stmt) return diag.failAt(ast.tokens[ast.mainToken(arg)].start, "read_entire_file extra options must be named arguments", .{});
+                        const option_name = ast.tokenSlice(ast.mainToken(ast.data(arg).lhs));
+                        if (!std.mem.eql(u8, option_name, "log_errors")) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).lhs)].start, "unsupported read_entire_file option '{s}'", .{option_name});
+                        const option_ty = try analyzeNode(ast, resolved, typed, ast.data(arg).rhs, diag);
+                        if (!(option_ty.isBool() or option_ty.isAny())) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).rhs)].start, "read_entire_file option '{s}' must be a bool", .{option_name});
+                    }
                     break :blk Type.string();
                 },
                 else => return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "internal resolver mismatch for read_entire_file", .{}),
@@ -1331,9 +1431,19 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
                             continue;
                         }
                         const option_name = ast.tokenSlice(ast.mainToken(ast.data(arg).lhs));
-                        if (!std.mem.eql(u8, option_name, "base") and !std.mem.eql(u8, option_name, "minimum_digits")) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).lhs)].start, "unsupported formatInt option '{s}'", .{option_name});
+                        const is_integer_option =
+                            std.mem.eql(u8, option_name, "base") or
+                            std.mem.eql(u8, option_name, "minimum_digits") or
+                            std.mem.eql(u8, option_name, "digits_per_comma") or
+                            std.mem.eql(u8, option_name, "padding");
+                        const is_string_option = std.mem.eql(u8, option_name, "comma_string");
+                        if (!is_integer_option and !is_string_option) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).lhs)].start, "unsupported formatInt option '{s}'", .{option_name});
                         const option_ty = try analyzeNode(ast, resolved, typed, ast.data(arg).rhs, diag);
-                        if (!option_ty.isInteger()) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).rhs)].start, "formatInt option '{s}' must be an integer", .{option_name});
+                        if (is_integer_option) {
+                            if (!(option_ty.isInteger() or option_ty.isAny())) return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).rhs)].start, "formatInt option '{s}' must be an integer", .{option_name});
+                        } else if (!(option_ty.isString() or option_ty.isAny())) {
+                            return diag.failAt(ast.tokens[ast.mainToken(ast.data(arg).rhs)].start, "formatInt option '{s}' must be a string", .{option_name});
+                        }
                     }
                     break :blk Type.string();
                 },
@@ -1600,7 +1710,6 @@ fn analyzeProcCall(ast: *const Ast, resolved: *const Resolved, typed: *Typed, pr
     const variadic = lastParamIsVariadic(ast, params);
     const required = requiredParamCount(ast, params);
     _ = required;
-    _ = variadic;
     _ = call_node;
     var inferred = std.ArrayList(NodeIndex).empty;
     defer inferred.deinit(typed.allocator);
@@ -1630,6 +1739,10 @@ fn analyzeProcCall(ast: *const Ast, resolved: *const Resolved, typed: *Typed, pr
                 matched = true;
                 break;
             }
+            if (!matched and variadic and isCallSettingName(arg_name)) {
+                _ = try analyzeNode(ast, resolved, typed, ast.data(arg_node).rhs, diag);
+                continue;
+            }
             if (!matched) return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "unknown named argument '{s}'", .{arg_name});
             continue;
         }
@@ -1656,6 +1769,76 @@ fn analyzeProcCall(ast: *const Ast, resolved: *const Resolved, typed: *Typed, pr
     }
     for (inferred.items) |param| _ = typed.inferred_param_types.remove(param);
     return if (sig) |s| if (s.return_type == @import("Ast.zig").null_node) Type.init(InternPool.well_known.s64_type) else try typeFromTypeExpr(ast, s.return_type, diag) else Type.voidType();
+}
+
+fn isCallSettingName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "allocator") or std.mem.eql(u8, name, "to_standard_error");
+}
+
+fn inferLoopElementType(ast: *const Ast, resolved: *const Resolved, typed: *Typed, for_node: NodeIndex, diag: Diagnostic) anyerror!?Type {
+    if (!isValidNode(ast, for_node) or ast.tag(for_node) != .for_stmt) return null;
+    const operands = ast.extraSlice(ast.data(for_node).lhs);
+    if (operands.len == 4 and (operands[1] & 0x80000000) == 0) return Type.init(InternPool.well_known.s64_type);
+    if (operands.len == 2 and (operands[1] & 0x80000000) == 0) return Type.init(InternPool.well_known.s64_type);
+    if (operands.len == 0) return null;
+
+    const iterable: NodeIndex = @intCast(operands[0]);
+    const iterable_ty = try analyzeNode(ast, resolved, typed, iterable, diag);
+    if (iterable_ty.arrayChild()) |child| return child;
+    if (iterable_ty.isString()) return Type.init(InternPool.well_known.u8_type);
+    if (!iterable_ty.isAny()) return iterable_ty;
+    return null;
+}
+
+fn fieldTypeFromExpr(ast: *const Ast, resolved: *const Resolved, typed: *Typed, expr: NodeIndex, field_name: []const u8, diag: Diagnostic) anyerror!?Type {
+    if (!isValidNode(ast, expr)) return null;
+    switch (ast.tag(expr)) {
+        .typed_aggregate_literal => {
+            const payload = ast.extraSlice(ast.data(expr).lhs);
+            if (payload.len == 0) return null;
+            return try fieldTypeFromTypeExpr(ast, typed, @intCast(payload[0]), field_name, diag);
+        },
+        .identifier => {
+            const decl = resolved.local_values.get(expr) orelse return null;
+            if (!isValidNode(ast, decl) or ast.tag(decl) != .var_decl) return null;
+            if (ast.data(decl).lhs != @import("Ast.zig").null_node) {
+                if (try fieldTypeFromTypeExpr(ast, typed, ast.data(decl).lhs, field_name, diag)) |field_ty| return field_ty;
+            }
+            if (ast.data(decl).rhs != @import("Ast.zig").null_node and isValidNode(ast, ast.data(decl).rhs) and ast.tag(ast.data(decl).rhs) == .typed_aggregate_literal) {
+                const payload = ast.extraSlice(ast.data(ast.data(decl).rhs).lhs);
+                if (payload.len != 0) return try fieldTypeFromTypeExpr(ast, typed, @intCast(payload[0]), field_name, diag);
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn fieldTypeFromTypeExpr(ast: *const Ast, typed: *Typed, type_expr: NodeIndex, field_name: []const u8, diag: Diagnostic) anyerror!?Type {
+    const container = containerNodeFromTypeExpr(ast, typed, type_expr) orelse return null;
+    if (ast.data(container).rhs == 0) return null;
+    for (ast.extraSlice(ast.data(container).lhs)) |field_idx| {
+        const field: NodeIndex = @intCast(field_idx);
+        if (!isValidNode(ast, field) or ast.tag(field) != .var_decl) continue;
+        if (!std.mem.eql(u8, ast.tokenSlice(ast.mainToken(field)), field_name)) continue;
+        if (ast.data(field).lhs != @import("Ast.zig").null_node) return try typeFromTypeExprWithAliases(ast, typed, ast.data(field).lhs, diag);
+        if (ast.data(field).rhs != @import("Ast.zig").null_node) return Type.init(InternPool.well_known.any_type);
+        return Type.init(InternPool.well_known.any_type);
+    }
+    return null;
+}
+
+fn containerNodeFromTypeExpr(ast: *const Ast, typed: *Typed, type_expr: NodeIndex) ?NodeIndex {
+    if (!isValidNode(ast, type_expr)) return null;
+    return switch (ast.tag(type_expr)) {
+        .struct_type, .union_type => type_expr,
+        .identifier, .type_expr => blk: {
+            const name = ast.tokenSlice(ast.mainToken(type_expr));
+            break :blk typed.struct_type_aliases.get(name);
+        },
+        .call_expr => containerNodeFromTypeExpr(ast, typed, ast.data(type_expr).lhs),
+        else => null,
+    };
 }
 
 fn isCalendarField(name: []const u8) bool {
@@ -1689,6 +1872,12 @@ fn callArgValueNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
     if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) return ast.data(arg).rhs;
     if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .dot_dot) return ast.data(arg).lhs;
     return arg;
+}
+
+fn callArgName(ast: *const Ast, arg: NodeIndex) ?[]const u8 {
+    if (ast.tag(arg) == .assign_stmt and ast.tag(ast.data(arg).lhs) == .identifier) return ast.tokenSlice(ast.mainToken(ast.data(arg).lhs));
+    if (ast.tag(arg) == .binary_expr and ast.tokens[ast.mainToken(arg)].tag == .equal and ast.tag(ast.data(arg).lhs) == .identifier) return ast.tokenSlice(ast.mainToken(ast.data(arg).lhs));
+    return null;
 }
 
 fn isImportAliasField(ast: *const Ast, resolved: *const Resolved, field_access: NodeIndex) bool {
@@ -1795,7 +1984,19 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "String_Builder") or isCompilerMetaTypeName(name);
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "s16") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "String_Builder") or isCompilerMetaTypeName(name);
+}
+
+fn isTypeValueExpr(ast: *const Ast, typed: *Typed, node: NodeIndex) bool {
+    if (node == @import("Ast.zig").null_node) return false;
+    return switch (ast.tag(node)) {
+        .type_expr, .pointer_type, .array_type, .proc_type, .struct_type, .union_type, .enum_type, .type_of_expr => true,
+        .identifier => blk: {
+            const name = ast.tokenSlice(ast.mainToken(node));
+            break :blk isBuiltinTypeName(name) or typed.type_aliases.contains(name);
+        },
+        else => false,
+    };
 }
 
 fn isOperatorIdentifierName(name: []const u8) bool {
@@ -1840,13 +2041,35 @@ fn typeFromTypeExpr(ast: *const Ast, node: NodeIndex, diag: Diagnostic) !Type {
     return typeFromTypeExprWithAliases(ast, null, node, diag);
 }
 
+fn explicitValueTypeFromTypeExpr(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: NodeIndex, diag: Diagnostic) anyerror!Type {
+    if (node != @import("Ast.zig").null_node and ast.tag(node) == .type_of_expr) {
+        return analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
+    }
+    return typeFromTypeExprWithAliases(ast, typed, node, diag);
+}
+
 fn typeFromTypeExprWithAliases(ast: *const Ast, typed: ?*Typed, node: NodeIndex, diag: Diagnostic) !Type {
     if (node == @import("Ast.zig").null_node) return Type.voidType();
     if ((ast.tag(node) == .type_expr or ast.tag(node) == .identifier) and typed != null) {
         const name = ast.tokenSlice(ast.mainToken(node));
+        if (std.mem.eql(u8, name, "Vector3")) return Type.init(InternPool.well_known.vector3_type);
+        if (std.mem.eql(u8, name, "Vector4")) return Type.init(InternPool.well_known.vector4_type);
         if (typed.?.type_aliases.get(name)) |alias_ty| return alias_ty;
     }
-    if (ast.tag(node) == .struct_type or ast.tag(node) == .union_type or ast.tag(node) == .enum_type or ast.tag(node) == .array_type) return Type.init(InternPool.well_known.any_type);
+    if (ast.tag(node) == .struct_type or ast.tag(node) == .union_type or ast.tag(node) == .enum_type or ast.tag(node) == .field_access) return Type.init(InternPool.well_known.any_type);
+    if (ast.tag(node) == .call_expr) {
+        _ = try typeFromTypeExprWithAliases(ast, typed, ast.data(node).lhs, diag);
+        for (ast.extraSlice(ast.data(node).rhs)) |arg_idx| {
+            const arg: NodeIndex = @intCast(arg_idx);
+            switch (ast.tag(arg)) {
+                .assign_stmt => _ = try typeFromTypeExprWithAliases(ast, typed, ast.data(arg).rhs, diag),
+                .type_expr, .identifier, .pointer_type, .array_type, .proc_type, .struct_type, .union_type, .enum_type, .field_access, .call_expr => _ = try typeFromTypeExprWithAliases(ast, typed, arg, diag),
+                else => {},
+            }
+        }
+        return Type.init(InternPool.well_known.any_type);
+    }
+    if (ast.tag(node) == .array_type) return Type.init(try internArrayType(ast, try typeFromTypeExprWithAliases(ast, typed, ast.data(node).rhs, diag), diag));
     if (ast.tag(node) == .pointer_type) return Type.init(try internPointerType(ast, try typeFromTypeExprWithAliases(ast, typed, ast.data(node).lhs, diag), diag));
     if (ast.tag(node) == .proc_type) return Type.init(try internProcType(ast, node, diag));
     if (ast.tag(node) == .type_of_expr) return Type.init(InternPool.well_known.s64_type);
@@ -1856,6 +2079,8 @@ fn typeFromTypeExprWithAliases(ast: *const Ast, typed: ?*Typed, node: NodeIndex,
     if (std.mem.eql(u8, name, "bool")) return Type.boolType();
     if (std.mem.eql(u8, name, "string")) return Type.string();
     if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64")) return Type.init(InternPool.well_known.s64_type);
+    if (std.mem.eql(u8, name, "s8")) return Type.init(InternPool.well_known.s8_type);
+    if (std.mem.eql(u8, name, "s16")) return Type.init(InternPool.well_known.s16_type);
     if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32")) return Type.init(InternPool.well_known.float32_type);
     if (std.mem.eql(u8, name, "float64")) return Type.init(InternPool.well_known.float64_type);
     if (std.mem.eql(u8, name, "s32")) return Type.init(InternPool.well_known.s32_type);
@@ -1880,6 +2105,12 @@ fn internPointerType(ast: *const Ast, child: Type, diag: Diagnostic) !@import("I
     return ip.internPointerType(child.index);
 }
 
+fn internArrayType(ast: *const Ast, child: Type, diag: Diagnostic) !@import("InternPool.zig").Index {
+    const ip = active_ip orelse return diag.failAt(0, "internal error: array type interning without InternPool", .{});
+    _ = ast;
+    return ip.internArrayType(child.index);
+}
+
 fn isValidNode(ast: *const Ast, node: NodeIndex) bool {
     return node != @import("Ast.zig").null_node and node < ast.node_tags.items.len;
 }
@@ -1890,11 +2121,12 @@ fn internProcType(ast: *const Ast, proc_type: NodeIndex, diag: Diagnostic) !@imp
     return ip.internProcType(proc_type);
 }
 
-fn varDeclHasProcedureType(ast: *const Ast, typed: *Typed, decl: NodeIndex, diag: Diagnostic) !bool {
+fn varDeclHasProcedureType(ast: *const Ast, resolved: *const Resolved, typed: *Typed, decl: NodeIndex, diag: Diagnostic) anyerror!bool {
     if (!isValidNode(ast, decl) or ast.tag(decl) != .var_decl) return false;
     const type_node = ast.data(decl).lhs;
     if (type_node == @import("Ast.zig").null_node or !isValidNode(ast, type_node)) return false;
     if (ast.tag(type_node) == .proc_type) return true;
+    if (ast.tag(type_node) == .type_of_expr) return (try analyzeNode(ast, resolved, typed, ast.data(type_node).lhs, diag)).isProcedure();
     return (try typeFromTypeExprWithAliases(ast, typed, type_node, diag)).isProcedure();
 }
 
@@ -1902,11 +2134,21 @@ fn procedureTypeReturnType(ast: *const Ast, typed: *Typed, proc_ty: Type, diag: 
     const ip = active_ip orelse return diag.failAt(0, "internal error: procedure type query without InternPool", .{});
     return switch (ip.key(proc_ty.index)) {
         .type_proc => |proc| blk: {
-            const proc_type_node: NodeIndex = proc.sig_node;
-            if (!isValidNode(ast, proc_type_node) or ast.tag(proc_type_node) != .proc_type) break :blk Type.init(InternPool.well_known.any_type);
-            const ret = ast.data(proc_type_node).rhs;
-            if (ret == @import("Ast.zig").null_node) break :blk Type.voidType();
-            break :blk try typeFromTypeExprWithAliases(ast, typed, ret, diag);
+            const sig_node: NodeIndex = proc.sig_node;
+            if (!isValidNode(ast, sig_node)) break :blk Type.init(InternPool.well_known.any_type);
+            switch (ast.tag(sig_node)) {
+                .proc_type => {
+                    const ret = ast.data(sig_node).rhs;
+                    if (ret == @import("Ast.zig").null_node) break :blk Type.voidType();
+                    break :blk try typeFromTypeExprWithAliases(ast, typed, ret, diag);
+                },
+                .proc_decl => {
+                    const sig = ast.extraSlice(ast.data(sig_node).rhs);
+                    if (sig.len <= 1 or sig[1] == @import("Ast.zig").null_node) break :blk Type.voidType();
+                    break :blk try typeFromTypeExprWithAliases(ast, typed, @intCast(sig[1]), diag);
+                },
+                else => break :blk Type.init(InternPool.well_known.any_type),
+            }
         },
         else => Type.init(InternPool.well_known.any_type),
     };
@@ -1925,6 +2167,635 @@ test "sema allows calling local values inferred as Any" {
         "}\n" ++
         "main :: () {}\n";
     const diag = Diagnostic.init(std.testing.allocator, "local_any_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema infers procedure value calls from procedure declarations" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "square :: (x: int) -> int { return x * x; }\n" ++
+        "main :: () { f := square; y := f(7); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "proc_value_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema calls const aliases to procedure values" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () {\n" ++
+        "  square_poly :: (x: $T) -> T { return x * x; }\n" ++
+        "  p_int :: #procedure_of_call square_poly(0);\n" ++
+        "  y := p_int(7);\n" ++
+        "}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "const_proc_alias_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts allocator call setting on variadic calls" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Any :: #type any;\n" ++
+        "temp: int;\n" ++
+        "sprint :: (format: string, args: ..Any) -> string #foreign;\n" ++
+        "main :: () { s := sprint(\"x=%\", 42 ,, allocator = temp); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "call_setting_allocator.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts read_entire_file log_errors option" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "read_entire_file :: (path: string, log_errors := true) -> (contents: string, success: bool) #foreign;\n" ++
+        "main :: () { data, ok := read_entire_file(\"missing.txt\", log_errors=false); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "read_file_log_errors.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts qualified type names in typed aggregate literals" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Mod :: #import \"Module\";\n" ++
+        "main :: () { value := Mod.Result.{ code = 17 }; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "qualified_typed_aggregate.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{"Module"});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema treats type_of procedure as procedure type in variable declarations" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "some_proc :: (a: int, b: int) -> int { return a + b; }\n" ++
+        "main :: () { p: type_of(some_proc) = some_proc; y := p(3, 4); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "typeof_proc_var.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts calls through named for iterator values" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Func :: #type (int) -> int;\n" ++
+        "main :: () { fns: [] Func; v := 1; for f: fns v = f(v); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "named_for_proc_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts unary minus on vector values" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { a := Vector3.{1, 2, 3}; b := -a; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "vector_unary_minus.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema keeps imported Vector3 alias as vector type" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Vector3 :: struct { x: float; y: float; z: float; }\n" ++
+        "format_v3 :: (v: Vector3) -> string { return \"\"; }\n" ++
+        "main :: () { a := Vector3.{1, 2, 3}; s := format_v3(-a); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "imported_vector_unary_minus.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema indexes strings as bytes" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "hash :: (s: string) -> u64 { h: u64 = 0; h ^= s[0]; return h; }\n" ++
+        "main :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "string_index_byte.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema indexes typed array views by element type" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { stack: [..] int; stack[0] = -stack[0]; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "array_index_element_type.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema types dynamic array metadata fields" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { ra: [..] int; ok := ra.allocated >= ra.count; p := ra.data; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "array_metadata_fields.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts pointer type values built from user type names" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Vec3 :: struct { x: float; y: float; z: float; }\n" ++
+        "accept_type :: ($T: Type) {}\n" ++
+        "main :: () { accept_type(*Vec3); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "pointer_type_value.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema treats type_info as a Type_Info pointer" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { infos: [4] *Type_Info_Integer; infos[0] = xx type_info(s32); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "type_info_pointer.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts polymorphic type instantiations in aggregate heads" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "Box :: struct ($T: Type) { value: T; }\n" ++
+        "main :: () { bi := Box(int).{value=99}; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "poly_type_aggregate_head.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema infers named for iterator element type from typed array literal" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { shifts := int.[0, 1, -1]; for k: shifts { x := -k; } }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "for_iterator_element_type.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema keeps implicit iterable it_index numeric" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { arr := string.[\"a\", \"b\"]; for arr { if it_index > 0 {} s := it; } }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "iterable_it_index_numeric.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema indexes string data as bytes" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "emit :: (s: string) { c := s.data[0]; if c < 32 {} }\n" ++
+        "main :: () {}\n";
+    const diag = Diagnostic.init(std.testing.allocator, "string_data_index_byte.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema calls procedure values through index expressions" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { BinOp :: #type (a: int, b: int) -> int; ops: [..] BinOp; v := ops[0](20, 4); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "indexed_proc_call.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema resolves user struct member field types" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "V2 :: struct { x, y: float; }\n" ++
+        "main :: () { v := V2.{3, -4}; a := -v.x; b := -v.y; }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "struct_field_types.jai", source);
+
+    var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+
+    const slice = tokens.slice();
+    var ast = try parser.parse(std.testing.allocator, source, slice.items(.tag), slice.items(.start), slice.items(.end), diag);
+    defer {
+        std.testing.allocator.free(ast.tokens);
+        ast.deinit();
+    }
+
+    var resolved = try resolve_mod.resolve(std.testing.allocator, &ast, diag, true, &.{});
+    defer resolved.deinit();
+    try resolved.failIfImplicitPlaceholders(diag);
+
+    var ip = try InternPool.init(std.testing.allocator);
+    defer ip.deinit();
+    var typed = try analyze(std.testing.allocator, &ast, &resolved, &ip, diag);
+    defer typed.deinit();
+}
+
+test "sema accepts print to_standard_error call setting" {
+    const lexer = @import("lexer.zig");
+    const parser = @import("parser.zig");
+    const resolve_mod = @import("resolve.zig");
+
+    const source =
+        "main :: () { print(\"bad\", to_standard_error = true); }\n";
+    const diag = Diagnostic.init(std.testing.allocator, "print_stderr_setting.jai", source);
 
     var tokens = try lexer.tokenize(std.testing.allocator, source, diag);
     defer tokens.deinit(std.testing.allocator);

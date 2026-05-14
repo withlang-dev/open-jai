@@ -18,6 +18,7 @@ comptime {
     _ = @import("Type.zig");
     _ = @import("Value.zig");
     _ = @import("diagnostics.zig");
+    _ = @import("numeric_literal.zig");
     _ = @import("target.zig");
     _ = @import("parser.zig");
     _ = @import("resolve.zig");

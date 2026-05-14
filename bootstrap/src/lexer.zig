@@ -3,6 +3,7 @@ const Token = @import("Token.zig").Token;
 const Tag = @import("Token.zig").Tag;
 const token_mod = @import("Token.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
+const numeric_literal = @import("numeric_literal.zig");
 
 pub const TokenList = std.MultiArrayList(Token);
 
@@ -58,7 +59,7 @@ const Lexer = struct {
                 },
                 '*' => try l.add(if (l.match('=')) .star_equal else .star, start),
                 '/' => try l.add(if (l.match('=')) .slash_equal else .slash, start),
-                '%' => try l.add(.percent, start),
+                '%' => try l.add(if (l.match('=')) .percent_equal else .percent, start),
                 '&' => try l.add(if (l.match('&')) .ampersand_ampersand else if (l.match('=')) .ampersand_equal else .ampersand, start),
                 '|' => {
                     if (l.match('|')) {
@@ -156,6 +157,17 @@ const Lexer = struct {
 
     fn multilineStringPayload(l: *Lexer, directive_start: usize) !void {
         while (l.index < l.source.len and (l.source[l.index] == ' ' or l.source[l.index] == '\t')) l.index += 1;
+        while (l.index < l.source.len and l.source[l.index] == ',') {
+            l.index += 1;
+            const option_start = l.index;
+            if (l.index >= l.source.len or !isIdentStart(l.source[l.index])) return l.diag.failAt(option_start, "#string option requires a name after ','", .{});
+            while (l.index < l.source.len and isIdentContinue(l.source[l.index])) l.index += 1;
+            const option = l.source[option_start..l.index];
+            if (!std.mem.eql(u8, option, "cr") and !std.mem.eql(u8, option, "lf")) {
+                return l.diag.failAt(option_start, "unsupported #string option '{s}'", .{option});
+            }
+            while (l.index < l.source.len and (l.source[l.index] == ' ' or l.source[l.index] == '\t')) l.index += 1;
+        }
         if (l.index >= l.source.len or !isIdentStart(l.source[l.index])) return l.diag.failAt(directive_start, "#string requires a delimiter identifier", .{});
         const delim_start = l.index;
         while (l.index < l.source.len and isIdentContinue(l.source[l.index])) l.index += 1;
@@ -202,6 +214,20 @@ const Lexer = struct {
     }
 
     fn number(l: *Lexer, start: usize) !void {
+        if (l.source[start] == '0' and l.index < l.source.len and (l.source[l.index] == 'h' or l.source[l.index] == 'H')) {
+            l.index += 1;
+            while (l.index < l.source.len) {
+                const c = l.source[l.index];
+                if (std.ascii.isHex(c) or c == '_') {
+                    l.index += 1;
+                } else if (std.ascii.isAlphanumeric(c)) {
+                    return l.diag.failAt(l.index, "invalid hex bit-pattern digit '{c}'", .{c});
+                } else break;
+            }
+            _ = numeric_literal.bitPatternInfo(l.source[start..l.index]) catch |err| return l.diag.failAt(start, "invalid hex bit-pattern literal: {s}", .{@errorName(err)});
+            try l.add(.float_literal, start);
+            return;
+        }
         if (l.source[start] == '0' and l.index < l.source.len and (l.source[l.index] == 'x' or l.source[l.index] == 'X')) {
             l.index += 1;
             var digits: usize = 0;
@@ -215,6 +241,7 @@ const Lexer = struct {
                 } else break;
             }
             if (digits == 0) return l.diag.failAt(start, "hex integer literal requires at least one digit", .{});
+            _ = numeric_literal.parse(l.source[start..l.index]) catch |err| return l.diag.failAt(start, "invalid hex integer literal: {s}", .{@errorName(err)});
             try l.add(.integer_literal, start);
             return;
         }
@@ -232,6 +259,7 @@ const Lexer = struct {
                 else break;
             }
             if (digits == 0) return l.diag.failAt(start, "binary integer literal requires at least one digit", .{});
+            _ = numeric_literal.parse(l.source[start..l.index]) catch |err| return l.diag.failAt(start, "invalid binary integer literal: {s}", .{@errorName(err)});
             try l.add(.integer_literal, start);
             return;
         }
@@ -255,6 +283,7 @@ const Lexer = struct {
             if (exp_digits == 0) return l.diag.failAt(start, "float exponent requires at least one digit", .{});
         }
         if (l.index < l.source.len and std.ascii.isAlphabetic(l.source[l.index])) return l.diag.failAt(l.index, "invalid numeric literal suffix", .{});
+        _ = numeric_literal.parse(l.source[start..l.index]) catch |err| return l.diag.failAt(start, "invalid numeric literal: {s}", .{@errorName(err)});
         try l.add(if (is_float) .float_literal else .integer_literal, start);
     }
 
@@ -271,6 +300,7 @@ const Lexer = struct {
             if (exp_digits == 0) return l.diag.failAt(start, "float exponent requires at least one digit", .{});
         }
         if (l.index < l.source.len and std.ascii.isAlphabetic(l.source[l.index])) return l.diag.failAt(l.index, "invalid numeric literal suffix", .{});
+        _ = numeric_literal.parse(l.source[start..l.index]) catch |err| return l.diag.failAt(start, "invalid float literal: {s}", .{@errorName(err)});
         try l.add(.float_literal, start);
     }
 
@@ -325,7 +355,7 @@ test "lexer tokenizes hello sailor" {
 }
 
 test "lexer tokenizes Phase 2 numeric literal formats" {
-    const source = "0xFF 0b00_01 5_069_105 5.97219e24 8.0 3.14159 1e-3 1_000.5_25";
+    const source = "0xFF 0b00_01 0h7fbf_ffff 5_069_105 5.97219e24 8.0 3.14159 1e-3 1_000.5_25";
     const diag = Diagnostic.init(std.testing.allocator, "numbers.jai", source);
     var tokens = try tokenize(std.testing.allocator, source, diag);
     defer tokens.deinit(std.testing.allocator);
@@ -333,6 +363,7 @@ test "lexer tokenizes Phase 2 numeric literal formats" {
     const expected = &[_]Tag{
         .integer_literal,
         .integer_literal,
+        .float_literal,
         .integer_literal,
         .float_literal,
         .float_literal,
@@ -356,6 +387,16 @@ test "lexer tokenizes #string multiline payload and reports unterminated payload
     const bad = "INFO :: #string STRING\n<?xml version=\"1.0\" ?>\n";
     const bad_diag = Diagnostic.init(std.testing.allocator, "bad_multiline_string.jai", bad);
     try std.testing.expectError(error.CompilationFailed, tokenize(std.testing.allocator, bad, bad_diag));
+}
+
+test "lexer tokenizes #string newline option before delimiter" {
+    const source = "CR :: #string,cr END\nline1\nline2\nEND\n";
+    const diag = Diagnostic.init(std.testing.allocator, "multiline_string_option.jai", source);
+    var tokens = try tokenize(std.testing.allocator, source, diag);
+    defer tokens.deinit(std.testing.allocator);
+    const tags = tokens.items(.tag);
+    const expected = &[_]Tag{ .identifier, .colon_colon, .directive_string, .string_literal, .eof };
+    try std.testing.expectEqualSlices(Tag, expected, tags);
 }
 
 test "lexer leaves #string delimiter comma as call argument separator" {

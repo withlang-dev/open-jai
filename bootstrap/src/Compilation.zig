@@ -11,6 +11,7 @@ const vm_mod = @import("vm.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const InternPool = @import("InternPool.zig").InternPool;
 const Tag = @import("Token.zig").Tag;
+const numeric_literal = @import("numeric_literal.zig");
 const using_param_sentinel: u32 = 0xfffffffe;
 
 pub const Options = struct {
@@ -604,7 +605,7 @@ pub const Compilation = struct {
         if (typed.comptime_ints.get(node)) |value| return @floatFromInt(value);
         return switch (ast.tag(node)) {
             .float_literal => try evalComptimeFloatLiteral(ast, typed, node, diag),
-            .integer_literal => @floatFromInt(std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)})),
+            .integer_literal => @floatFromInt(numeric_literal.parseInt(ast.tokenSlice(ast.mainToken(node))) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)})),
             .identifier => blk: {
                 const decl = resolved.local_values.get(node) orelse blk_decl: {
                     const name = ast.tokenSlice(ast.mainToken(node));
@@ -640,11 +641,14 @@ pub const Compilation = struct {
 
     fn evalComptimeFloatLiteral(ast: *const @import("Ast.zig").Ast, typed: *const sema.Typed, node: @import("Ast.zig").NodeIndex, diag: Diagnostic) !f64 {
         const raw = ast.tokenSlice(ast.mainToken(node));
-        if (typed.typeOf(node).index == InternPool.well_known.float64_type) {
-            return std.fmt.parseFloat(f64, raw) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
+        const target_bits: ?u16 = if (typed.typeOf(node).index == InternPool.well_known.float32_type) 32 else if (typed.typeOf(node).index == InternPool.well_known.float64_type) 64 else null;
+        if (numeric_literal.isBitPattern(raw)) {
+            return numeric_literal.parseFloat(raw, target_bits) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid hex bit-pattern literal for #run: {s}", .{@errorName(err)});
         }
-        const value = std.fmt.parseFloat(f32, raw) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
-        return @floatCast(value);
+        if (typed.typeOf(node).index == InternPool.well_known.float64_type) {
+            return numeric_literal.parseFloat(raw, 64) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
+        }
+        return numeric_literal.parseFloat(raw, 32) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid float literal for #run: {s}", .{@errorName(err)});
     }
 
     fn executeRunCall(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, run_node: @import("Ast.zig").NodeIndex, expr: @import("Ast.zig").NodeIndex, diag: Diagnostic) anyerror!vm_mod.Value {
@@ -1034,6 +1038,27 @@ pub const Compilation = struct {
             });
         }
         return try out.toOwnedSlice(allocator);
+    }
+
+    fn decodedRunStringLength(raw: []const u8, diag: Diagnostic, source_offset: u32) !usize {
+        var len: usize = 0;
+        var i: usize = 0;
+        while (i < raw.len) : (i += 1) {
+            if (raw[i] != '\\') {
+                len += 1;
+                continue;
+            }
+            i += 1;
+            if (i >= raw.len) return diag.failAt(source_offset, "unterminated escape in #run string", .{});
+            if (raw[i] == 'x') {
+                if (i + 2 >= raw.len) return diag.failAt(source_offset, "short hex escape in #run string", .{});
+                _ = try hexNibble(raw[i + 1], diag, source_offset);
+                _ = try hexNibble(raw[i + 2], diag, source_offset);
+                i += 2;
+            }
+            len += 1;
+        }
+        return len;
     }
 
     fn hexNibble(ch: u8, diag: Diagnostic, source_offset: u32) !u8 {
@@ -1559,7 +1584,7 @@ pub const Compilation = struct {
         if (node == @import("Ast.zig").null_node or node >= ast.node_tags.items.len) return 0;
         if (typed.comptime_ints.get(node)) |value| return value;
         return switch (ast.tag(node)) {
-            .integer_literal => std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(node)), 10) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)}),
+            .integer_literal => numeric_literal.parseInt(ast.tokenSlice(ast.mainToken(node))) catch |err| return diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid integer literal for #run: {s}", .{@errorName(err)}),
             .bool_literal => if (ast.data(node).lhs != 0) 1 else 0,
             .identifier => blk: {
                 const decl = resolved.local_values.get(node) orelse blk_decl: {
@@ -1596,11 +1621,51 @@ pub const Compilation = struct {
                     .less_equal => if (lhs <= rhs) 1 else 0,
                     .greater_than => if (lhs > rhs) 1 else 0,
                     .greater_equal => if (lhs >= rhs) 1 else 0,
+                    .ampersand_ampersand => if (lhs != 0 and rhs != 0) 1 else 0,
+                    .pipe_pipe, .pipe_pipe_equal => if (lhs != 0 or rhs != 0) 1 else 0,
                     else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported #run integer expression operator", .{}),
                 };
             },
+            .field_access => blk: {
+                const field_name = ast.tokenSlice(ast.data(node).rhs);
+                if (std.mem.eql(u8, field_name, "count")) {
+                    const base = ast.data(node).lhs;
+                    if (ast.tag(base) == .string_literal) {
+                        if (isDirectiveStringLiteral(ast, base)) break :blk @intCast(ast.stringTokenContents(ast.mainToken(base)).len);
+                        break :blk @intCast(try decodedRunStringLength(ast.stringTokenContents(ast.mainToken(base)), diag, ast.tokens[ast.mainToken(base)].start));
+                    }
+                    if (typed.comptime_strings.get(base)) |text| break :blk @intCast(text.len);
+                    if (typed.comptime_bytes.get(base)) |bytes| break :blk @intCast(bytes.len);
+                }
+                return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported #run integer field expression", .{});
+            },
+            .size_of_expr => try evalComptimeSizeOf(ast, ast.data(node).lhs, diag),
             else => return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported #run integer constant expression", .{}),
         };
+    }
+
+    fn evalComptimeSizeOf(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig").NodeIndex, diag: Diagnostic) !i64 {
+        const Ast = @import("Ast.zig");
+        if (node == Ast.null_node or node >= ast.node_tags.items.len) return diag.failAt(0, "size_of operand is not a valid AST node", .{});
+        if (ast.tag(node) == .array_type) {
+            if (ast.data(node).lhs == Ast.null_node) return 8;
+            const len_node = ast.data(node).lhs;
+            const count: i64 = if (ast.tag(len_node) == .integer_literal)
+                std.fmt.parseInt(i64, ast.tokenSlice(ast.mainToken(len_node)), 10) catch
+                    return diag.failAt(ast.tokens[ast.mainToken(len_node)].start, "invalid array length in size_of", .{})
+            else
+                return diag.failAt(ast.tokens[ast.mainToken(len_node)].start, "unsupported non-literal array length in size_of", .{});
+            const elem = try evalComptimeSizeOf(ast, ast.data(node).rhs, diag);
+            return count * elem;
+        }
+        if (ast.tag(node) == .pointer_type) return 8;
+        const text = ast.tokenSlice(ast.mainToken(node));
+        if (std.mem.eql(u8, text, "u8") or std.mem.eql(u8, text, "s8") or std.mem.eql(u8, text, "bool")) return 1;
+        if (std.mem.eql(u8, text, "u16") or std.mem.eql(u8, text, "s16")) return 2;
+        if (std.mem.eql(u8, text, "u32") or std.mem.eql(u8, text, "s32") or std.mem.eql(u8, text, "float") or std.mem.eql(u8, text, "float32")) return 4;
+        if (std.mem.eql(u8, text, "int") or std.mem.eql(u8, text, "u64") or std.mem.eql(u8, text, "s64") or std.mem.eql(u8, text, "float64") or std.mem.eql(u8, text, "Type")) return 8;
+        if (std.mem.eql(u8, text, "string") or std.mem.eql(u8, text, "Any") or std.mem.eql(u8, text, "Allocator")) return 16;
+        return diag.failAt(ast.tokens[ast.mainToken(node)].start, "unsupported size_of operand in compile-time integer expression", .{});
     }
 
     fn findModule(comp: *Compilation, name: []const u8, from_path: []const u8) ![]u8 {
@@ -2065,7 +2130,7 @@ fn parseRunIntLiteral(ast: *const @import("Ast.zig").Ast, node: @import("Ast.zig
     var cleaned = std.ArrayList(u8).empty;
     defer cleaned.deinit(ast.allocator);
     for (raw) |c| if (c != '_') try cleaned.append(ast.allocator, c);
-    return std.fmt.parseInt(i64, cleaned.items, 0) catch diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid compile-time integer literal", .{});
+    return numeric_literal.parseInt(cleaned.items) catch diag.failAt(ast.tokens[ast.mainToken(node)].start, "invalid compile-time integer literal", .{});
 }
 
 test "Compilation reports missing source" {

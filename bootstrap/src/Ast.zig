@@ -78,6 +78,7 @@ pub const Ast = struct {
     extra_data: std.ArrayList(u32) = .empty,
     node_note_tokens: std.AutoHashMapUnmanaged(NodeIndex, ExtraIndex) = .empty,
     node_no_reset: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
+    string_token_overrides: std.AutoHashMapUnmanaged(Token.Index, []const u8) = .empty,
     root: NodeIndex = null_node,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token) Ast {
@@ -91,6 +92,9 @@ pub const Ast = struct {
         ast.extra_data.deinit(ast.allocator);
         ast.node_note_tokens.deinit(ast.allocator);
         ast.node_no_reset.deinit(ast.allocator);
+        var override_it = ast.string_token_overrides.valueIterator();
+        while (override_it.next()) |value| ast.allocator.free(value.*);
+        ast.string_token_overrides.deinit(ast.allocator);
     }
 
     pub fn addNode(ast: *Ast, node_tag: Node.Tag, main_token: Token.Index, node_data_value: Node.Data) !NodeIndex {
@@ -120,6 +124,14 @@ pub const Ast = struct {
         if (note_tokens.len == 0) return;
         const extra = try ast.addExtraSlice(note_tokens);
         try ast.node_note_tokens.put(ast.allocator, node, extra);
+    }
+
+    pub fn putStringTokenOverride(ast: *Ast, token_index: Token.Index, value: []const u8) !void {
+        const owned = try ast.allocator.dupe(u8, value);
+        errdefer ast.allocator.free(owned);
+        if (try ast.string_token_overrides.fetchPut(ast.allocator, token_index, owned)) |old| {
+            ast.allocator.free(old.value);
+        }
     }
 
     pub fn extraSlice(ast: *const Ast, start: ExtraIndex) []const u32 {
@@ -155,6 +167,7 @@ pub const Ast = struct {
     }
 
     pub fn stringTokenContents(ast: *const Ast, token_index: Token.Index) []const u8 {
+        if (ast.string_token_overrides.get(token_index)) |value| return value;
         const text = ast.tokenSlice(token_index);
         if (text.len >= 2 and text[0] == '"') return text[1 .. text.len - 1];
         if (text.len > 0 and text[text.len - 1] == '\n') return text[0 .. text.len - 1];

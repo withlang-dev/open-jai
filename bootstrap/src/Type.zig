@@ -45,8 +45,25 @@ pub const Type = struct {
             else => false,
         };
     }
+    pub fn isArray(t: Type) bool {
+        const ip = @import("Sema.zig").activeInternPoolForTypeQueries() orelse return false;
+        return switch (ip.key(t.index)) {
+            .type_array => true,
+            else => false,
+        };
+    }
+    pub fn arrayChild(t: Type) ?Type {
+        const ip = @import("Sema.zig").activeInternPoolForTypeQueries() orelse return null;
+        return switch (ip.key(t.index)) {
+            .type_array => |array| Type.init(array.child),
+            else => null,
+        };
+    }
     pub fn isFloat(t: Type) bool {
         return t.index == InternPool.well_known.float32_type or t.index == InternPool.well_known.float64_type;
+    }
+    pub fn isVector(t: Type) bool {
+        return t.index == InternPool.well_known.vector3_type or t.index == InternPool.well_known.vector4_type;
     }
     pub fn isProcedure(t: Type) bool {
         const ip = @import("Sema.zig").activeInternPoolForTypeQueries() orelse return false;

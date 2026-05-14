@@ -7,6 +7,7 @@ const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
 const NodeIndex = @import("Ast.zig").NodeIndex;
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
+const numeric_literal = @import("numeric_literal.zig");
 
 const TestKind = union(enum) {
     dynamic_compile_success: []const u8,
@@ -837,15 +838,7 @@ fn evalBinary(ast: *const Ast, node: NodeIndex) anyerror!EvalValue {
 }
 
 fn parseIntLiteral(raw: []const u8) !i64 {
-    var buf: [128]u8 = undefined;
-    var len: usize = 0;
-    for (raw) |c| {
-        if (c == '_') continue;
-        if (len >= buf.len) return error.IntLiteralTooLong;
-        buf[len] = c;
-        len += 1;
-    }
-    return try std.fmt.parseInt(i64, buf[0..len], 0);
+    return try numeric_literal.parseInt(raw);
 }
 
 fn valueInt(value: EvalValue) !i64 {

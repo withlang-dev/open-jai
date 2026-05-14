@@ -9,7 +9,8 @@
 #import "System";
 
 Apollo_Time :: struct {
-    low: s64;
+    low: u64;
+    high: s64;
 }
 
 Allocator_Mode :: enum {
@@ -36,6 +37,9 @@ Temporary_Storage :: struct {
 Format_Int :: struct {
     base: s64;
     minimum_digits: s64;
+    digits_per_comma: s64;
+    comma_string: string;
+    padding: u8;
 }
 
 Format_Float :: struct {
@@ -129,12 +133,20 @@ NewArray :: (count: s64, $T: Type, allocator := context.allocator, alignment := 
 
 push_allocator :: (allocator: Allocator) #foreign;
 reset_temporary_storage :: () #foreign;
+auto_release_temp :: () #foreign;
 talloc_string :: (count: s64) -> string #foreign;
 make_leak_report :: () -> string #foreign;
 log_leak_report :: () #foreign;
 get_capabilities :: (allocator: Allocator) -> (caps: bool, name: string) #foreign;
 
-formatInt :: (value: s64, base := 10, minimum_digits := 0) -> string #foreign;
+formatInt :: (
+    value: s64,
+    base := 10,
+    minimum_digits := 0,
+    digits_per_comma := 0,
+    comma_string := ",",
+    padding := #char "0"
+) -> string #foreign;
 formatFloat :: (value: float64, width := 0, trailing_width := 6, zero_removal := true, mode := 0) -> string #foreign;
 formatStruct :: (
     value: Any,
@@ -161,6 +173,7 @@ to_float64_seconds :: (time: Apollo_Time) -> float64 #foreign;
 get_field :: (info: *Type_Info_Struct, name: string) -> *Type_Info_Struct_Member #foreign;
 type_to_string :: (type: Type) -> string #foreign;
 enum_range :: ($T: Type) -> (low: s64, high: s64) #foreign;
+enum_values_as_enum :: ($T: Type) -> [] T #foreign;
 enum_values_as_s64 :: ($T: Type) -> [] s64 #foreign;
 enum_names :: ($T: Type) -> [] string #foreign;
 
@@ -169,7 +182,9 @@ array_add :: (array: *[..]$T, value: T) -> *T #foreign;
 array_free :: (array: [..]$T) #foreign;
 array_reset :: (array: *[..]$T) #foreign;
 array_reserve :: (array: *[..]$T, capacity: s64) #foreign;
+array_insert_at :: (array: *[..]$T, value: T, index: s64) #foreign;
 array_ordered_remove_by_index :: (array: *[..]$T, index: s64) #foreign;
+array_unordered_remove_by_index :: (array: *[..]$T, index: s64) #foreign;
 array_find :: (array: [..]$T, value: T) -> bool #foreign;
 array_copy :: (array: [..]$T) -> [..]T #foreign;
 peek :: (array: [..]$T) -> T #foreign;

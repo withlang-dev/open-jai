@@ -47,6 +47,7 @@ pub const InternPool = struct {
         type_table,
         type_info,
         type_vector4,
+        type_array: ArrayType,
         type_proc: ProcType,
         type_pointer: Index,
         value_string: u32,
@@ -55,6 +56,7 @@ pub const InternPool = struct {
     };
 
     pub const IntType = struct { signed: bool, bits: u16 };
+    pub const ArrayType = struct { child: Index };
     pub const ProcType = struct { sig_node: u32 };
 
     pub fn init(allocator: std.mem.Allocator) !InternPool {
@@ -109,6 +111,16 @@ pub const InternPool = struct {
         };
         const idx: Index = @intCast(ip.keys.items.len);
         try ip.keys.append(ip.allocator, .{ .type_pointer = child });
+        return idx;
+    }
+
+    pub fn internArrayType(ip: *InternPool, child: Index) !Index {
+        for (ip.keys.items, 0..) |existing_key, i| switch (existing_key) {
+            .type_array => |existing| if (existing.child == child) return @intCast(i),
+            else => {},
+        };
+        const idx: Index = @intCast(ip.keys.items.len);
+        try ip.keys.append(ip.allocator, .{ .type_array = .{ .child = child } });
         return idx;
     }
 

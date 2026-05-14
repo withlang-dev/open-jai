@@ -483,6 +483,39 @@ pub fn resolve(allocator: std.mem.Allocator, ast: *const Ast, diag: Diagnostic, 
     }
     for (root_decls) |decl_idx| {
         const decl: NodeIndex = @intCast(decl_idx);
+        switch (ast.tag(decl)) {
+            .const_decl => {
+                if (ast.data(decl).lhs != @import("Ast.zig").null_node) {
+                    try resolveNode(ast, &r, ast.data(decl).lhs, 0, diag);
+                }
+            },
+            .var_decl => {
+                if (ast.data(decl).lhs != @import("Ast.zig").null_node) {
+                    try resolveNode(ast, &r, ast.data(decl).lhs, 0, diag);
+                }
+                if (ast.data(decl).rhs != @import("Ast.zig").null_node and ast.data(decl).rhs != using_param_sentinel) {
+                    try resolveNode(ast, &r, ast.data(decl).rhs, 0, diag);
+                }
+            },
+            .stmt_list => {
+                for (ast.extraSlice(ast.data(decl).lhs)) |child_idx| {
+                    const child: NodeIndex = @intCast(child_idx);
+                    if (child >= ast.node_tags.items.len) continue;
+                    switch (ast.tag(child)) {
+                        .var_decl => {
+                            if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, &r, ast.data(child).lhs, 0, diag);
+                            if (ast.data(child).rhs != @import("Ast.zig").null_node and ast.data(child).rhs != using_param_sentinel) try resolveNode(ast, &r, ast.data(child).rhs, 0, diag);
+                        },
+                        .const_decl => if (ast.data(child).lhs != @import("Ast.zig").null_node) try resolveNode(ast, &r, ast.data(child).lhs, 0, diag),
+                        else => {},
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+    for (root_decls) |decl_idx| {
+        const decl: NodeIndex = @intCast(decl_idx);
         if (ast.tag(decl) == .proc_decl) try resolveProc(ast, &r, decl, proc_files.get(decl) orelse 0, diag);
         if (ast.tag(decl) == .run_expr or ast.tag(decl) == .meta_stmt) try resolveNode(ast, &r, decl, 0, diag);
     }
@@ -582,6 +615,8 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
             try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
             if (!already_declared) try declared.append(r.allocator, name);
             try predeclared_nodes.put(stmt, {});
+        } else if (ast.tag(stmt) == .meta_stmt and ast.tokens[ast.mainToken(stmt)].tag == .directive_insert) {
+            try predeclareInsertedStringDecls(ast, r, stmt, &declared, &restores);
         }
     }
 
@@ -694,6 +729,48 @@ fn isUsingVarDecl(ast: *const Ast, node: NodeIndex) bool {
 fn containsName(names: []const []const u8, needle: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, needle)) return true;
     return false;
+}
+
+fn predeclareInsertedStringDecls(ast: *const Ast, r: *Resolved, stmt: NodeIndex, declared: *std.ArrayList([]const u8), restores: *std.ArrayList(BindingRestore)) !void {
+    const text = insertedStringText(ast, r, stmt) orelse return;
+    var line_it = std.mem.splitScalar(u8, text, '\n');
+    while (line_it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0 or std.mem.startsWith(u8, line, "//")) continue;
+        const name_end = std.mem.indexOf(u8, line, ":=") orelse std.mem.indexOf(u8, line, "::") orelse continue;
+        const raw_name = std.mem.trim(u8, line[0..name_end], " \t");
+        if (!isSimpleInsertedIdentifier(raw_name)) continue;
+        const name = try r.normalizedName(raw_name);
+        if (containsName(declared.items, name)) continue;
+        const old = try r.symbols.fetchPut(r.allocator, name, .{ .const_value = @import("Ast.zig").null_node });
+        try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
+        try declared.append(r.allocator, name);
+    }
+}
+
+fn insertedStringText(ast: *const Ast, r: *const Resolved, stmt: NodeIndex) ?[]const u8 {
+    if (ast.tag(stmt) != .meta_stmt or ast.tokens[ast.mainToken(stmt)].tag != .directive_insert) return null;
+    const meta = ast.data(stmt).lhs;
+    if (meta == @import("Ast.zig").null_node or ast.tag(meta) != .meta_expr) return null;
+    const operand = ast.data(meta).lhs;
+    if (operand == @import("Ast.zig").null_node or ast.tag(operand) != .identifier) return null;
+    const name = ast.tokenSlice(ast.mainToken(operand));
+    const sym = r.lookup(name) orelse return null;
+    const value_node = switch (sym) {
+        .const_value => |node| node,
+        else => return null,
+    };
+    if (value_node == @import("Ast.zig").null_node or ast.tag(value_node) != .string_literal) return null;
+    return ast.stringTokenContents(ast.mainToken(value_node));
+}
+
+fn isSimpleInsertedIdentifier(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
+    for (name[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+    }
+    return true;
 }
 
 fn restoreBindings(r: *Resolved, restores: []const BindingRestore) void {
@@ -813,6 +890,7 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             if (range.len == 4 and (range[1] & 0x80000000) != 0) {
                 try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
+                try r.loop_indexes.put(r.allocator, node, 1);
                 const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
                 const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
                 const iter_name = if (range[2] != 0 and (range[2] & 0x80000000) != 0) ast.tokenSlice(range[2] & 0x7fffffff) else "";
@@ -830,22 +908,29 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
                     }
                 }
                 try resolveBlock(ast, r, ast.data(node).rhs, file_id, diag);
-            } else if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3) {
+            } else if (range.len == 1 or (range.len == 2 and (range[1] & 0x80000000) != 0) or range.len == 3 or range.len == 5) {
                 try resolveNode(ast, r, @intCast(range[0]), file_id, diag);
                 try r.loop_value_types.put(r.allocator, node, @import("InternPool.zig").InternPool.well_known.any_type);
+                try r.loop_indexes.put(r.allocator, node, 1);
                 const old_it_index = r.symbols.fetchPut(r.allocator, "it_index", .{ .const_value = node }) catch |err| return err;
                 const old_it = r.symbols.fetchPut(r.allocator, "it", .{ .const_value = node }) catch |err| return err;
-                const iter_name = if (range.len >= 2 and (range[1] & 0x80000000) != 0) ast.tokenSlice(range[1] & 0x7fffffff) else "";
+                const iter_name = if (range.len == 5 and range[2] != 0 and (range[2] & 0x80000000) != 0)
+                    ast.tokenSlice(range[2] & 0x7fffffff)
+                else if (range.len >= 2 and (range[1] & 0x80000000) != 0)
+                    ast.tokenSlice(range[1] & 0x7fffffff)
+                else
+                    "";
                 const old_iter = if (iter_name.len != 0) r.symbols.fetchPut(r.allocator, iter_name, .{ .const_value = node }) catch |err| return err else null;
-                const index_name = if (range.len == 3) ast.tokenSlice(range[2]) else "";
-                const old_index = if (range.len == 3) r.symbols.fetchPut(r.allocator, index_name, .{ .const_value = node }) catch |err| return err else null;
+                const index_tok = if (range.len == 5) range[3] else if (range.len == 3) range[2] else 0;
+                const index_name = if (index_tok != 0) ast.tokenSlice(index_tok) else "";
+                const old_index = if (index_tok != 0) r.symbols.fetchPut(r.allocator, index_name, .{ .const_value = node }) catch |err| return err else null;
                 defer {
                     if (old_it_index) |entry| r.symbols.put(r.allocator, "it_index", entry.value) catch unreachable else _ = r.symbols.remove("it_index");
                     if (old_it) |entry| r.symbols.put(r.allocator, "it", entry.value) catch unreachable else _ = r.symbols.remove("it");
                     if (iter_name.len != 0) {
                         if (old_iter) |entry| r.symbols.put(r.allocator, iter_name, entry.value) catch unreachable else _ = r.symbols.remove(iter_name);
                     }
-                    if (range.len == 3) {
+                    if (index_tok != 0) {
                         if (old_index) |entry| r.symbols.put(r.allocator, index_name, entry.value) catch unreachable else _ = r.symbols.remove(index_name);
                     }
                 }
@@ -994,7 +1079,7 @@ fn isBacktickedIdentifier(ast: *const Ast, node: NodeIndex) bool {
 }
 
 fn isBuiltinTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+    return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "s16") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
 }
 
 fn isOperatorIdentifierName(name: []const u8) bool {

@@ -742,11 +742,11 @@ pub const VM = struct {
                     }
                     const lhs = switch (regs[inst.arg1]) {
                         .int => |v| v,
-                        else => return diag.failAt(0, "VM {s} requires integer lhs, got {s}", .{ @tagName(inst.opcode), @tagName(regs[inst.arg1]) }),
+                        else => return diag.failAt(inst.source_node, "VM {s} requires integer lhs, got {s} in {s} at instruction {d} (lhs r{d}, rhs r{d})", .{ @tagName(inst.opcode), @tagName(regs[inst.arg1]), proc.name, ip - 1, inst.arg1, inst.arg2 }),
                     };
                     const rhs = switch (regs[inst.arg2]) {
                         .int => |v| v,
-                        else => return diag.failAt(0, "VM {s} requires integer rhs, got {s}", .{ @tagName(inst.opcode), @tagName(regs[inst.arg2]) }),
+                        else => return diag.failAt(inst.source_node, "VM {s} requires integer rhs, got {s} in {s} at instruction {d} (lhs r{d}, rhs r{d})", .{ @tagName(inst.opcode), @tagName(regs[inst.arg2]), proc.name, ip - 1, inst.arg1, inst.arg2 }),
                     };
                     regs[inst.dest] = .{ .int = switch (inst.opcode) {
                         .mul_int => lhs * rhs,
@@ -1035,6 +1035,8 @@ pub const VM = struct {
                         .{ .int = try vm.loadByte(ptr, diag) }
                     else if (inst.opcode == .load_ptr_float)
                         .{ .float = if (inst.arg2 == 4) @as(f64, @floatCast(try vm.loadF32(ptr, diag))) else @bitCast(try vm.loadU64(ptr, diag)) }
+                    else if (integerAccessWidth(inst.arg2) != 0)
+                        .{ .int = try vm.loadSizedInt(ptr, inst.arg2, diag) }
                     else
                         .{ .int = @bitCast(try vm.loadU64(ptr, diag)) };
                 },
@@ -1046,10 +1048,13 @@ pub const VM = struct {
                 },
                 .ptr_offset_reg => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM ptr_offset_reg register out of range", .{});
-                    var ptr = try registerPointer(regs[inst.arg1], diag, "ptr_offset_reg");
+                    var ptr = switch (regs[inst.arg1]) {
+                        .ptr => |ptr| ptr,
+                        else => return diag.failAt(inst.source_node, "VM ptr_offset_reg requires pointer base, got {s} in {s} at instruction {d} (base r{d}, offset r{d})", .{ @tagName(regs[inst.arg1]), proc.name, ip - 1, inst.arg1, inst.arg2 }),
+                    };
                     const offset = switch (regs[inst.arg2]) {
                         .int => |v| v,
-                        else => return diag.failAt(0, "VM ptr_offset_reg requires integer offset", .{}),
+                        else => return diag.failAt(inst.source_node, "VM ptr_offset_reg requires integer offset, got {s} in {s} at instruction {d} (base r{d}, offset r{d})", .{ @tagName(regs[inst.arg2]), proc.name, ip - 1, inst.arg1, inst.arg2 }),
                     };
                     if (offset < 0) return diag.failAt(0, "VM ptr_offset_reg does not support negative offsets yet", .{});
                     ptr.offset += @intCast(offset);
@@ -1129,7 +1134,7 @@ pub const VM = struct {
                 },
                 .array_count => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_count register out of range", .{});
-                    regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], @intCast(inst.arg3), diag)) };
+                    regs[inst.dest] = .{ .int = @intCast(try vm.arrayCount(regs[inst.arg1], @intCast(inst.arg3), diag, inst.source_node, proc.name, ip - 1, inst.arg1)) };
                 },
                 .array_data => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM array_data register out of range", .{});
@@ -1734,7 +1739,14 @@ pub const VM = struct {
                 },
                 .store_ptr => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr register out of range", .{});
-                    try vm.storeRegister(try registerPointer(regs[inst.dest], diag, "store_ptr destination"), regs[inst.arg1], diag);
+                    const ptr = switch (regs[inst.dest]) {
+                        .ptr => |ptr| ptr,
+                        else => return diag.failAt(inst.source_node, "VM store_ptr destination requires pointer value, got {s} in {s} at instruction {d} (dest r{d}, arg r{d})", .{ @tagName(regs[inst.dest]), proc.name, ip - 1, inst.dest, inst.arg1 }),
+                    };
+                    if (integerAccessWidth(inst.arg2) != 0)
+                        try vm.storeSizedInt(ptr, regs[inst.arg1], inst.arg2, diag)
+                    else
+                        try vm.storeRegister(ptr, regs[inst.arg1], diag);
                 },
                 .store_ptr_byte => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len) return diag.failAt(0, "VM store_ptr_byte register out of range", .{});
@@ -3082,7 +3094,7 @@ pub const VM = struct {
     }
 
     fn builtinTypeInfoTag(name: []const u8) ?i64 {
-        if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64")) return 1;
+        if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s16") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64")) return 1;
         if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64")) return 2;
         if (std.mem.eql(u8, name, "bool")) return 3;
         if (std.mem.eql(u8, name, "string")) return 9;
@@ -3242,6 +3254,51 @@ pub const VM = struct {
         (try vm.blockSlice(ptr, 1, diag))[0] = value;
     }
 
+    fn loadSizedInt(vm: *VM, ptr: Pointer, flags: u32, diag: Diagnostic) !i64 {
+        const width = integerAccessWidth(flags);
+        const signed = integerAccessIsSigned(flags);
+        return switch (width) {
+            1 => blk: {
+                const value: u8 = @intCast(try vm.loadByte(ptr, diag));
+                break :blk if (signed) @as(i64, @as(i8, @bitCast(value))) else @as(i64, value);
+            },
+            2 => blk: {
+                const bytes = try vm.blockSlice(ptr, 2, diag);
+                const raw = std.mem.readInt(u16, bytes[0..2], .little);
+                break :blk if (signed) @as(i64, @as(i16, @bitCast(raw))) else @as(i64, raw);
+            },
+            4 => blk: {
+                const bytes = try vm.blockSlice(ptr, 4, diag);
+                const raw = std.mem.readInt(u32, bytes[0..4], .little);
+                break :blk if (signed) @as(i64, @as(i32, @bitCast(raw))) else @as(i64, raw);
+            },
+            8 => @bitCast(try vm.loadU64(ptr, diag)),
+            else => diag.failAt(0, "VM unsupported integer load width {d}", .{width}),
+        };
+    }
+
+    fn storeSizedInt(vm: *VM, ptr: Pointer, value: RegisterValue, flags: u32, diag: Diagnostic) !void {
+        const int_value: i64 = switch (value) {
+            .int => |v| v,
+            .bool => |v| if (v) 1 else 0,
+            else => return diag.failAt(0, "VM sized integer store requires integer-compatible source", .{}),
+        };
+        const bits: u64 = @bitCast(int_value);
+        switch (integerAccessWidth(flags)) {
+            1 => try vm.storeByte(ptr, @truncate(bits), diag),
+            2 => {
+                const bytes = try vm.blockSlice(ptr, 2, diag);
+                std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little);
+            },
+            4 => {
+                const bytes = try vm.blockSlice(ptr, 4, diag);
+                std.mem.writeInt(u32, bytes[0..4], @truncate(bits), .little);
+            },
+            8 => std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), bits, .little),
+            else => return diag.failAt(0, "VM unsupported integer store width {d}", .{integerAccessWidth(flags)}),
+        }
+    }
+
     fn storeStringSlot(vm: *VM, ptr: Pointer, text: []const u8, diag: Diagnostic) !void {
         try vm.string_slots.put(vm.allocator, pointerKey(ptr), text);
         std.mem.writeInt(u64, try vm.blockArray8(ptr, diag), 0, .little);
@@ -3288,9 +3345,9 @@ pub const VM = struct {
         }
     }
 
-    fn arrayCount(vm: *VM, value: RegisterValue, elem_size_hint: usize, diag: Diagnostic) !usize {
+    fn arrayCount(vm: *VM, value: RegisterValue, elem_size_hint: usize, diag: Diagnostic, source_node: u32, proc_name: []const u8, instruction_index: usize, arg_reg: u32) !usize {
         return switch (value) {
-            .bytes => |bytes| bytes.len,
+            .bytes => |bytes| if (elem_size_hint > 1) bytes.len / elem_size_hint else bytes.len,
             .ptr => |ptr| if (vm.dynamicArrayIndexForPointer(ptr)) |array_index|
                 vm.dynamic_arrays.items[array_index].elems.items.len
             else if (elem_size_hint != 0)
@@ -3300,7 +3357,7 @@ pub const VM = struct {
             .code_nodes => |nodes| nodes.len,
             .code_notes => |notes| notes.len,
             .code_args => |args| args.len,
-            else => diag.failAt(0, "VM array_count requires array-compatible value", .{}),
+            else => diag.failAt(source_node, "VM array_count requires array-compatible value, got {s} in {s} at instruction {d} (arg r{d})", .{ @tagName(value), proc_name, instruction_index, arg_reg }),
         };
     }
 
@@ -5336,6 +5393,14 @@ fn truncateIntForType(value: i64, type_id: u32) i64 {
         9 => @as(i64, @intCast(@as(u32, @truncate(bits)))),
         else => value,
     };
+}
+
+fn integerAccessWidth(flags: u32) u32 {
+    return flags & 0xff;
+}
+
+fn integerAccessIsSigned(flags: u32) bool {
+    return (flags & 0x80000000) != 0;
 }
 
 fn readIntLittle(bytes: []const u8) i64 {

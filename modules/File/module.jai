@@ -34,7 +34,7 @@ write_entire_file :: (path: string, contents: string) -> bool {
     return true;
 }
 
-read_entire_file :: (path: string) -> (contents: string, success: bool) {
+read_entire_file :: (path: string, log_errors := true) -> (contents: string, success: bool) {
     return "", false;
 }
 
@@ -61,4 +61,3 @@ file_write :: (file: *File, data: string) -> bool {
 file_read :: (file: File, buffer: *u8, byte_count: s64) -> bool {
     return true;
 }
-

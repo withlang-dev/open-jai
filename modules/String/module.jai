@@ -25,8 +25,32 @@ compare_strings :: (a: string, b: string) -> int #foreign;
 equal :: (a: string, b: string) -> bool #foreign;
 contains :: (haystack: string, needle: string) -> bool #foreign;
 begins_with :: (haystack: string, prefix: string) -> bool #foreign;
+starts_with :: (haystack: string, prefix: string) -> bool {
+    return begins_with(haystack, prefix);
+}
+ends_with :: (haystack: string, suffix: string) -> bool {
+    if suffix.count > haystack.count return false;
+    start := haystack.count - suffix.count;
+    for i: 0..suffix.count-1 {
+        if haystack[start + i] != suffix[i] return false;
+    }
+    return true;
+}
 split :: (value: string, separator: string) -> [] string #foreign;
 trim :: (value: string) -> string #foreign;
+trim :: (value: string, cutset: string) -> string {
+    return trim_right(trim_left(value, cutset), cutset);
+}
+trim_left :: (value: string, cutset := " \t\r\n") -> string {
+    start := 0;
+    while start < value.count && is_any(value[start], cutset) start += 1;
+    return slice(value, start, value.count - start);
+}
+trim_right :: (value: string, cutset := " \t\r\n") -> string {
+    end := value.count;
+    while end > 0 && is_any(value[end - 1], cutset) end -= 1;
+    return slice(value, 0, end);
+}
 join :: (values: ..string, separator := "", before_first := false, after_last := false) -> string #foreign;
 find_index_from_left :: (haystack: string, needle: string) -> int #foreign;
 find_index_from_right :: (haystack: string, needle: string) -> int #foreign;
@@ -71,4 +95,24 @@ is_any :: (c: int, set: string) -> bool {
     }
 
     return false;
+}
+
+to_upper_in_place :: (value: string) {
+    for i: 0..value.count-1 value.data[i] = cast(u8) to_upper(value.data[i]);
+}
+
+to_lower_in_place :: (value: string) {
+    for i: 0..value.count-1 value.data[i] = cast(u8) to_lower(value.data[i]);
+}
+
+to_upper_copy :: (value: string) -> string {
+    result := copy_string(value);
+    to_upper_in_place(result);
+    return result;
+}
+
+to_lower_copy :: (value: string) -> string {
+    result := copy_string(value);
+    to_lower_in_place(result);
+    return result;
 }
