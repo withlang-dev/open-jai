@@ -916,6 +916,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     _ = c.LLVMBuildStore(env.builder, try runtimeStringValue(env, registers[inst.arg1], diag), registers[inst.dest].llvm_value);
                 } else if (registers[inst.dest].kind == .pointer_addr) {
                     _ = c.LLVMBuildStore(env.builder, try pointerValue(env, registers[inst.arg1], diag, "pointer assignment"), registers[inst.dest].llvm_value);
+                } else if (registers[inst.dest].kind == .float_addr) {
+                    switch (registers[inst.arg1].kind) {
+                        .float, .float_addr => _ = c.LLVMBuildStore(env.builder, try valueAsFloat(env, registers[inst.arg1], diag), registers[inst.dest].llvm_value),
+                        else => registers[inst.dest] = registers[inst.arg1],
+                    }
                 } else {
                     registers[inst.dest] = registers[inst.arg1];
                 }
@@ -2744,7 +2749,7 @@ fn valueAsBool(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMVal
         .undefined_string => c.LLVMConstInt(c.LLVMInt1TypeInContext(env.context), 0, 0),
         .float => c.LLVMBuildFCmp(env.builder, c.LLVMRealONE, value.llvm_value, c.LLVMConstReal(env.llvm_f64, 0.0), "float_nonzero"),
         .float_addr => c.LLVMBuildFCmp(env.builder, c.LLVMRealONE, c.LLVMBuildLoad2(env.builder, env.llvm_f64, value.llvm_value, "load_float_bool"), c.LLVMConstReal(env.llvm_f64, 0.0), "float_nonzero"),
-        else => diag.failAt(0, "expected bool-compatible register", .{}),
+        else => diag.failAt(0, "expected bool-compatible register in proc '{s}' ({d}), got {s}", .{ env.current_proc_name, env.current_proc_index, @tagName(value.kind) }),
     };
 }
 

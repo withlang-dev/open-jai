@@ -52,6 +52,7 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         const helper_index: u32 = @intCast(program.procs.items.len);
         var helper_ctx = GenContext{ .ast = ast, .program = &program, .proc = &helper, .resolved = resolved, .typed = typed, .allow_root_proc_calls = true, .current_proc_node = decl, .current_proc_index = helper_index };
         defer helper_ctx.deinit();
+        helper_ctx.return_type_node = if (procSignature(ast, decl)) |sig| sig.return_type else @import("Ast.zig").null_node;
         try helper_ctx.bindProcParams(decl, helper.param_count, diag);
         try helper_ctx.genBlock(ast.data(decl).lhs, diag);
         try helper.instructions.append(allocator, .{ .opcode = .ret_void });
@@ -64,6 +65,7 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         const main_idx: u32 = @intCast(program.procs.items.len);
         var ctx = GenContext{ .ast = ast, .program = &program, .proc = &proc, .resolved = resolved, .typed = typed, .allow_root_proc_calls = true, .current_proc_node = main_proc, .current_proc_index = main_idx };
         defer ctx.deinit();
+        ctx.return_type_node = if (procSignature(ast, main_proc)) |sig| sig.return_type else @import("Ast.zig").null_node;
         try ctx.bindProcParams(main_proc, proc.param_count, diag);
         try ctx.genBlock(ast.data(main_proc).lhs, diag);
         try proc.instructions.append(allocator, .{ .opcode = .ret_void });
@@ -1123,6 +1125,10 @@ const GenContext = struct {
                     return old_reg;
                 }
                 if (ctx.resolved.local_values.get(lhs)) |decl| {
+                    if (try genUsingFallbackFieldAddress(ctx, lhs, decl, diag)) |addr| {
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = addr, .arg1 = result, .source_node = source_node });
+                        return result;
+                    }
                     if (ctx.decl_registers.get(decl)) |old_reg| {
                         if (ctx.decl_addresses.get(decl)) |addr| {
                             const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, lhs, diag) orelse "int";
@@ -3912,11 +3918,22 @@ const GenContext = struct {
                     const init_is_addressable_scalar = isAddressableScalarTypeWord(init_first_word) or
                         (init_type_text != null and try typeTextIsAddressableScalar(ctx, init_type_text.?, diag)) or
                         (init_type_text != null and std.mem.startsWith(u8, std.mem.trim(u8, init_type_text.?, " \t\r\n"), "*"));
-                    var bind_reg = reg;
-                    if (!init_is_code_node and !init_is_compiler_message and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar or init_is_plain_identifier_value)) {
+                    const decl_is_float = if (ast.data(stmt).lhs != @import("Ast.zig").null_node) blk: {
+                        const dname = firstTypeWord(ctx.nodeSource(ast.data(stmt).lhs));
+                        break :blk std.mem.eql(u8, dname, "float") or std.mem.eql(u8, dname, "float32") or std.mem.eql(u8, dname, "float64");
+                    } else false;
+                    var coerced_reg = reg;
+                    if (decl_is_float and (ast.tag(init) == .integer_literal or (ast.tag(init) == .identifier and std.mem.eql(u8, ctx.nodeSource(init), "0")))) {
+                        const float_reg = ctx.proc.num_registers;
+                        ctx.proc.num_registers += 1;
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .float_cast, .dest = float_reg, .arg1 = reg, .source_node = stmt });
+                        coerced_reg = float_reg;
+                    }
+                    var bind_reg = coerced_reg;
+                    if (!init_is_code_node and !init_is_compiler_message and !init_is_type_info_handle and (ty.isInteger() or ty.isBool() or ty.isString() or ty.isPointer() or init_is_addressable_scalar or init_is_plain_identifier_value or decl_is_float)) {
                         bind_reg = ctx.proc.num_registers;
                         ctx.proc.num_registers += 1;
-                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = reg, .source_node = stmt });
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = bind_reg, .arg1 = coerced_reg, .source_node = stmt });
                     }
                     try ctx.decl_registers.put(ctx.program.allocator, stmt, bind_reg);
                     if (ast.tag(stmt) == .var_decl and ast.tag(init) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(init)), "context")) {
@@ -4062,10 +4079,27 @@ const GenContext = struct {
                     var type_ids = std.ArrayList(u32).empty;
                     defer regs.deinit(ctx.program.allocator);
                     defer type_ids.deinit(ctx.program.allocator);
-                    for (returns) |return_idx| {
+                    for (returns, 0..) |return_idx, ret_i| {
                         const return_node: NodeIndex = @intCast(return_idx);
                         try regs.append(ctx.program.allocator, try ctx.genExpr(return_node, diag));
-                        const type_id = if (typeTextForExpr(ctx, return_node, diag)) |type_text|
+                        const type_id = if (ctx.return_type_node != @import("Ast.zig").null_node) blk: {
+                            var ret_text = std.mem.trim(u8, ctx.nodeSource(ctx.return_type_node), " \t\r\n");
+                            if (std.mem.startsWith(u8, ret_text, "(") and std.mem.endsWith(u8, ret_text, ")"))
+                                ret_text = ret_text[1 .. ret_text.len - 1];
+                            var it = std.mem.splitScalar(u8, ret_text, ',');
+                            var idx: usize = 0;
+                            while (it.next()) |raw_part| {
+                                if (idx == ret_i) {
+                                    var part = std.mem.trim(u8, raw_part, " \t\r\n");
+                                    if (std.mem.indexOf(u8, part, ":")) |colon| part = std.mem.trim(u8, part[colon + 1 ..], " \t\r\n");
+                                    const sig_id = typeIdFromTypeText(part);
+                                    if (sig_id != 16) break :blk sig_id;
+                                    break :blk if (typeTextForExpr(ctx, return_node, diag)) |t| typeIdFromTypeText(t) else sig_id;
+                                }
+                                idx += 1;
+                            }
+                            break :blk if (typeTextForExpr(ctx, return_node, diag)) |t| typeIdFromTypeText(t) else typeIdFromTypeText(ret_text);
+                        } else if (typeTextForExpr(ctx, return_node, diag)) |type_text|
                             typeIdFromTypeText(type_text)
                         else if (ctx.typed) |typed|
                             ctx.typeIdFromTypedNode(typed, return_node) orelse 5
