@@ -1916,7 +1916,9 @@ fn compilerIntrinsicReturnType(ast: *const Ast, name: []const u8, diag: Diagnost
         std.mem.eql(u8, name, "replace") or
         std.mem.eql(u8, name, "slice") or
         std.mem.eql(u8, name, "path_strip_filename") or
-        std.mem.eql(u8, name, "get_path_of_running_executable"))
+        std.mem.eql(u8, name, "get_path_of_running_executable") or
+        std.mem.eql(u8, name, "talloc_string") or
+        std.mem.eql(u8, name, "alloc_string"))
     {
         return Type.string();
     }

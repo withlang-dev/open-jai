@@ -60,8 +60,8 @@ pub fn classify(raw: []const u8) Error!Kind {
 
 pub fn parseInt(raw: []const u8) Error!i64 {
     return switch (try parse(raw)) {
-        .integer => |v| if (v.value <= @as(u128, @intCast(std.math.maxInt(i64))))
-            @intCast(v.value)
+        .integer => |v| if (v.value <= @as(u128, std.math.maxInt(u64)))
+            @bitCast(@as(u64, @intCast(v.value)))
         else
             error.Overflow,
         .bit_pattern => |v| @bitCast(v.bits),

@@ -3,6 +3,8 @@
 Pool :: struct {
     memblock_size: int;
     bytes_left: int;
+    current_block: *void;
+    current_pos: int;
 }
 
 pool_allocator_proc :: 2;
@@ -13,25 +15,8 @@ set_allocators :: (pool: *Pool) {
     pool.bytes_left = 0;
 }
 
-get :: (pool: *Pool, size: int) -> *void {
-    if !pool return null;
-    if pool.memblock_size == 0 pool.memblock_size = 65536;
-    if pool.bytes_left == 0 pool.bytes_left = pool.memblock_size;
-    if size > 0 {
-        if pool.bytes_left > size pool.bytes_left -= size;
-        else pool.bytes_left = 0;
-    }
-    return cast(*void) 1;
-}
+get :: (pool: *Pool, size: int) -> *void #intrinsic;
 
-reset :: (pool: *Pool) {
-    if !pool return;
-    if pool.memblock_size == 0 pool.memblock_size = 65536;
-    pool.bytes_left = pool.memblock_size;
-}
+reset :: (pool: *Pool) #intrinsic;
 
-release :: (pool: *Pool) {
-    if !pool return;
-    if pool.memblock_size == 0 pool.memblock_size = 65536;
-    pool.bytes_left = 0;
-}
+release :: (pool: *Pool) #intrinsic;

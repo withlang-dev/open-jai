@@ -53,6 +53,11 @@ get_bit :: (bits: *Bit_Array, index: int) -> bool {
     return (bits.words[word_index] & (cast(u64) 1 << bit_index)) != 0;
 }
 
+deinit :: (bits: *Bit_Array) {
+    array_free(bits.words);
+    bits.count = 0;
+}
+
 bit_index_in_range :: (bits: *Bit_Array, index: int) -> bool {
     if !bits return false;
     return index >= 0 && index < bits.count;

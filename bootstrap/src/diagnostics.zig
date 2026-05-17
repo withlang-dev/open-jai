@@ -4,21 +4,33 @@ pub const Diagnostic = struct {
     allocator: std.mem.Allocator,
     file_path: []const u8,
     source: []const u8,
+    silent: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8, source: []const u8) Diagnostic {
         return .{ .allocator = allocator, .file_path = file_path, .source = source };
     }
 
+    pub fn asSilent(d: Diagnostic) Diagnostic {
+        return .{ .allocator = d.allocator, .file_path = d.file_path, .source = d.source, .silent = true };
+    }
+
+    pub fn nop() Diagnostic {
+        return .{ .allocator = std.heap.page_allocator, .file_path = "", .source = "", .silent = true };
+    }
+
     pub fn failAt(d: Diagnostic, offset: usize, comptime fmt: []const u8, args: anytype) Error {
-        const lc = d.lineCol(offset);
-        std.debug.print("{s}:{d}:{d}: error: ", .{ d.file_path, lc.line, lc.col });
-        std.debug.print(fmt, args);
-        std.debug.print("\n", .{});
-        d.printLine(lc.line, lc.line_start, lc.line_end, offset);
+        if (!d.silent) {
+            const lc = d.lineCol(offset);
+            std.debug.print("{s}:{d}:{d}: error: ", .{ d.file_path, lc.line, lc.col });
+            std.debug.print(fmt, args);
+            std.debug.print("\n", .{});
+            d.printLine(lc.line, lc.line_start, lc.line_end, offset);
+        }
         return error.CompilationFailed;
     }
 
     pub fn noteAt(d: Diagnostic, offset: usize, comptime fmt: []const u8, args: anytype) void {
+        if (d.silent) return;
         const lc = d.lineCol(offset);
         std.debug.print("{s}:{d}:{d}: note: ", .{ d.file_path, lc.line, lc.col });
         std.debug.print(fmt, args);

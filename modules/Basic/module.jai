@@ -135,6 +135,7 @@ push_allocator :: (allocator: Allocator) #foreign;
 reset_temporary_storage :: () #foreign;
 auto_release_temp :: () #foreign;
 talloc_string :: (count: s64) -> string #foreign;
+alloc_string :: (count: s64) -> string #foreign;
 make_leak_report :: () -> string #foreign;
 log_leak_report :: () #foreign;
 get_capabilities :: (allocator: Allocator) -> (caps: bool, name: string) #foreign;

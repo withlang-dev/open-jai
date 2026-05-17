@@ -1,5 +1,21 @@
 const std = @import("std");
 
+var debug_state: enum(u8) { unchecked, off, on } = .unchecked;
+
+fn isDebugEnabled() bool {
+    if (debug_state != .unchecked) return debug_state == .on;
+    const val = std.c.getenv("OPENJAI_DEBUG");
+    debug_state = if (val != null and val.?[0] != 0 and val.?[0] != '0') .on else .off;
+    return debug_state == .on;
+}
+
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (!isDebugEnabled()) return;
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "[OJ_DEBUG] " ++ fmt ++ "\n", args) catch return;
+    _ = oj_rt_write(2, msg.ptr, msg.len);
+}
+
 extern fn oj_rt_write(fd: i32, data: [*]const u8, len: usize) i64;
 extern fn oj_rt_read(fd: i32, data: [*]u8, len: usize) i64;
 extern fn oj_rt_open(path_z: [*:0]const u8, flags: i32, mode: i32) i32;
@@ -92,17 +108,23 @@ export fn __openjai_print_uint(value: u64) void {
     writeAll(text);
 }
 
-export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize) void {
-    const base = data orelse {
+export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize, elem_size: usize) void {
+    const base: [*]const u8 = @ptrCast(data orelse {
         writeAll("[]");
         return;
-    };
-    const ints: [*]const i64 = @ptrCast(@alignCast(base));
+    });
     writeAll("[");
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (i != 0) writeAll(", ");
-        __openjai_print_int(ints[i]);
+        const ptr = base + i * elem_size;
+        const val: i64 = switch (elem_size) {
+            1 => @as(i64, @intCast(@as(*const u8, @ptrCast(ptr)).*)),
+            2 => @as(i64, @intCast(std.mem.readInt(i16, @ptrCast(ptr), .little))),
+            4 => @as(i64, @intCast(std.mem.readInt(i32, @ptrCast(ptr), .little))),
+            else => std.mem.readInt(i64, @ptrCast(@alignCast(ptr)), .little),
+        };
+        __openjai_print_int(val);
     }
     writeAll("]");
 }
@@ -123,18 +145,38 @@ export fn __openjai_print_static_float_array(data: ?*const anyopaque, count: usi
 }
 
 export fn __openjai_print_static_string_array(data: ?*const anyopaque, count: usize) void {
-    const base = data orelse {
+    const base: [*]const u8 = @ptrCast(data orelse {
         writeAll("[]");
         return;
-    };
-    const strings: [*]const ?*OpenJaiRuntimeString = @ptrCast(@alignCast(base));
+    });
     writeAll("[");
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (i != 0) writeAll(", ");
+        const elem = base + i * 16;
+        const len = std.mem.readInt(u64, @ptrCast(elem), .little);
+        const data_ptr_int = std.mem.readInt(u64, @ptrCast(elem + 8), .little);
         writeAll("\"");
-        if (strings[i]) |s| writeAll(s.data[0..s.len]);
+        if (data_ptr_int != 0 and len > 0) {
+            const str_data: [*]const u8 = @ptrFromInt(data_ptr_int);
+            writeAll(str_data[0..len]);
+        }
         writeAll("\"");
+    }
+    writeAll("]");
+}
+
+export fn __openjai_print_static_bool_array(data: ?*const anyopaque, count: usize) void {
+    const base = data orelse {
+        writeAll("[]");
+        return;
+    };
+    const bools: [*]const u8 = @ptrCast(base);
+    writeAll("[");
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (i != 0) writeAll(", ");
+        writeAll(if (bools[i] != 0) "true" else "false");
     }
     writeAll("]");
 }
@@ -248,6 +290,7 @@ fn writeLargeFloat32IntegerText(value: f64) bool {
 }
 
 export fn __openjai_print_format_float(value: f64, width: i64, trailing_width: i64, zero_removal: i64, mode: i64) void {
+    debugLog("print_format_float: value={d}, trail={d}, mode={d}", .{ value, trailing_width, mode });
     var buf: [128]u8 = undefined;
     const precision: usize = if (trailing_width >= 0) @intCast(trailing_width) else 6;
     const text = if (mode == 1)
@@ -523,13 +566,20 @@ export fn __openjai_get_command_line_arguments() ?*OpenJaiArray {
     const count: usize = if (runtime_argc <= 0) 0 else @intCast(runtime_argc);
     const array_raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return null;
     const array: *OpenJaiArray = @ptrCast(@alignCast(array_raw));
-    const data_raw = rtAlloc(@max(count, 1) * @sizeOf(?*OpenJaiRuntimeString)) orelse {
+    const data_raw = rtAlloc(@max(count, 1) * @sizeOf(OpenJaiRuntimeString)) orelse {
         rtFree(array_raw);
         return null;
     };
-    const items: [*]?*OpenJaiRuntimeString = @ptrCast(@alignCast(data_raw));
+    const items: [*]OpenJaiRuntimeString = @ptrCast(@alignCast(data_raw));
     var i: usize = 0;
-    while (i < count) : (i += 1) items[i] = __openjai_arg_value(@intCast(i));
+    while (i < count) : (i += 1) {
+        const str = __openjai_arg_value(@intCast(i));
+        if (str) |s| {
+            items[i] = s.*;
+        } else {
+            items[i] = .{ .len = 0, .data = @ptrCast(&[0]u8{}) };
+        }
+    }
     array.* = .{ .count = count, .capacity = count, .data = data_raw };
     return array;
 }
@@ -765,6 +815,22 @@ export fn __openjai_string_builder_length(slot: ?*?*OpenJaiStringBuilder) i64 {
     return @intCast(builder.len);
 }
 
+export fn __openjai_string_builder_join_array(slot: ?*?*OpenJaiStringBuilder, arr_slot: ?*?*OpenJaiArray, sep_data: [*]const u8, sep_len: usize, flags: i64) void {
+    const arr = arrayFromRuntimeValue(arr_slot) orelse return;
+    const count = arr.count;
+    if (count == 0) return;
+    const items: [*]const OpenJaiRuntimeString = @ptrCast(@alignCast(arr.data orelse return));
+    const before_first = (flags & 1) != 0;
+    const after_last = (flags & 2) != 0;
+    if (before_first) _ = __openjai_string_builder_append_string(slot, sep_data, sep_len);
+    for (0..count) |idx| {
+        if (idx > 0) _ = __openjai_string_builder_append_string(slot, sep_data, sep_len);
+        const str = items[idx];
+        _ = __openjai_string_builder_append_string(slot, str.data, str.len);
+    }
+    if (after_last) _ = __openjai_string_builder_append_string(slot, sep_data, sep_len);
+}
+
 export fn __openjai_copy_string(data: [*]const u8, len: usize) ?*OpenJaiRuntimeString {
     return makeRuntimeString(data[0..len]);
 }
@@ -832,11 +898,11 @@ export fn __openjai_sort_f64(data: ?*anyopaque, count: usize) void {
 
 export fn __openjai_sort_runtime_strings(data: ?*anyopaque, count: usize) void {
     const base = data orelse return;
-    const items: [*]?*OpenJaiRuntimeString = @ptrCast(@alignCast(base));
+    const items: [*]OpenJaiRuntimeString = @ptrCast(@alignCast(base));
     var i: usize = 1;
     while (i < count) : (i += 1) {
         var j = i;
-        while (j > 0 and runtimeStringOrder(items[j - 1], items[j]) == .gt) : (j -= 1) {
+        while (j > 0 and inlineStringOrder(items[j - 1], items[j]) == .gt) : (j -= 1) {
             const tmp = items[j - 1];
             items[j - 1] = items[j];
             items[j] = tmp;
@@ -844,10 +910,8 @@ export fn __openjai_sort_runtime_strings(data: ?*anyopaque, count: usize) void {
     }
 }
 
-fn runtimeStringOrder(lhs: ?*OpenJaiRuntimeString, rhs: ?*OpenJaiRuntimeString) std.math.Order {
-    const l = lhs orelse return if (rhs == null) .eq else .lt;
-    const r = rhs orelse return .gt;
-    return std.mem.order(u8, l.data[0..l.len], r.data[0..r.len]);
+fn inlineStringOrder(lhs: OpenJaiRuntimeString, rhs: OpenJaiRuntimeString) std.math.Order {
+    return std.mem.order(u8, lhs.data[0..lhs.len], rhs.data[0..rhs.len]);
 }
 
 export fn __openjai_string_contains(lhs_data: [*]const u8, lhs_len: usize, rhs_data: [*]const u8, rhs_len: usize) bool {
@@ -932,7 +996,7 @@ export fn __openjai_string_split(data: [*]const u8, len: usize, sep_data: [*]con
     if (sep_len == 0) {
         while (start < len) : (start += 1) {
             const piece = makeRuntimeString(data[start .. start + 1]) orelse return null;
-            _ = __openjai_array_add(&array_slot, @ptrCast(&piece), @sizeOf(?*OpenJaiRuntimeString));
+            _ = __openjai_array_add(&array_slot, @ptrCast(piece), @sizeOf(OpenJaiRuntimeString));
         }
         return array;
     }
@@ -941,7 +1005,7 @@ export fn __openjai_string_split(data: [*]const u8, len: usize, sep_data: [*]con
         const next = std.mem.indexOf(u8, rest, sep_data[0..sep_len]);
         const end = if (next) |idx| start + idx else len;
         const piece = makeRuntimeString(data[start..end]) orelse return null;
-        _ = __openjai_array_add(&array_slot, @ptrCast(&piece), @sizeOf(?*OpenJaiRuntimeString));
+        _ = __openjai_array_add(&array_slot, @ptrCast(piece), @sizeOf(OpenJaiRuntimeString));
         if (next == null) break;
         start = end + sep_len;
     }
@@ -1039,6 +1103,53 @@ export fn __openjai_array_add(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, e
     return dst;
 }
 
+export fn __openjai_array_add_spread(slot: ?*?*OpenJaiArray, src_data: ?*const anyopaque, src_count: i64, elem_size: usize) void {
+    if (src_count <= 0 or elem_size == 0) return;
+    const src: [*]const u8 = @ptrCast(src_data orelse return);
+    const count: usize = @intCast(src_count);
+    for (0..count) |i| {
+        _ = __openjai_array_add(slot, src + i * elem_size, elem_size);
+    }
+}
+
+export fn __openjai_array_insert_at(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, index: i64, elem_size: usize) void {
+    const slot_ptr = slot orelse @panic("array_insert_at on null array slot");
+    if (elem_size == 0) return;
+    var array = arrayFromRuntimeValue(slot);
+    if (array == null) {
+        const raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return;
+        array = @ptrCast(@alignCast(raw));
+        array.?.* = .{ .count = 0, .capacity = 0, .data = null };
+        slot_ptr.* = array;
+    }
+    const a = array.?;
+    const idx: usize = if (index < 0) 0 else @intCast(@min(index, @as(i64, @intCast(a.count))));
+    if (a.count == a.capacity) {
+        const new_capacity: usize = if (a.capacity == 0) 8 else a.capacity * 2;
+        const bytes = new_capacity * elem_size;
+        const old_bytes = a.capacity * elem_size;
+        const new_data = rtRealloc(a.data, old_bytes, bytes);
+        if (new_data == null) return;
+        a.data = new_data;
+        a.capacity = new_capacity;
+    }
+    const data: [*]u8 = @ptrCast(a.data.?);
+    const tail_count = a.count - idx;
+    if (tail_count > 0) {
+        const src = data + idx * elem_size;
+        const dst = data + (idx + 1) * elem_size;
+        std.mem.copyBackwards(u8, dst[0 .. tail_count * elem_size], src[0 .. tail_count * elem_size]);
+    }
+    const dst = data + idx * elem_size;
+    if (item) |src_raw| {
+        const src: [*]const u8 = @ptrCast(src_raw);
+        @memcpy(dst[0..elem_size], src[0..elem_size]);
+    } else {
+        @memset(dst[0..elem_size], 0);
+    }
+    a.count += 1;
+}
+
 export fn __openjai_array_pop(slot: ?*?*OpenJaiArray, elem_size: usize) ?*anyopaque {
     const a = arrayFromRuntimeValue(slot) orelse @panic("pop on null dynamic array");
     if (a.count == 0) @panic("pop from empty dynamic array");
@@ -1088,17 +1199,41 @@ export fn __openjai_array_ordered_remove_by_index(slot: ?*?*OpenJaiArray, index:
     a.count -= 1;
 }
 
-export fn __openjai_array_find(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) bool {
-    const a = arrayFromRuntimeValue(slot) orelse return false;
-    const needle = item orelse return false;
-    if (a.count == 0 or a.data == null) return false;
+export fn __openjai_array_unordered_remove_by_index(slot: ?*?*OpenJaiArray, index: i64, elem_size: usize) void {
+    const a = arrayFromRuntimeValue(slot) orelse @panic("array_unordered_remove_by_index on null dynamic array");
+    if (index < 0 or @as(usize, @intCast(index)) >= a.count) @panic("array_unordered_remove_by_index out of bounds");
+    const idx: usize = @intCast(index);
+    const data: [*]u8 = @ptrCast(a.data.?);
+    if (idx != a.count - 1) {
+        const dst = data + idx * elem_size;
+        const src = data + (a.count - 1) * elem_size;
+        @memcpy(dst[0..elem_size], src[0..elem_size]);
+    }
+    a.count -= 1;
+}
+
+export fn __openjai_array_find(slot: ?*?*OpenJaiArray, item: ?*const anyopaque, elem_size: usize) i64 {
+    const a = arrayFromRuntimeValue(slot) orelse return -1;
+    const needle = item orelse return -1;
+    if (a.count == 0 or a.data == null) return -1;
     const data: [*]const u8 = @ptrCast(a.data.?);
     const wanted: [*]const u8 = @ptrCast(needle);
     var i: usize = 0;
     while (i < a.count) : (i += 1) {
-        if (std.mem.eql(u8, data[i * elem_size .. (i + 1) * elem_size], wanted[0..elem_size])) return true;
+        if (std.mem.eql(u8, data[i * elem_size .. (i + 1) * elem_size], wanted[0..elem_size])) return @intCast(i);
     }
-    return false;
+    return -1;
+}
+
+export fn __openjai_static_array_find(data_ptr: ?*const anyopaque, count: i64, item: ?*const anyopaque, elem_size: usize) i64 {
+    const data: [*]const u8 = @ptrCast(data_ptr orelse return -1);
+    const needle: [*]const u8 = @ptrCast(item orelse return -1);
+    if (count <= 0) return -1;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (std.mem.eql(u8, data[i * elem_size .. (i + 1) * elem_size], needle[0..elem_size])) return @intCast(i);
+    }
+    return -1;
 }
 
 export fn __openjai_array_copy(source: ?*?*OpenJaiArray, elem_size: usize) ?*OpenJaiArray {
@@ -1156,17 +1291,33 @@ export fn __openjai_array_data(slot: ?*?*OpenJaiArray) ?*anyopaque {
 }
 
 export fn __openjai_array_index(slot: ?*?*OpenJaiArray, index: i64, elem_size: usize) ?*anyopaque {
-    const a = arrayFromRuntimeValue(slot) orelse @panic("indexing null dynamic array");
+    const a = arrayFromRuntimeValue(slot) orelse return null;
     if (index < 0 or @as(usize, @intCast(index)) >= a.count) {
         std.debug.print("openjai runtime: dynamic array index out of bounds: array={*} count={} index={} elem_size={}\n", .{ a, a.count, index, elem_size });
         @panic("dynamic array index out of bounds");
     }
-    const data: [*]u8 = @ptrCast(a.data.?);
+    const data: [*]u8 = @ptrCast(a.data orelse return null);
     return data + @as(usize, @intCast(index)) * elem_size;
+}
+
+export fn __openjai_sort_dynamic_i64(slot: ?*?*OpenJaiArray) void {
+    const array = arrayFromRuntimeValue(slot) orelse return;
+    __openjai_sort_i64(array.data, array.count);
+}
+
+export fn __openjai_sort_dynamic_f64(slot: ?*?*OpenJaiArray) void {
+    const array = arrayFromRuntimeValue(slot) orelse return;
+    __openjai_sort_f64(array.data, array.count);
+}
+
+export fn __openjai_sort_dynamic_strings(slot: ?*?*OpenJaiArray) void {
+    const array = arrayFromRuntimeValue(slot) orelse return;
+    __openjai_sort_runtime_strings(array.data, array.count);
 }
 
 fn arrayFromRuntimeValue(value: ?*?*OpenJaiArray) ?*OpenJaiArray {
     const raw = value orelse return null;
+    if (raw.* == null) return null;
     const as_header: *OpenJaiArray = @ptrCast(@alignCast(raw));
     if (as_header.capacity >= as_header.count and as_header.count < 1_000_000_000) return as_header;
     return raw.*;
@@ -1302,6 +1453,7 @@ fn writeAll(bytes: []const u8) void {
         index += @intCast(wrote);
     }
 }
+
 
 fn rtAlloc(size: usize) ?*anyopaque {
     return rtAllocAligned(size, runtime_allocation_alignment);
@@ -1440,3 +1592,57 @@ fn normalizeAlignment(alignment: usize) usize {
     if (!std.math.isPowerOfTwo(normalized)) normalized = std.math.ceilPowerOfTwoAssert(usize, normalized);
     return normalized;
 }
+
+var type_info_table: ?[*]const TypeInfoEntry = null;
+var type_info_count: usize = 0;
+
+const TypeInfoMemberEntry = extern struct {
+    name_ptr: [*]const u8,
+    name_len: u64,
+    type_name_ptr: [*]const u8,
+    type_name_len: u64,
+    flags: u64,
+};
+
+const TypeInfoEntry = extern struct {
+    name_ptr: [*]const u8,
+    name_len: u64,
+    tag: u64,
+    member_count: u64,
+    members: [*]const TypeInfoMemberEntry,
+};
+
+export fn __openjai_set_type_info_table(table: [*]const TypeInfoEntry, count: usize) void {
+    type_info_table = table;
+    type_info_count = count;
+}
+
+export fn __openjai_type_info_name(type_id: i64) ?*OpenJaiRuntimeString {
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("<?>");
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    return makeRuntimeString(entry.name_ptr[0..entry.name_len]);
+}
+
+export fn __openjai_type_info_tag_name(type_id: i64) ?*OpenJaiRuntimeString {
+    _ = type_id;
+    return makeRuntimeString("<type>");
+}
+
+export fn auto_release_temp() void {}
+
+export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return 0;
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    return switch (field_id) {
+        1 => 0, // runtime_size (placeholder)
+        2 => @intCast(entry.tag),
+        3 => @intCast(entry.member_count), // count (members count)
+        4 => 0, // signed
+        5 => 0, // enum_type_flags
+        6 => 0, // internal_type
+        else => 0,
+    };
+}
+
