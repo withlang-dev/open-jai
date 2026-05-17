@@ -1695,6 +1695,32 @@ pub const VM = struct {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Type_Info member field access out of range", .{});
                     regs[inst.dest] = try vm.typeInfoMemberField(regs[inst.arg1], vm.program.strings.items[inst.arg2], diag);
                 },
+                .type_info_get_field => {
+                    if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= regs.len) return diag.failAt(0, "VM type_info_get_field register out of range", .{});
+                    const type_id = switch (regs[inst.arg1]) {
+                        .int => |v| v,
+                        .type_id => |v| @as(i64, @intCast(v)),
+                        else => return diag.failAt(0, "VM type_info_get_field: arg1 must be int or type_id", .{}),
+                    };
+                    const field_name = switch (regs[inst.arg2]) {
+                        .string => |v| v,
+                        else => return diag.failAt(0, "VM type_info_get_field: arg2 must be string", .{}),
+                    };
+                    if (type_id >= 0 and @as(usize, @intCast(type_id)) < vm.program.type_infos.items.len) {
+                        const ti = vm.program.type_infos.items[@intCast(type_id)];
+                        var found = false;
+                        for (ti.members) |member| {
+                            if (std.mem.eql(u8, member.name, field_name)) {
+                                regs[inst.dest] = .{ .type_info_member = .{ .name = member.name, .type_name = member.type_name, .flags = @intCast(member.flags) } };
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) regs[inst.dest] = .{ .int = 0 };
+                    } else {
+                        regs[inst.dest] = .{ .int = 0 };
+                    }
+                },
                 .source_location_get_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Source_Code_Location field access out of range", .{});
                     const loc = switch (regs[inst.arg1]) {

@@ -5228,6 +5228,7 @@ const GenContext = struct {
                             const pointee_type = std.mem.trim(u8, stripPointerText(operand_ty), " \t\r\n");
                             if (try typeTextIsEmbeddedStruct(ctx, pointee_type, diag)) return operand_reg;
                             if (isStaticArrayTypeText(pointee_type)) return operand_reg;
+                            if (std.mem.eql(u8, firstTypeWord(pointee_type), "Type_Info_Struct_Member")) return operand_reg;
                         }
                     }
                     const operand_source_is_pointer = if (typeTextForExpr(ctx, operand, diag)) |operand_ty|
@@ -7235,8 +7236,13 @@ const GenContext = struct {
                 }
                 if (std.mem.eql(u8, name, "get_field")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
-                    for (args) |arg| _ = try ctx.genExpr(@intCast(arg), diag);
-                    return try ctx.genTypedPlaceholderValue(expr, diag);
+                    if (args.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_field expects (type_info, field_name)", .{});
+                    const type_id_reg = try ctx.genExpr(@intCast(args[0]), diag);
+                    const name_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_get_field, .dest = reg, .arg1 = type_id_reg, .arg2 = name_reg, .source_node = expr });
+                    return reg;
                 }
                 if (std.mem.eql(u8, name, "type_to_string")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
@@ -10251,6 +10257,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                     return "bool";
                 }
                 if (std.mem.eql(u8, name, "file_open")) return "*File";
+                if (std.mem.eql(u8, name, "get_field")) return "*Type_Info_Struct_Member";
                 if (std.mem.eql(u8, name, "string_to_float") or
                     std.mem.eql(u8, name, "sqrt") or
                     std.mem.eql(u8, name, "sin") or
@@ -13420,6 +13427,17 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
         try emitFormattedApolloTimeValue(ctx, value_reg, source_node);
         return;
     }
+    if (std.mem.eql(u8, firstTypeWord(clean_type), "Type_Info_Struct_Member")) {
+        try emitFormattedTypeInfoMemberValue(ctx, value_reg, source_node, diag);
+        return;
+    }
+    if (std.mem.eql(u8, firstTypeWord(clean_type), "Type_Info_Struct") or
+        std.mem.eql(u8, firstTypeWord(clean_type), "Type_Info") or
+        std.mem.eql(u8, firstTypeWord(clean_type), "Type_Info_Pointer"))
+    {
+        try emitFormattedTypeInfoStructValue(ctx, value_reg, source_node, diag);
+        return;
+    }
     if (try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
         try emitFormattedStructValue(ctx, value_reg, clean_type, source_node, diag);
         return;
@@ -13437,6 +13455,66 @@ fn emitFormattedApolloTimeValue(ctx: *GenContext, low_reg: Bytecode.Register, so
     try emitLiteralPrint(ctx.program, ctx.proc, "{", source_node);
     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = low_reg, .source_node = source_node });
     try emitLiteralPrint(ctx.program, ctx.proc, ", 0}", source_node);
+}
+
+fn emitFormattedTypeInfoStructValue(ctx: *GenContext, base_reg: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
+    const program = ctx.program;
+    const proc = ctx.proc;
+    try emitLiteralPrint(program, proc, "{info = {", source_node);
+    const type_idx = try program.addString("type");
+    const type_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = type_reg, .arg1 = base_reg, .arg2 = type_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = type_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "}; name = \"", source_node);
+    const name_idx = try program.addString("name");
+    const name_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = name_reg, .arg1 = base_reg, .arg2 = name_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = name_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "\"; members = [", source_node);
+    const members_idx = try program.addString("members");
+    const members_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = members_reg, .arg1 = base_reg, .arg2 = members_idx, .source_node = source_node });
+    const count_idx = try program.addString("count");
+    const count_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = count_reg, .arg1 = base_reg, .arg2 = count_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = count_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, " members]; }", source_node);
+    _ = diag;
+}
+
+fn emitFormattedTypeInfoMemberValue(ctx: *GenContext, base_reg: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
+    const program = ctx.program;
+    const proc = ctx.proc;
+    try emitLiteralPrint(program, proc, "{name = \"", source_node);
+    const name_idx = try program.addString("name");
+    const name_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_member_field, .dest = name_reg, .arg1 = base_reg, .arg2 = name_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = name_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "\"; type = ", source_node);
+    const type_idx = try program.addString("type");
+    const type_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_member_field, .dest = type_reg, .arg1 = base_reg, .arg2 = type_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = type_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "; offset_in_bytes = ", source_node);
+    const offset_idx = try program.addString("offset_in_bytes");
+    const offset_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_member_field, .dest = offset_reg, .arg1 = base_reg, .arg2 = offset_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = offset_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "; flags = ", source_node);
+    const flags_idx = try program.addString("flags");
+    const flags_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_member_field, .dest = flags_reg, .arg1 = base_reg, .arg2 = flags_idx, .source_node = source_node });
+    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = flags_reg, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "; notes = []; offset_into_constant_storage = 0; }", source_node);
+    _ = diag;
 }
 
 fn emitLoadFromAddressForType(ctx: *GenContext, addr: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!Bytecode.Register {

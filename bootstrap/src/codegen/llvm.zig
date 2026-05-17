@@ -2502,6 +2502,19 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     try setPointerResult(env, registers, inst.dest, c.LLVMConstPointerNull(env.ptr_ty));
                 }
             },
+            .type_info_get_field => {
+                if (inst.dest >= registers.len or inst.arg1 >= registers.len or inst.arg2 >= registers.len) {
+                    return diag.failAt(0, "LLVM backend type_info_get_field register out of range", .{});
+                }
+                const type_id_val = try resolveTypeInfoId(env, registers[inst.arg1], diag);
+                const str_parts = try stringParts(env, registers[inst.arg2], diag);
+                const params = [_]c.LLVMTypeRef{ env.llvm_i64, env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_get_field") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_get_field", fn_ty);
+                var args = [_]c.LLVMValueRef{ type_id_val, str_parts.data, str_parts.len };
+                const result = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "get_field_result");
+                try setPointerResult(env, registers, inst.dest, result);
+            },
             .load_build_options,
             .host_set_build_options,
             .host_set_optimization,

@@ -1709,6 +1709,20 @@ export fn __openjai_type_info_lookup(name_ptr: [*]const u8, name_len: usize) i64
     return -1;
 }
 
+export fn __openjai_type_info_get_field(type_id: i64, name_ptr: [*]const u8, name_len: usize) ?*TypeInfoMemberEntry {
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return null;
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    const name = name_ptr[0..name_len];
+    for (0..entry.member_count) |i| {
+        const member = &entry.members[i];
+        if (member.name_len == name_len and std.mem.eql(u8, member.name_ptr[0..member.name_len], name)) {
+            return @constCast(member);
+        }
+    }
+    return null;
+}
+
 export fn __openjai_type_info_get_members(type_id: i64) ?*OpenJaiArray {
     if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return null;
     const idx: usize = @intCast(type_id);

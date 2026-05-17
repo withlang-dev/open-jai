@@ -171,6 +171,7 @@ pub const Opcode = enum(u8) {
     build_options_set_field,
     type_info_field,
     type_info_member_field,
+    type_info_get_field,
     source_location_get_field,
     file_open,
     file_close,
