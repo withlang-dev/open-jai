@@ -3912,6 +3912,21 @@ const GenContext = struct {
                             return;
                         }
                     }
+                    if ((ast.tag(init) == .aggregate_literal or ast.tag(init) == .typed_aggregate_literal) and ast.tag(stmt) == .var_decl) {
+                        const type_node_decl = ast.data(stmt).lhs;
+                        if (type_node_decl != @import("Ast.zig").null_node) {
+                            const dest_type = std.mem.trim(u8, ctx.nodeSource(type_node_decl), " \t\r\n");
+                            if (try typeTextIsStruct(ctx, dest_type, diag)) {
+                                const size = try typeTextSize(ctx, dest_type, diag);
+                                const struct_reg = ctx.proc.num_registers;
+                                ctx.proc.num_registers += 1;
+                                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = struct_reg, .arg1 = @intCast(@max(size, 1)), .source_node = stmt });
+                                try ctx.emitAggregateToStruct(init, struct_reg, dest_type, stmt, diag);
+                                try ctx.decl_registers.put(ctx.program.allocator, stmt, struct_reg);
+                                return;
+                            }
+                        }
+                    }
                     if (try ctx.tryEmitStaticArrayLiteralDeclaration(stmt, init, diag)) return;
                     if (ast.tag(stmt) == .var_decl) {
                         const type_node_decl = ast.data(stmt).lhs;
@@ -5272,6 +5287,7 @@ const GenContext = struct {
                 const operand = ast.data(expr).lhs;
                 const op = ast.tokens[ast.mainToken(expr)].tag;
                 if (op == .star and (ast.tag(operand) == .identifier or ast.tag(operand) == .field_access or ast.tag(operand) == .index_expr)) return try genAddressOfLvalue(ctx, operand, diag);
+                if (op == .star and (ast.tag(operand) == .aggregate_literal or ast.tag(operand) == .typed_aggregate_literal)) return try ctx.genExpr(operand, diag);
                 const operand_reg = try ctx.genExpr(operand, diag);
                 if (op == .dot_dot) return operand_reg;
                 if (op == .keyword_cast and ast.data(expr).rhs != @import("Ast.zig").null_node) {

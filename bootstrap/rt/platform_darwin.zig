@@ -175,7 +175,7 @@ export fn oj_rt_sleep_milliseconds(ms: u64) void {
 }
 
 export fn oj_rt_exit(code: i32) noreturn {
-    std.process.exit(@intCast(code));
+    std.process.exit(@truncate(@as(u32, @bitCast(code))));
 }
 
 export fn oj_rt_clock_realtime_ns() i64 {
