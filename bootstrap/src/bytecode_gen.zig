@@ -8816,10 +8816,23 @@ const GenContext = struct {
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = 16, .source_node = source_node });
                 }
             } else {
+                const elem_text = ctx.nodeSource(ast.data(type_expr).rhs);
                 const count = try evalIntegerConstExpr(ctx, ast.data(type_expr).lhs, diag);
-                const elem_size = try typeTextSize(ctx, ctx.nodeSource(ast.data(type_expr).rhs), diag);
+                const elem_size = try typeTextSize(ctx, elem_text, diag);
                 const size: u64 = @as(u64, @intCast(@max(count, 0))) * elem_size;
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
+                if (count > 0 and try typeTextIsEmbeddedStruct(ctx, elem_text, diag)) {
+                    const n: usize = @intCast(@max(count, 0));
+                    for (0..n) |i| {
+                        const addr = if (i == 0) reg else blk: {
+                            const tmp = ctx.proc.num_registers;
+                            ctx.proc.num_registers += 1;
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = tmp, .arg1 = reg, .arg2 = @intCast(i * elem_size), .source_node = source_node });
+                            break :blk tmp;
+                        };
+                        try ctx.emitContainerGeneratedInitializers(addr, elem_text, source_node, diag);
+                    }
+                }
             }
             return reg;
         }
@@ -8902,6 +8915,21 @@ const GenContext = struct {
         } else if (isStaticArrayTypeText(type_text)) {
             const size = try typeTextSize(ctx, type_text, diag);
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
+            if (staticArrayElementText(type_text)) |elem_type| {
+                if (try typeTextIsEmbeddedStruct(ctx, elem_type, diag)) {
+                    const count = try staticArrayCountFromText(ctx, type_text, diag) orelse 0;
+                    const elem_size = try typeTextSize(ctx, elem_type, diag);
+                    for (0..count) |i| {
+                        const addr = if (i == 0) reg else blk: {
+                            const tmp = ctx.proc.num_registers;
+                            ctx.proc.num_registers += 1;
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = tmp, .arg1 = reg, .arg2 = @intCast(i * elem_size), .source_node = source_node });
+                            break :blk tmp;
+                        };
+                        try ctx.emitContainerGeneratedInitializers(addr, elem_type, source_node, diag);
+                    }
+                }
+            }
         } else if (std.mem.eql(u8, firstTypeWord(type_text), "string")) {
             const string_idx = try ctx.program.addString("");
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_string, .dest = reg, .arg1 = string_idx, .source_node = source_node });
