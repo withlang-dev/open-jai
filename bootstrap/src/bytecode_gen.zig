@@ -3364,6 +3364,25 @@ const GenContext = struct {
         return view_reg;
     }
 
+    fn wrapDynamicArrayAsView(ctx: *GenContext, array_reg: Bytecode.Register, elem_type: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const elem_size = try typeTextSize(ctx, elem_type, diag);
+        const view_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = view_reg, .arg1 = 16, .source_node = source_node });
+        const count_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = array_reg, .arg3 = @intCast(@max(elem_size, 1)), .arg5 = 0, .source_node = source_node });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = view_reg, .arg1 = count_reg, .source_node = source_node });
+        const data_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_data, .dest = data_reg, .arg1 = array_reg, .arg5 = 0, .source_node = source_node });
+        const data_addr = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = data_addr, .arg1 = view_reg, .arg2 = 8, .source_node = source_node });
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = data_addr, .arg1 = data_reg, .source_node = source_node });
+        return view_reg;
+    }
+
     fn wrapStaticArrayAsHeader(ctx: *GenContext, data_reg: Bytecode.Register, count: usize, source_node: NodeIndex) !Bytecode.Register {
         const hdr_reg = ctx.proc.num_registers;
         ctx.proc.num_registers += 1;
@@ -3854,8 +3873,19 @@ const GenContext = struct {
                         return;
                     }
                     if (ctx.decl_registers.get(decl)) |old_reg| {
+                        const decl_type = typeTextForDecl(ctx, decl, diag);
+                        if (decl_type != null and isViewArrayTypeText(decl_type.?)) {
+                            const rhs_type = typeTextForExpr(ctx, rhs_node, diag);
+                            if (rhs_type != null and isDynamicArrayTypeText(rhs_type.?)) {
+                                const elem_text = dynamicArrayElementText(rhs_type.?) orelse "int";
+                                const view_reg = try ctx.wrapDynamicArrayAsView(rhs, elem_text, stmt, diag);
+                                const size_reg = try ctx.emitInt(stmt, 16);
+                                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = old_reg, .arg1 = view_reg, .arg2 = size_reg, .source_node = stmt });
+                                return;
+                            }
+                        }
                         if (ctx.decl_addresses.get(decl)) |addr| {
-                            const type_text = typeTextForDecl(ctx, decl, diag) orelse typeTextForExpr(ctx, lhs, diag) orelse "int";
+                            const type_text = decl_type orelse typeTextForExpr(ctx, lhs, diag) orelse "int";
                             try emitStoreToAddressForType(ctx, addr, rhs, type_text, stmt, diag);
                         }
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = old_reg, .arg1 = rhs, .source_node = stmt });
@@ -3893,6 +3923,13 @@ const GenContext = struct {
                                     const sa_count = try staticArrayCountFromText(ctx, init_type.?, diag) orelse 0;
                                     const source_reg = try ctx.genExpr(init, diag);
                                     const view_reg = try ctx.wrapStaticArrayAsView(source_reg, sa_count, stmt);
+                                    try ctx.decl_registers.put(ctx.program.allocator, stmt, view_reg);
+                                    return;
+                                }
+                                if (init_type != null and isDynamicArrayTypeText(init_type.?)) {
+                                    const elem_text = dynamicArrayElementText(init_type.?) orelse "int";
+                                    const source_reg = try ctx.genExpr(init, diag);
+                                    const view_reg = try ctx.wrapDynamicArrayAsView(source_reg, elem_text, stmt, diag);
                                     try ctx.decl_registers.put(ctx.program.allocator, stmt, view_reg);
                                     return;
                                 }
@@ -9479,6 +9516,11 @@ fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const 
         const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse 0;
         const data_reg = try genCallArg(ctx, arg, diag);
         return try ctx.wrapStaticArrayAsView(data_reg, sa_count, arg);
+    }
+    if (isViewArrayTypeText(target_type) and isDynamicArrayTypeText(source_type)) {
+        const elem_text = dynamicArrayElementText(source_type) orelse "int";
+        const array_reg = try genCallArg(ctx, arg, diag);
+        return try ctx.wrapDynamicArrayAsView(array_reg, elem_text, arg, diag);
     }
     const as_info = try asFieldInfoForConversion(ctx, source_type, target_type, diag) orelse return genCallArg(ctx, arg, diag);
     const base_reg = try genCallArg(ctx, arg, diag);
