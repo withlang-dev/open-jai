@@ -4548,12 +4548,20 @@ const GenContext = struct {
         if (ast.tag(decl) != .var_decl) return false;
         if (!isArrayLiteralNode(ast, init)) return false;
         const type_node = ast.data(decl).lhs;
-        const type_text: []const u8 = if (type_node != @import("Ast.zig").null_node and ast.tag(type_node) == .array_type and ast.data(type_node).lhs != @import("Ast.zig").null_node)
+        var type_text: []const u8 = if (type_node != @import("Ast.zig").null_node and ast.tag(type_node) == .array_type and ast.data(type_node).lhs != @import("Ast.zig").null_node)
             ctx.nodeSource(type_node)
         else if (type_node == @import("Ast.zig").null_node and ast.tag(init) == .typed_array_literal)
             typedArrayLiteralTypeText(ctx, init) orelse return false
         else
             return false;
+        if (type_node != @import("Ast.zig").null_node and ast.tag(type_node) == .array_type) {
+            if (staticArrayCountFromText(ctx, type_text, diag) catch null) |_| {} else {
+                const count = evalIntegerConstExpr(ctx, ast.data(type_node).lhs, diag) catch return false;
+                if (count < 0) return false;
+                const elem_text = ctx.nodeSource(ast.data(type_node).rhs);
+                type_text = ctx.ownedTypeTextFmt("[{d}] {s}", .{ count, elem_text }) catch return false;
+            }
+        }
         const reg = if (type_node != @import("Ast.zig").null_node)
             try ctx.genDefaultValue(type_node, decl, diag)
         else
