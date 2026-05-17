@@ -9562,6 +9562,14 @@ fn isApolloTimeExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
 fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const u8, diag: Diagnostic) !Bytecode.Register {
     const target_type = std.mem.trim(u8, param_type_text, " \t\r\n");
     if (target_type.len == 0) return genCallArg(ctx, arg, diag);
+    if ((ctx.ast.tag(arg) == .aggregate_literal or ctx.ast.tag(arg) == .typed_aggregate_literal) and try typeTextIsEmbeddedStruct(ctx, target_type, diag)) {
+        const size = try typeTextSize(ctx, target_type, diag);
+        const struct_reg = ctx.proc.num_registers;
+        ctx.proc.num_registers += 1;
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = struct_reg, .arg1 = @intCast(@max(size, 1)), .source_node = arg });
+        try ctx.emitAggregateToStruct(arg, struct_reg, target_type, arg, diag);
+        return struct_reg;
+    }
     const source_type = typeTextForExpr(ctx, arg, diag) orelse return genCallArg(ctx, arg, diag);
     if (typeTextsEquivalent(source_type, target_type)) return genCallArg(ctx, arg, diag);
     if (isViewArrayTypeText(target_type) and isStaticArrayTypeText(source_type)) {
