@@ -97,6 +97,7 @@ pub const TypeInfoMemberValue = struct {
     name: []const u8,
     type_name: []const u8,
     flags: i64 = 0,
+    offset_in_bytes: i64 = 0,
 };
 
 pub const CalendarValue = struct {
@@ -1711,7 +1712,7 @@ pub const VM = struct {
                         var found = false;
                         for (ti.members) |member| {
                             if (std.mem.eql(u8, member.name, field_name)) {
-                                regs[inst.dest] = .{ .type_info_member = .{ .name = member.name, .type_name = member.type_name, .flags = @intCast(member.flags) } };
+                                regs[inst.dest] = .{ .type_info_member = .{ .name = member.name, .type_name = member.type_name, .flags = @intCast(member.flags), .offset_in_bytes = @intCast(member.offset_in_bytes) } };
                                 found = true;
                                 break;
                             }
@@ -3228,7 +3229,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, field_name, "name")) return .{ .string = member.name };
         if (std.mem.eql(u8, field_name, "type")) return .{ .type_text = member.type_name };
         if (std.mem.eql(u8, field_name, "flags")) return .{ .int = member.flags };
-        if (std.mem.eql(u8, field_name, "offset_in_bytes")) return .{ .int = 0 };
+        if (std.mem.eql(u8, field_name, "offset_in_bytes")) return .{ .int = member.offset_in_bytes };
         return diag.failAt(0, "VM Type_Info member has no implemented field '{s}'", .{field_name});
     }
 
@@ -5365,6 +5366,7 @@ fn typeInfoMemberValue(member: Bytecode.TypeInfoMember) TypeInfoMemberValue {
         .name = member.name,
         .type_name = member.type_name,
         .flags = member.flags,
+        .offset_in_bytes = member.offset_in_bytes,
     };
 }
 

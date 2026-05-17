@@ -734,7 +734,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend type_to_string register out of range", .{});
                 switch (registers[inst.arg1].kind) {
                     .string, .runtime_string, .string_addr => registers[inst.dest] = registers[inst.arg1],
-                    .type_id, .int, .pointer, .pointer_addr => {
+                    .type_id, .int, .int_addr, .uint, .uint_addr, .pointer, .pointer_addr => {
                         const type_info_name_params = [_]c.LLVMTypeRef{env.llvm_i64};
                         const type_info_name_fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&type_info_name_params), type_info_name_params.len, 0);
                         const type_info_name_fn = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_name") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_name", type_info_name_fn_ty);
@@ -744,13 +744,8 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         try setStringResult(env, registers, inst.dest, result);
                     },
                     else => {
-                        const unknown_str = "__openjai_unknown_type";
-                        const global_str = c.LLVMGetNamedGlobal(env.module, unknown_str) orelse
-                            c.LLVMAddGlobal(env.module, c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), 14), unknown_str);
-                        c.LLVMSetInitializer(global_str, c.LLVMConstStringInContext(env.context, "<unknown type>", 14, 1));
-                        c.LLVMSetGlobalConstant(global_str, 1);
-                        c.LLVMSetLinkage(global_str, c.LLVMPrivateLinkage);
-                        try setStringResult(env, registers, inst.dest, global_str);
+                        const result = try emitInlineRuntimeString(env, "<unknown type>");
+                        try setStringResult(env, registers, inst.dest, result);
                     },
                 }
             },
@@ -2442,9 +2437,15 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         const result = c.LLVMBuildCall2(env.builder, type_info_int_fn_ty, type_info_int_fn, &args, args.len, "type_info_int");
                         try setIntResult(env, registers, inst.dest, result);
                     }
+                } else if (std.mem.eql(u8, field_name, "notes")) {
+                    const fn_params = [_]c.LLVMTypeRef{env.llvm_i64};
+                    const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&fn_params), fn_params.len, 0);
+                    const func = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_notes") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_notes", fn_ty);
+                    var args = [_]c.LLVMValueRef{type_id_val};
+                    const result = c.LLVMBuildCall2(env.builder, fn_ty, func, &args, args.len, "type_info_notes");
+                    try setStringResult(env, registers, inst.dest, result);
                 } else {
                     if (builtin_tag != null and std.mem.eql(u8, field_name, "tag")) {
-                        // For builtin types, return the tag value directly
                         try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, builtin_tag.?.tag_value, 0));
                     } else {
                         const type_info_int_params = [_]c.LLVMTypeRef{ env.llvm_i64, env.llvm_i64 };
@@ -2470,12 +2471,25 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     var args = [_]c.LLVMValueRef{member_ptr};
                     const result = c.LLVMBuildCall2(env.builder, env.type_info_member_name_fn_ty, env.type_info_member_name_fn, &args, args.len, "member_name");
                     try setStringResult(env, registers, inst.dest, result);
-                } else if (std.mem.eql(u8, field_name, "type") or std.mem.eql(u8, field_name, "type_name")) {
+                } else if (std.mem.eql(u8, field_name, "type_name")) {
                     var args = [_]c.LLVMValueRef{member_ptr};
                     const result = c.LLVMBuildCall2(env.builder, env.type_info_member_type_name_fn_ty, env.type_info_member_type_name_fn, &args, args.len, "member_type_name");
                     try setStringResult(env, registers, inst.dest, result);
+                } else if (std.mem.eql(u8, field_name, "type")) {
+                    const fn_params = [_]c.LLVMTypeRef{env.ptr_ty};
+                    const fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&fn_params), fn_params.len, 0);
+                    const func = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_member_type_id") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_member_type_id", fn_ty);
+                    var args = [_]c.LLVMValueRef{member_ptr};
+                    const result = c.LLVMBuildCall2(env.builder, fn_ty, func, &args, args.len, "member_type_id");
+                    try setIntResult(env, registers, inst.dest, result);
+                } else if (std.mem.eql(u8, field_name, "notes")) {
+                    const fn_params = [_]c.LLVMTypeRef{env.ptr_ty};
+                    const fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&fn_params), fn_params.len, 0);
+                    const func = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_member_notes") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_member_notes", fn_ty);
+                    var args = [_]c.LLVMValueRef{member_ptr};
+                    const result = c.LLVMBuildCall2(env.builder, fn_ty, func, &args, args.len, "member_notes");
+                    try setStringResult(env, registers, inst.dest, result);
                 } else {
-                    // flags, offset_in_bytes, etc.
                     const field_id: u64 = if (std.mem.eql(u8, field_name, "flags")) 0 else if (std.mem.eql(u8, field_name, "offset_in_bytes")) 1 else 0;
                     var args = [_]c.LLVMValueRef{ member_ptr, c.LLVMConstInt(env.llvm_i64, field_id, 0) };
                     const result = c.LLVMBuildCall2(env.builder, env.type_info_member_int_field_fn_ty, env.type_info_member_int_field_fn, &args, args.len, "member_int_field");
@@ -2488,7 +2502,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const pool_global = c.LLVMGetNamedGlobal(env.module, "openjai_type_info_member_pool");
                 if (pool_global != null) {
                     // GEP into the pool array to get a pointer to the member entry
-                    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty, env.llvm_i64 };
                     const member_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&member_entry_fields), member_entry_fields.len, 0);
                     const pool_arr_ty = c.LLVMArrayType(member_entry_ty, @intCast(env.program.type_info_members.items.len));
                     var gep_indices = [_]c.LLVMValueRef{
@@ -3191,13 +3205,12 @@ fn emitTypeInfoTable(env: *LlvmEnv) !void {
         return;
     }
 
-    // TypeInfoMemberEntry struct layout: { name_ptr: ptr, name_len: i64, type_name_ptr: ptr, type_name_len: i64, flags: i64 }
-    // On 64-bit: 5 x i64 fields = 40 bytes
-    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+    // TypeInfoMemberEntry struct layout: { name_ptr: ptr, name_len: i64, type_name_ptr: ptr, type_name_len: i64, flags: i64, offset_in_bytes: i64 }
+    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty, env.llvm_i64 };
     const member_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&member_entry_fields), member_entry_fields.len, 0);
 
-    // TypeInfoEntry struct layout: { name_ptr: ptr, name_len: i64, tag: i64, member_count: i64, members: ptr }
-    const type_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty };
+    // TypeInfoEntry struct layout: { name_ptr: ptr, name_len: i64, tag: i64, member_count: i64, members: ptr, runtime_size: i64 }
+    const type_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64 };
     const type_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&type_entry_fields), type_entry_fields.len, 0);
 
     // Create global constant arrays for each type's members, and string globals for names
@@ -3265,13 +3278,28 @@ fn emitTypeInfoTable(env: *LlvmEnv) !void {
                     }
                     break :mblk tng;
                 };
-                // Build TypeInfoMemberEntry struct constant
+                const m_notes_str = formatNotesString(env.allocator, member.notes) catch "[]";
+                const m_notes_global = mblk: {
+                    const m_notes_z = try std.fmt.allocPrint(env.allocator, "ti_{d}_m_{d}_notes", .{ ti_idx, m_idx });
+                    defer env.allocator.free(m_notes_z);
+                    const m_notes_z2 = try env.allocator.dupeZ(u8, m_notes_z);
+                    defer env.allocator.free(m_notes_z2);
+                    const nty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(m_notes_str.len));
+                    const ng = c.LLVMAddGlobal(env.module, nty, m_notes_z2.ptr);
+                    c.LLVMSetGlobalConstant(ng, 1);
+                    c.LLVMSetLinkage(ng, c.LLVMPrivateLinkage);
+                    c.LLVMSetInitializer(ng, c.LLVMConstStringInContext(env.context, m_notes_str.ptr, @intCast(m_notes_str.len), 1));
+                    break :mblk ng;
+                };
                 var member_fields_vals = [_]c.LLVMValueRef{
-                    m_name_global, // name_ptr
-                    c.LLVMConstInt(env.llvm_i64, member.name.len, 0), // name_len
-                    m_type_name_global, // type_name_ptr
-                    c.LLVMConstInt(env.llvm_i64, member.type_name.len, 0), // type_name_len
-                    c.LLVMConstInt(env.llvm_i64, member.flags, 0), // flags
+                    m_name_global,
+                    c.LLVMConstInt(env.llvm_i64, member.name.len, 0),
+                    m_type_name_global,
+                    c.LLVMConstInt(env.llvm_i64, member.type_name.len, 0),
+                    c.LLVMConstInt(env.llvm_i64, member.flags, 0),
+                    c.LLVMConstInt(env.llvm_i64, member.offset_in_bytes, 0),
+                    m_notes_global,
+                    c.LLVMConstInt(env.llvm_i64, m_notes_str.len, 0),
                 };
                 member_values[m_idx] = c.LLVMConstStructInContext(env.context, &member_fields_vals, member_fields_vals.len, 0);
             }
@@ -3288,13 +3316,28 @@ fn emitTypeInfoTable(env: *LlvmEnv) !void {
             break :blk members_g;
         };
 
-        // Build TypeInfoEntry struct constant
+        const ti_notes_str = formatNotesString(env.allocator, ti.notes) catch "[]";
+        const ti_notes_global = blk2: {
+            const tn_z = try std.fmt.allocPrint(env.allocator, "ti_{d}_notes", .{ti_idx});
+            defer env.allocator.free(tn_z);
+            const tn_z2 = try env.allocator.dupeZ(u8, tn_z);
+            defer env.allocator.free(tn_z2);
+            const nty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(ti_notes_str.len));
+            const ng = c.LLVMAddGlobal(env.module, nty, tn_z2.ptr);
+            c.LLVMSetGlobalConstant(ng, 1);
+            c.LLVMSetLinkage(ng, c.LLVMPrivateLinkage);
+            c.LLVMSetInitializer(ng, c.LLVMConstStringInContext(env.context, ti_notes_str.ptr, @intCast(ti_notes_str.len), 1));
+            break :blk2 ng;
+        };
         var type_fields_vals = [_]c.LLVMValueRef{
-            name_global, // name_ptr
-            c.LLVMConstInt(env.llvm_i64, ti.name.len, 0), // name_len
-            c.LLVMConstInt(env.llvm_i64, ti.tag, 0), // tag
-            c.LLVMConstInt(env.llvm_i64, ti.members.len, 0), // member_count
-            members_global, // members pointer
+            name_global,
+            c.LLVMConstInt(env.llvm_i64, ti.name.len, 0),
+            c.LLVMConstInt(env.llvm_i64, ti.tag, 0),
+            c.LLVMConstInt(env.llvm_i64, ti.members.len, 0),
+            members_global,
+            c.LLVMConstInt(env.llvm_i64, ti.runtime_size, 0),
+            ti_notes_global,
+            c.LLVMConstInt(env.llvm_i64, ti_notes_str.len, 0),
         };
         type_entry_values[ti_idx] = c.LLVMConstStructInContext(env.context, &type_fields_vals, type_fields_vals.len, 0);
     }
@@ -3344,12 +3387,28 @@ fn emitTypeInfoTable(env: *LlvmEnv) !void {
                 }
                 break :mblk tng;
             };
+            const pool_notes_str = formatNotesString(env.allocator, member.notes) catch "[]";
+            const pool_notes_global = mblk: {
+                const pn = try std.fmt.allocPrint(env.allocator, "tim_{d}_notes", .{m_idx});
+                defer env.allocator.free(pn);
+                const pn_z = try env.allocator.dupeZ(u8, pn);
+                defer env.allocator.free(pn_z);
+                const pnty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(pool_notes_str.len));
+                const png = c.LLVMAddGlobal(env.module, pnty, pn_z.ptr);
+                c.LLVMSetGlobalConstant(png, 1);
+                c.LLVMSetLinkage(png, c.LLVMPrivateLinkage);
+                c.LLVMSetInitializer(png, c.LLVMConstStringInContext(env.context, pool_notes_str.ptr, @intCast(pool_notes_str.len), 1));
+                break :mblk png;
+            };
             var member_fields_vals = [_]c.LLVMValueRef{
                 m_name_global,
                 c.LLVMConstInt(env.llvm_i64, member.name.len, 0),
                 m_type_name_global,
                 c.LLVMConstInt(env.llvm_i64, member.type_name.len, 0),
                 c.LLVMConstInt(env.llvm_i64, member.flags, 0),
+                c.LLVMConstInt(env.llvm_i64, member.offset_in_bytes, 0),
+                pool_notes_global,
+                c.LLVMConstInt(env.llvm_i64, pool_notes_str.len, 0),
             };
             pool_values[m_idx] = c.LLVMConstStructInContext(env.context, &member_fields_vals, member_fields_vals.len, 0);
         }
@@ -3366,6 +3425,21 @@ fn emitTypeInfoTable(env: *LlvmEnv) !void {
         c.LLVMConstInt(env.llvm_i64, count, 0),
     };
     _ = c.LLVMBuildCall2(env.builder, env.set_type_info_table_fn_ty, env.set_type_info_table_fn, &args, args.len, "");
+}
+
+fn formatNotesString(allocator: std.mem.Allocator, notes: []const []const u8) ![]const u8 {
+    if (notes.len == 0) return "[]";
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+    try buf.append(allocator, '[');
+    for (notes, 0..) |note, i| {
+        if (i > 0) try buf.appendSlice(allocator, ", ");
+        try buf.append(allocator, '"');
+        try buf.appendSlice(allocator, note);
+        try buf.append(allocator, '"');
+    }
+    try buf.append(allocator, ']');
+    return try allocator.dupe(u8, buf.items);
 }
 
 fn sanitizeLlvmSymbolName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {

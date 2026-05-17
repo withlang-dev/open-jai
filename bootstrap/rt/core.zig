@@ -1652,6 +1652,9 @@ const TypeInfoMemberEntry = extern struct {
     type_name_ptr: [*]const u8,
     type_name_len: u64,
     flags: u64,
+    offset_in_bytes: u64,
+    notes_ptr: [*]const u8,
+    notes_len: u64,
 };
 
 const TypeInfoEntry = extern struct {
@@ -1660,6 +1663,9 @@ const TypeInfoEntry = extern struct {
     tag: u64,
     member_count: u64,
     members: [*]const TypeInfoMemberEntry,
+    runtime_size: u64,
+    notes_ptr: [*]const u8,
+    notes_len: u64,
 };
 
 export fn __openjai_set_type_info_table(table: [*]const TypeInfoEntry, count: usize) void {
@@ -1699,14 +1705,29 @@ fn tagNameFromId(tag: u64) []const u8 {
 
 export fn auto_release_temp() void {}
 
-export fn __openjai_type_info_lookup(name_ptr: [*]const u8, name_len: usize) i64 {
-    const name = name_ptr[0..name_len];
+fn typeNameAlias(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "int")) return "s64";
+    if (std.mem.eql(u8, name, "float")) return "float32";
+    return null;
+}
+
+fn lookupTypeByName(name: []const u8) i64 {
     const table = type_info_table orelse return -1;
     for (0..type_info_count) |i| {
         const entry = table[i];
-        if (entry.name_len == name_len and std.mem.eql(u8, entry.name_ptr[0..entry.name_len], name)) return @intCast(i);
+        if (entry.name_len == name.len and std.mem.eql(u8, entry.name_ptr[0..entry.name_len], name)) return @intCast(i);
+    }
+    if (typeNameAlias(name)) |alias| {
+        for (0..type_info_count) |i| {
+            const entry = table[i];
+            if (entry.name_len == alias.len and std.mem.eql(u8, entry.name_ptr[0..entry.name_len], alias)) return @intCast(i);
+        }
     }
     return -1;
+}
+
+export fn __openjai_type_info_lookup(name_ptr: [*]const u8, name_len: usize) i64 {
+    return lookupTypeByName(name_ptr[0..name_len]);
 }
 
 export fn __openjai_type_info_get_field(type_id: i64, name_ptr: [*]const u8, name_len: usize) ?*TypeInfoMemberEntry {
@@ -1761,10 +1782,15 @@ export fn __openjai_type_info_member_type_name(member_ptr: ?*const TypeInfoMembe
 export fn __openjai_type_info_member_int_field(member_ptr: ?*const TypeInfoMemberEntry, field_id: i64) i64 {
     const member = member_ptr orelse return 0;
     return switch (field_id) {
-        0 => @intCast(member.flags), // flags
-        1 => 0, // offset_in_bytes (placeholder)
+        0 => @intCast(member.flags),
+        1 => @intCast(member.offset_in_bytes),
         else => 0,
     };
+}
+
+export fn __openjai_type_info_member_type_id(member_ptr: ?*const TypeInfoMemberEntry) i64 {
+    const member = member_ptr orelse return -1;
+    return lookupTypeByName(member.type_name_ptr[0..member.type_name_len]);
 }
 
 export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
@@ -1772,13 +1798,25 @@ export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
     const idx: usize = @intCast(type_id);
     const entry = type_info_table.?[idx];
     return switch (field_id) {
-        1 => 0, // runtime_size (placeholder)
+        1 => @intCast(entry.runtime_size),
         2 => @intCast(entry.tag),
-        3 => @intCast(entry.member_count), // count (members count)
+        3 => @intCast(entry.member_count),
         4 => 0, // signed
         5 => 0, // enum_type_flags
         6 => 0, // internal_type
         else => 0,
     };
+}
+
+export fn __openjai_type_info_notes(type_id: i64) ?*OpenJaiRuntimeString {
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("[]");
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    return makeRuntimeString(entry.notes_ptr[0..entry.notes_len]);
+}
+
+export fn __openjai_type_info_member_notes(member_ptr: ?*const TypeInfoMemberEntry) ?*OpenJaiRuntimeString {
+    const member = member_ptr orelse return makeRuntimeString("[]");
+    return makeRuntimeString(member.notes_ptr[0..member.notes_len]);
 }
 

@@ -247,12 +247,16 @@ pub const TypeInfoMember = struct {
     name: []const u8,
     type_name: []const u8,
     flags: u32 = 0,
+    offset_in_bytes: u32 = 0,
+    notes: []const []const u8 = &.{},
 };
 
 pub const TypeInfo = struct {
     name: []const u8,
     tag: u32,
     members: []TypeInfoMember,
+    runtime_size: u32 = 0,
+    notes: []const []const u8 = &.{},
 };
 
 pub const CodeLiteral = struct {
@@ -425,6 +429,7 @@ pub const Program = struct {
             .name = owned_name,
             .type_name = owned_type_name,
             .flags = member.flags,
+            .offset_in_bytes = member.offset_in_bytes,
         });
         return idx;
     }
@@ -433,7 +438,19 @@ pub const Program = struct {
         for (p.type_infos.items, 0..) |info, i| {
             if (std.mem.eql(u8, info.name, name)) return @intCast(i);
         }
+        const canonical = typeNameAlias(name);
+        if (!std.mem.eql(u8, canonical, name)) {
+            for (p.type_infos.items, 0..) |info, i| {
+                if (std.mem.eql(u8, info.name, canonical)) return @intCast(i);
+            }
+        }
         return null;
+    }
+
+    fn typeNameAlias(name: []const u8) []const u8 {
+        if (std.mem.eql(u8, name, "int")) return "s64";
+        if (std.mem.eql(u8, name, "float")) return "float32";
+        return name;
     }
 
     pub fn addTypeInfo(p: *Program, name: []const u8, tag: u32, members: []const TypeInfoMember) !u32 {
@@ -449,17 +466,39 @@ pub const Program = struct {
                 p.allocator.free(member.type_name);
             }
         }
+        var total_size: u32 = 0;
         for (members, 0..) |member, i| {
+            const member_size = sizeOfTypeText(member.type_name);
             owned_members[i] = .{
                 .name = try p.allocator.dupe(u8, member.name),
                 .type_name = try p.allocator.dupe(u8, member.type_name),
                 .flags = member.flags,
+                .offset_in_bytes = total_size,
+                .notes = member.notes,
             };
+            total_size += member_size;
             initialized += 1;
         }
         const idx: u32 = @intCast(p.type_infos.items.len);
-        try p.type_infos.append(p.allocator, .{ .name = owned_name, .tag = tag, .members = owned_members });
+        try p.type_infos.append(p.allocator, .{ .name = owned_name, .tag = tag, .members = owned_members, .runtime_size = total_size });
         return idx;
+    }
+
+    pub fn sizeOfTypeText(type_text: []const u8) u32 {
+        const clean = std.mem.trim(u8, type_text, " \t\r\n");
+        if (clean.len == 0) return 0;
+        if (std.mem.startsWith(u8, clean, "*")) return 8;
+        if (std.mem.startsWith(u8, clean, "[..] ") or std.mem.startsWith(u8, clean, "[..]")) return 24;
+        if (std.mem.eql(u8, clean, "string")) return 16;
+        if (std.mem.eql(u8, clean, "int") or std.mem.eql(u8, clean, "s64") or std.mem.eql(u8, clean, "u64")) return 8;
+        if (std.mem.eql(u8, clean, "s32") or std.mem.eql(u8, clean, "u32")) return 4;
+        if (std.mem.eql(u8, clean, "s16") or std.mem.eql(u8, clean, "u16")) return 2;
+        if (std.mem.eql(u8, clean, "s8") or std.mem.eql(u8, clean, "u8")) return 1;
+        if (std.mem.eql(u8, clean, "float") or std.mem.eql(u8, clean, "float64")) return 8;
+        if (std.mem.eql(u8, clean, "float32")) return 4;
+        if (std.mem.eql(u8, clean, "bool")) return 1;
+        if (std.mem.eql(u8, clean, "void")) return 0;
+        return 8;
     }
 
     pub fn addGlobal(p: *Program, source_node: u32, size: u32) !u32 {
