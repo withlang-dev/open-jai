@@ -7407,14 +7407,15 @@ const GenContext = struct {
                         return try ctx.genTypedPlaceholderValue(expr, diag);
                     }
                     if (std.mem.eql(u8, name, "swap")) {
-                        if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "swap expects exactly two arguments", .{});
-                        const lhs_decl = try ctx.swapArgDecl(@intCast(args[0]), diag);
-                        const rhs_decl = try ctx.swapArgDecl(@intCast(args[1]), diag);
-                        const lhs_reg = ctx.decl_registers.get(lhs_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[0]))].start, "swap left argument has no generated storage", .{});
-                        const rhs_reg = ctx.decl_registers.get(rhs_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[1]))].start, "swap right argument has no generated storage", .{});
-                        try ctx.decl_registers.put(program.allocator, lhs_decl, rhs_reg);
-                        try ctx.decl_registers.put(program.allocator, rhs_decl, lhs_reg);
-                        return lhs_reg;
+                        if (args.len == 2 and isPointerArgExpr(ast, @intCast(args[0])) and isPointerArgExpr(ast, @intCast(args[1]))) {
+                            const lhs_decl = try ctx.swapArgDecl(@intCast(args[0]), diag);
+                            const rhs_decl = try ctx.swapArgDecl(@intCast(args[1]), diag);
+                            const lhs_reg = ctx.decl_registers.get(lhs_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[0]))].start, "swap left argument has no generated storage", .{});
+                            const rhs_reg = ctx.decl_registers.get(rhs_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(@intCast(args[1]))].start, "swap right argument has no generated storage", .{});
+                            try ctx.decl_registers.put(program.allocator, lhs_decl, rhs_reg);
+                            try ctx.decl_registers.put(program.allocator, rhs_decl, lhs_reg);
+                            return lhs_reg;
+                        }
                     }
                     for (args) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
@@ -7550,18 +7551,19 @@ const GenContext = struct {
             return reg;
         }
         if (std.mem.eql(u8, name, "swap")) {
-            if (args.len != 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "swap expects exactly two arguments", .{});
-            const lhs_ptr = try ctx.genExpr(@intCast(args[0]), diag);
-            const rhs_ptr = try ctx.genExpr(@intCast(args[1]), diag);
-            const lhs_value = ctx.proc.num_registers;
-            ctx.proc.num_registers += 1;
-            const rhs_value = ctx.proc.num_registers;
-            ctx.proc.num_registers += 1;
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = lhs_value, .arg1 = lhs_ptr, .source_node = expr });
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = rhs_value, .arg1 = rhs_ptr, .source_node = expr });
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = lhs_ptr, .arg1 = rhs_value, .source_node = expr });
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = rhs_ptr, .arg1 = lhs_value, .source_node = expr });
-            return lhs_value;
+            if (args.len == 2 and isPointerArgExpr(ast, @intCast(args[0])) and isPointerArgExpr(ast, @intCast(args[1]))) {
+                const lhs_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                const rhs_ptr = try ctx.genExpr(@intCast(args[1]), diag);
+                const lhs_value = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                const rhs_value = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = lhs_value, .arg1 = lhs_ptr, .source_node = expr });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_ptr, .dest = rhs_value, .arg1 = rhs_ptr, .source_node = expr });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = lhs_ptr, .arg1 = rhs_value, .source_node = expr });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = rhs_ptr, .arg1 = lhs_value, .source_node = expr });
+                return lhs_value;
+            }
         }
         if (std.mem.eql(u8, name, "sqrt") or std.mem.eql(u8, name, "cos")) {
             if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one numeric argument", .{name});
@@ -9473,6 +9475,11 @@ fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const 
     if (target_type.len == 0) return genCallArg(ctx, arg, diag);
     const source_type = typeTextForExpr(ctx, arg, diag) orelse return genCallArg(ctx, arg, diag);
     if (typeTextsEquivalent(source_type, target_type)) return genCallArg(ctx, arg, diag);
+    if (isViewArrayTypeText(target_type) and isStaticArrayTypeText(source_type)) {
+        const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse 0;
+        const data_reg = try genCallArg(ctx, arg, diag);
+        return try ctx.wrapStaticArrayAsView(data_reg, sa_count, arg);
+    }
     const as_info = try asFieldInfoForConversion(ctx, source_type, target_type, diag) orelse return genCallArg(ctx, arg, diag);
     const base_reg = try genCallArg(ctx, arg, diag);
     const addr = if (as_info.offset == 0) base_reg else blk: {
@@ -9523,6 +9530,11 @@ fn stmtInitOrAssignRhs(ast: *const Ast, stmt: NodeIndex) ?NodeIndex {
     };
     if (rhs == @import("Ast.zig").null_node) return null;
     return rhs;
+}
+
+fn isPointerArgExpr(ast: *const Ast, arg: NodeIndex) bool {
+    if (arg == @import("Ast.zig").null_node or arg >= ast.node_tags.items.len) return false;
+    return ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .star;
 }
 
 fn handleArgNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
