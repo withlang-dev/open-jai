@@ -1009,11 +1009,14 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     .float_addr => {
                         registers[inst.dest] = .{ .llvm_value = registers[inst.arg1].llvm_value, .kind = .pointer };
                     },
-                    .pointer, .pointer_addr => {
+                    .pointer => {
                         const slot = buildEntryAlloca(env, current_function, env.ptr_ty, "addr_local_ptr");
-                        _ = c.LLVMBuildStore(env.builder, try pointerValue(env, registers[inst.arg1], diag, "addressable pointer local"), slot);
+                        _ = c.LLVMBuildStore(env.builder, registers[inst.arg1].llvm_value, slot);
                         registers[inst.arg1] = .{ .llvm_value = slot, .kind = .{ .pointer_addr = inst.arg1 } };
                         registers[inst.dest] = .{ .llvm_value = slot, .kind = .pointer };
+                    },
+                    .pointer_addr => {
+                        registers[inst.dest] = .{ .llvm_value = registers[inst.arg1].llvm_value, .kind = .pointer };
                     },
                     .runtime_string => {
                         const rs = try runtimeStringValue(env, registers[inst.arg1], diag);

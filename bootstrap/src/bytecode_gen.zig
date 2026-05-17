@@ -9614,7 +9614,13 @@ fn genAddressOfLvalue(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !Byte
             const value = try ctx.genExpr(expr, diag);
             if (typeTextForExpr(ctx, expr, diag)) |ty| {
                 const clean = stripPointerText(ty);
-                if (isDynamicArrayTypeText(clean) or isStaticArrayTypeText(clean) or (try typeTextIsStruct(ctx, clean, diag))) return value;
+                if (isDynamicArrayTypeText(clean)) {
+                    const addr = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .addr_of_local, .dest = addr, .arg1 = value, .source_node = expr });
+                    return addr;
+                }
+                if (isStaticArrayTypeText(clean) or (try typeTextIsStruct(ctx, clean, diag))) return value;
                 if (std.mem.eql(u8, firstTypeWord(clean), "string")) {
                     return try ctx.materializeStringLocal(expr, value, expr, diag);
                 }
