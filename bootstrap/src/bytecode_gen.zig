@@ -1229,6 +1229,7 @@ const GenContext = struct {
 
     fn tryInlineProcCall(ctx: *GenContext, proc_node: NodeIndex, args: []const u32, call_expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         const ast = ctx.ast;
+        if (!procHasBody(ast, proc_node)) return null;
         const target_is_expand = procHasExpandModifierLocal(ast, proc_node);
         if (target_is_expand and !procHasReturnValue(ast, proc_node)) return null;
         for (ctx.inline_stack.items) |active_proc| if (active_proc == proc_node) return null;
@@ -6199,7 +6200,19 @@ const GenContext = struct {
                             }
                             if (std.mem.eql(u8, field_name, "reset") and args.len >= 1) {
                                 const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
-                                try proc.instructions.append(program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .source_node = expr });
+                                var overwrite: u32 = 0;
+                                for (args[1..]) |arg_idx| {
+                                    const arg_n: NodeIndex = @intCast(arg_idx);
+                                    if (ast.tag(arg_n) == .assign_stmt) {
+                                        const kname = std.mem.trim(u8, ctx.nodeSource(ast.data(arg_n).lhs), " \t\r\n");
+                                        if (std.mem.eql(u8, kname, "overwrite_memory")) {
+                                            const val_node = ast.data(arg_n).rhs;
+                                            if (ast.tag(val_node) == .bool_literal and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(val_node)), "true"))
+                                                overwrite = 1;
+                                        }
+                                    }
+                                }
+                                try proc.instructions.append(program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .arg2 = overwrite, .source_node = expr });
                                 return pool_ptr;
                             }
                         }
@@ -6536,17 +6549,20 @@ const GenContext = struct {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "reset expects a pool pointer", .{});
                     const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
-                    try proc.instructions.append(program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .source_node = expr });
+                    var overwrite: u32 = 0;
                     for (args[1..]) |arg_idx| {
                         const arg: NodeIndex = @intCast(arg_idx);
-                        if (ast.tag(arg) == .assign_stmt) _ = try ctx.genExpr(ast.data(arg).rhs, diag) else _ = try ctx.genExpr(arg, diag);
+                        if (ast.tag(arg) == .assign_stmt) {
+                            const kname = std.mem.trim(u8, ctx.nodeSource(ast.data(arg).lhs), " \t\r\n");
+                            if (std.mem.eql(u8, kname, "overwrite_memory")) {
+                                const val_node = ast.data(arg).rhs;
+                                if (ast.tag(val_node) == .bool_literal and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(val_node)), "true"))
+                                    overwrite = 1;
+                            }
+                        }
                     }
+                    try proc.instructions.append(program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .arg2 = overwrite, .source_node = expr });
                     return pool_ptr;
-                }
-                if (std.mem.eql(u8, name, "set_allocators")) {
-                    const args = ast.extraSlice(ast.data(expr).rhs);
-                    for (args) |arg_idx| _ = try ctx.genExpr(@intCast(arg_idx), diag);
-                    return try ctx.emitInt(expr, 0);
                 }
                 if (std.mem.eql(u8, name, "get_capabilities")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
@@ -7376,12 +7392,61 @@ const GenContext = struct {
         }
     }
 
+    fn isPoolArgType(ctx: *GenContext, args: []const u32, diag: Diagnostic) ?bool {
+        if (args.len == 0) return null;
+        const arg_type = typeTextForExpr(ctx, @intCast(args[0]), diag) orelse return null;
+        const base = firstTypeWord(stripPointerText(arg_type));
+        if (std.mem.eql(u8, base, "Pool")) return false;
+        if (std.mem.eql(u8, base, "Flat_Pool")) return true;
+        return null;
+    }
+
     fn genCompilerIntrinsicCall(ctx: *GenContext, name: []const u8, expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         const ast = ctx.ast;
         const args = ast.extraSlice(ast.data(expr).rhs);
 
         if (try ctx.genStringRuntimeCall(name, expr, args, diag)) |reg| return reg;
 
+        if (std.mem.eql(u8, name, "get")) {
+            if (isPoolArgType(ctx, args, diag)) |is_flat| {
+                if (args.len < 2) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get expects a pool pointer and size", .{});
+                const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                const size_reg = try ctx.genExpr(@intCast(args[1]), diag);
+                const kind: u32 = if (is_flat) 1 else 0;
+                const reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .pool_get, .dest = reg, .arg1 = pool_ptr, .arg2 = size_reg, .arg3 = kind, .source_node = expr });
+                return reg;
+            }
+        }
+        if (std.mem.eql(u8, name, "release") or std.mem.eql(u8, name, "fini")) {
+            if (isPoolArgType(ctx, args, diag) != null) {
+                if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects a pool pointer", .{name});
+                const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .pool_release, .arg1 = pool_ptr, .source_node = expr });
+                return pool_ptr;
+            }
+        }
+        if (std.mem.eql(u8, name, "reset")) {
+            if (isPoolArgType(ctx, args, diag) != null) {
+                if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "reset expects a pool pointer", .{});
+                const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
+                var overwrite: u32 = 0;
+                for (args[1..]) |arg_idx| {
+                    const arg: NodeIndex = @intCast(arg_idx);
+                    if (ast.tag(arg) == .assign_stmt) {
+                        const kname = std.mem.trim(u8, ctx.nodeSource(ast.data(arg).lhs), " \t\r\n");
+                        if (std.mem.eql(u8, kname, "overwrite_memory")) {
+                            const val_node = ast.data(arg).rhs;
+                            if (ast.tag(val_node) == .bool_literal and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(val_node)), "true"))
+                                overwrite = 1;
+                        }
+                    }
+                }
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .pool_reset, .arg1 = pool_ptr, .arg2 = overwrite, .source_node = expr });
+                return pool_ptr;
+            }
+        }
         if (std.mem.eql(u8, name, "get_number_of_processors")) {
             if (args.len != 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "get_number_of_processors expects no arguments", .{});
             const count = std.Thread.getCpuCount() catch 1;
@@ -13257,6 +13322,32 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
                         return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "formatted static array output does not support element type '{s}'", .{elem_type});
                     const elem_size = try typeTextSize(ctx, elem_type, diag);
                     try proc.instructions.append(program.allocator, .{ .opcode = opcode, .arg1 = arg_reg, .arg2 = @intCast(count), .arg3 = @intCast(elem_size), .source_node = arg_node });
+                }
+            } else if (dynamicArrayElementText(arg_type)) |elem_type| {
+                const elem_name = firstTypeWord(elem_type);
+                const arg_reg = try genCallArg(ctx, arg_node, diag);
+                const count_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                const elem_size = try typeTextSize(ctx, elem_type, diag);
+                const is_view = isViewArrayTypeText(arg_type);
+                try proc.instructions.append(program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = arg_reg, .arg3 = @intCast(@max(elem_size, 1)), .arg5 = if (is_view) @as(u32, 1) else @as(u32, 0), .source_node = arg_node });
+                const data_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try proc.instructions.append(program.allocator, .{ .opcode = .array_data, .dest = data_reg, .arg1 = arg_reg, .arg5 = if (is_view) @as(u32, 1) else @as(u32, 0), .source_node = arg_node });
+                const opcode: ?Bytecode.Opcode = if (std.mem.eql(u8, elem_name, "int") or std.mem.eql(u8, elem_name, "s64") or std.mem.eql(u8, elem_name, "u8") or std.mem.eql(u8, elem_name, "s8") or std.mem.eql(u8, elem_name, "u16") or std.mem.eql(u8, elem_name, "s16") or std.mem.eql(u8, elem_name, "u32") or std.mem.eql(u8, elem_name, "s32") or std.mem.eql(u8, elem_name, "u64"))
+                    .format_static_int_array
+                else if (std.mem.eql(u8, elem_name, "float") or std.mem.eql(u8, elem_name, "float64") or std.mem.eql(u8, elem_name, "float32"))
+                    .format_static_float_array
+                else if (std.mem.eql(u8, elem_name, "string"))
+                    .format_static_string_array
+                else if (std.mem.eql(u8, elem_name, "bool"))
+                    .format_static_bool_array
+                else
+                    null;
+                if (opcode) |op| {
+                    try proc.instructions.append(program.allocator, .{ .opcode = op, .arg1 = data_reg, .arg2 = count_reg, .arg3 = @intCast(elem_size), .arg5 = 1, .source_node = arg_node });
+                } else {
+                    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = arg_reg, .source_node = arg_node });
                 }
             } else {
                 const arg_reg = try genCallArg(ctx, arg_node, diag);

@@ -184,6 +184,18 @@ const LlvmEnv = struct {
     llvm_f32: c.LLVMTypeRef,
     llvm_f64: c.LLVMTypeRef,
     ptr_ty: c.LLVMTypeRef,
+    set_type_info_table_fn_ty: c.LLVMTypeRef,
+    set_type_info_table_fn: c.LLVMValueRef,
+    type_info_get_members_fn_ty: c.LLVMTypeRef,
+    type_info_get_members_fn: c.LLVMValueRef,
+    type_info_member_name_fn_ty: c.LLVMTypeRef,
+    type_info_member_name_fn: c.LLVMValueRef,
+    type_info_member_type_name_fn_ty: c.LLVMTypeRef,
+    type_info_member_type_name_fn: c.LLVMValueRef,
+    type_info_member_int_field_fn_ty: c.LLVMTypeRef,
+    type_info_member_int_field_fn: c.LLVMValueRef,
+    type_info_lookup_fn_ty: c.LLVMTypeRef,
+    type_info_lookup_fn: c.LLVMValueRef,
     current_proc_name: []const u8 = "<none>",
     current_proc_index: usize = 0,
     current_opcode: Bytecode.Opcode = .ret_void,
@@ -427,6 +439,24 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const array_index_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&array_index_params), array_index_params.len, 0);
     const array_index_fn = c.LLVMAddFunction(module, "__openjai_array_index", array_index_fn_ty);
 
+    const set_type_info_table_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const set_type_info_table_fn_ty = c.LLVMFunctionType(void_ty, @constCast(&set_type_info_table_params), set_type_info_table_params.len, 0);
+    const set_type_info_table_fn = c.LLVMAddFunction(module, "__openjai_set_type_info_table", set_type_info_table_fn_ty);
+    const type_info_get_members_params = [_]c.LLVMTypeRef{llvm_i64};
+    const type_info_get_members_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&type_info_get_members_params), type_info_get_members_params.len, 0);
+    const type_info_get_members_fn = c.LLVMAddFunction(module, "__openjai_type_info_get_members", type_info_get_members_fn_ty);
+    const type_info_member_name_params = [_]c.LLVMTypeRef{ptr_ty};
+    const type_info_member_name_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&type_info_member_name_params), type_info_member_name_params.len, 0);
+    const type_info_member_name_fn = c.LLVMAddFunction(module, "__openjai_type_info_member_name", type_info_member_name_fn_ty);
+    const type_info_member_type_name_fn_ty = c.LLVMFunctionType(ptr_ty, @constCast(&type_info_member_name_params), type_info_member_name_params.len, 0);
+    const type_info_member_type_name_fn = c.LLVMAddFunction(module, "__openjai_type_info_member_type_name", type_info_member_type_name_fn_ty);
+    const type_info_member_int_field_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const type_info_member_int_field_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&type_info_member_int_field_params), type_info_member_int_field_params.len, 0);
+    const type_info_member_int_field_fn = c.LLVMAddFunction(module, "__openjai_type_info_member_int_field", type_info_member_int_field_fn_ty);
+    const type_info_lookup_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
+    const type_info_lookup_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&type_info_lookup_params), type_info_lookup_params.len, 0);
+    const type_info_lookup_fn = c.LLVMAddFunction(module, "__openjai_type_info_lookup", type_info_lookup_fn_ty);
+
     const user_main_fn_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
     const user_main_fn = if (program.main_proc != null) c.LLVMAddFunction(module, "__openjai_user_main", user_main_fn_ty) else null;
     const proc_void_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
@@ -455,7 +485,7 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         proc_functions[i] = c.LLVMAddFunction(module, fn_name_z.ptr, fn_ty);
     }
 
-    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_uint_fn_ty = print_uint_fn_ty, .print_uint_fn = print_uint_fn, .print_static_int_array_fn_ty = print_static_int_array_fn_ty, .print_static_int_array_fn = print_static_int_array_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .get_time_seconds_fn_ty = get_time_seconds_fn_ty, .get_time_seconds_fn = get_time_seconds_fn, .seconds_since_init_fn_ty = seconds_since_init_fn_ty, .seconds_since_init_fn = seconds_since_init_fn, .to_float64_seconds_fn_ty = to_float64_seconds_fn_ty, .to_float64_seconds_fn = to_float64_seconds_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .get_command_line_arguments_fn_ty = get_command_line_arguments_fn_ty, .get_command_line_arguments_fn = get_command_line_arguments_fn, .sleep_milliseconds_fn_ty = sleep_milliseconds_fn_ty, .sleep_milliseconds_fn = sleep_milliseconds_fn, .cpu_has_feature_fn_ty = cpu_has_feature_fn_ty, .cpu_has_feature_fn = cpu_has_feature_fn, .make_directory_fn_ty = make_directory_fn_ty, .make_directory_fn = make_directory_fn, .delete_directory_fn_ty = delete_directory_fn_ty, .delete_directory_fn = delete_directory_fn, .file_exists_fn_ty = file_exists_fn_ty, .file_exists_fn = file_exists_fn, .set_working_directory_fn_ty = set_working_directory_fn_ty, .set_working_directory_fn = set_working_directory_fn, .get_working_directory_fn_ty = get_working_directory_fn_ty, .get_working_directory_fn = get_working_directory_fn, .get_path_of_running_executable_fn_ty = get_path_of_running_executable_fn_ty, .get_path_of_running_executable_fn = get_path_of_running_executable_fn, .file_open_fn_ty = file_open_fn_ty, .file_open_fn = file_open_fn, .file_close_fn_ty = file_close_fn_ty, .file_close_fn = file_close_fn, .file_length_fn_ty = file_length_fn_ty, .file_length_fn = file_length_fn, .file_set_position_fn_ty = file_set_position_fn_ty, .file_set_position_fn = file_set_position_fn, .file_write_fn_ty = file_write_fn_ty, .file_write_fn = file_write_fn, .file_read_fn_ty = file_read_fn_ty, .file_read_fn = file_read_fn, .posix_read_fn_ty = posix_read_fn_ty, .posix_read_fn = posix_read_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .string_builder_init_fn_ty = string_builder_init_fn_ty, .string_builder_init_fn = string_builder_init_fn, .string_builder_free_fn_ty = string_builder_free_fn_ty, .string_builder_free_fn = string_builder_free_fn, .string_builder_append_string_fn_ty = string_builder_append_string_fn_ty, .string_builder_append_string_fn = string_builder_append_string_fn, .string_builder_append_int_fn_ty = string_builder_append_int_fn_ty, .string_builder_append_int_fn = string_builder_append_int_fn, .string_builder_append_float_fn_ty = string_builder_append_float_fn_ty, .string_builder_append_float_fn = string_builder_append_float_fn, .string_builder_append_bool_fn_ty = string_builder_append_bool_fn_ty, .string_builder_append_bool_fn = string_builder_append_bool_fn, .string_builder_to_string_fn_ty = string_builder_to_string_fn_ty, .string_builder_to_string_fn = string_builder_to_string_fn, .string_builder_length_fn_ty = string_builder_length_fn_ty, .string_builder_length_fn = string_builder_length_fn, .string_builder_join_array_fn_ty = string_builder_join_array_fn_ty, .string_builder_join_array_fn = string_builder_join_array_fn, .string_copy_fn_ty = string_copy_fn_ty, .string_copy_fn = string_copy_fn, .string_to_c_fn_ty = string_to_c_fn_ty, .string_to_c_fn = string_to_c_fn, .string_from_c_fn_ty = string_from_c_fn_ty, .string_from_c_fn = string_from_c_fn, .string_from_parts_fn_ty = string_from_parts_fn_ty, .string_from_parts_fn = string_from_parts_fn, .string_trim_fn_ty = string_trim_fn_ty, .string_trim_fn = string_trim_fn, .string_compare_fn_ty = string_compare_fn_ty, .string_compare_fn = string_compare_fn, .string_contains_fn_ty = string_contains_fn_ty, .string_contains_fn = string_contains_fn, .string_begins_with_fn_ty = string_begins_with_fn_ty, .string_begins_with_fn = string_begins_with_fn, .string_find_fn_ty = string_find_fn_ty, .string_find_fn = string_find_fn, .string_split_fn_ty = string_split_fn_ty, .string_split_fn = string_split_fn, .string_parse_int_fn_ty = string_parse_int_fn_ty, .string_parse_int_fn = string_parse_int_fn, .string_parse_int_ok_fn_ty = string_parse_int_ok_fn_ty, .string_parse_int_ok_fn = string_parse_int_ok_fn, .string_parse_float_fn_ty = string_parse_float_fn_ty, .string_parse_float_fn = string_parse_float_fn, .string_parse_float_ok_fn_ty = string_parse_float_ok_fn_ty, .string_parse_float_ok_fn = string_parse_float_ok_fn, .string_replace_fn_ty = string_replace_fn_ty, .string_replace_fn = string_replace_fn, .path_strip_filename_fn_ty = path_strip_filename_fn_ty, .path_strip_filename_fn = path_strip_filename_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_free_fn_ty = array_free_fn_ty, .array_free_fn = array_free_fn, .new_array_fn_ty = new_array_fn_ty, .new_array_fn = new_array_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_data_fn_ty = array_data_fn_ty, .array_data_fn = array_data_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f32 = llvm_f32, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
+    var env = LlvmEnv{ .allocator = allocator, .context = context, .module = module, .builder = builder, .program = program, .proc_functions = proc_functions, .proc_function_tys = proc_function_tys, .proc_void_ty = proc_void_ty, .print_fn_ty = print_fn_ty, .print_fn = print_fn, .print_int_fn_ty = print_int_fn_ty, .print_int_fn = print_int_fn, .print_uint_fn_ty = print_uint_fn_ty, .print_uint_fn = print_uint_fn, .print_static_int_array_fn_ty = print_static_int_array_fn_ty, .print_static_int_array_fn = print_static_int_array_fn, .print_float_fn_ty = print_float_fn_ty, .print_float_fn = print_float_fn, .print_bool_fn_ty = print_bool_fn_ty, .print_bool_fn = print_bool_fn, .print_type_fn_ty = print_type_fn_ty, .print_type_fn = print_type_fn, .print_return_int_fn_ty = print_return_int_fn_ty, .print_return_int_fn = print_return_int_fn, .print_format_int_fn_ty = print_format_int_fn_ty, .print_format_int_fn = print_format_int_fn, .print_format_float_fn_ty = print_format_float_fn_ty, .print_format_float_fn = print_format_float_fn, .alloc_fn_ty = alloc_fn_ty, .alloc_fn = alloc_fn, .free_fn_ty = free_fn_ty, .free_fn = free_fn, .memcpy_fn_ty = memcpy_fn_ty, .memcpy_fn = memcpy_fn, .assert_fail_fn_ty = assert_fail_fn_ty, .assert_fail_fn = assert_fail_fn, .exit_fn_ty = exit_fn_ty, .exit_fn = exit_fn, .current_time_consensus_low_fn_ty = current_time_consensus_low_fn_ty, .current_time_consensus_low_fn = current_time_consensus_low_fn, .current_time_monotonic_low_fn_ty = current_time_monotonic_low_fn_ty, .current_time_monotonic_low_fn = current_time_monotonic_low_fn, .get_time_seconds_fn_ty = get_time_seconds_fn_ty, .get_time_seconds_fn = get_time_seconds_fn, .seconds_since_init_fn_ty = seconds_since_init_fn_ty, .seconds_since_init_fn = seconds_since_init_fn, .to_float64_seconds_fn_ty = to_float64_seconds_fn_ty, .to_float64_seconds_fn = to_float64_seconds_fn, .to_calendar_fn_ty = to_calendar_fn_ty, .to_calendar_fn = to_calendar_fn, .calendar_get_i64_fn_ty = calendar_get_i64_fn_ty, .calendar_get_i64_fn = calendar_get_i64_fn, .calendar_to_string_fn_ty = calendar_to_string_fn_ty, .calendar_to_string_fn = calendar_to_string_fn, .random_seed_fn_ty = random_seed_fn_ty, .random_seed_fn = random_seed_fn, .random_get_fn_ty = random_get_fn_ty, .random_get_fn = random_get_fn, .random_get_zero_to_one_fn_ty = random_get_zero_to_one_fn_ty, .random_get_zero_to_one_fn = random_get_zero_to_one_fn, .random_get_within_range_fn_ty = random_get_within_range_fn_ty, .random_get_within_range_fn = random_get_within_range_fn, .arg_count_fn_ty = arg_count_fn_ty, .arg_count_fn = arg_count_fn, .arg_value_fn_ty = arg_value_fn_ty, .arg_value_fn = arg_value_fn, .read_entire_file_fn_ty = read_entire_file_fn_ty, .read_entire_file_fn = read_entire_file_fn, .write_entire_file_fn_ty = write_entire_file_fn_ty, .write_entire_file_fn = write_entire_file_fn, .get_command_line_arguments_fn_ty = get_command_line_arguments_fn_ty, .get_command_line_arguments_fn = get_command_line_arguments_fn, .sleep_milliseconds_fn_ty = sleep_milliseconds_fn_ty, .sleep_milliseconds_fn = sleep_milliseconds_fn, .cpu_has_feature_fn_ty = cpu_has_feature_fn_ty, .cpu_has_feature_fn = cpu_has_feature_fn, .make_directory_fn_ty = make_directory_fn_ty, .make_directory_fn = make_directory_fn, .delete_directory_fn_ty = delete_directory_fn_ty, .delete_directory_fn = delete_directory_fn, .file_exists_fn_ty = file_exists_fn_ty, .file_exists_fn = file_exists_fn, .set_working_directory_fn_ty = set_working_directory_fn_ty, .set_working_directory_fn = set_working_directory_fn, .get_working_directory_fn_ty = get_working_directory_fn_ty, .get_working_directory_fn = get_working_directory_fn, .get_path_of_running_executable_fn_ty = get_path_of_running_executable_fn_ty, .get_path_of_running_executable_fn = get_path_of_running_executable_fn, .file_open_fn_ty = file_open_fn_ty, .file_open_fn = file_open_fn, .file_close_fn_ty = file_close_fn_ty, .file_close_fn = file_close_fn, .file_length_fn_ty = file_length_fn_ty, .file_length_fn = file_length_fn, .file_set_position_fn_ty = file_set_position_fn_ty, .file_set_position_fn = file_set_position_fn, .file_write_fn_ty = file_write_fn_ty, .file_write_fn = file_write_fn, .file_read_fn_ty = file_read_fn_ty, .file_read_fn = file_read_fn, .posix_read_fn_ty = posix_read_fn_ty, .posix_read_fn = posix_read_fn, .string_equal_fn_ty = string_equal_fn_ty, .string_equal_fn = string_equal_fn, .string_slice_fn_ty = string_slice_fn_ty, .string_slice_fn = string_slice_fn, .string_builder_init_fn_ty = string_builder_init_fn_ty, .string_builder_init_fn = string_builder_init_fn, .string_builder_free_fn_ty = string_builder_free_fn_ty, .string_builder_free_fn = string_builder_free_fn, .string_builder_append_string_fn_ty = string_builder_append_string_fn_ty, .string_builder_append_string_fn = string_builder_append_string_fn, .string_builder_append_int_fn_ty = string_builder_append_int_fn_ty, .string_builder_append_int_fn = string_builder_append_int_fn, .string_builder_append_float_fn_ty = string_builder_append_float_fn_ty, .string_builder_append_float_fn = string_builder_append_float_fn, .string_builder_append_bool_fn_ty = string_builder_append_bool_fn_ty, .string_builder_append_bool_fn = string_builder_append_bool_fn, .string_builder_to_string_fn_ty = string_builder_to_string_fn_ty, .string_builder_to_string_fn = string_builder_to_string_fn, .string_builder_length_fn_ty = string_builder_length_fn_ty, .string_builder_length_fn = string_builder_length_fn, .string_builder_join_array_fn_ty = string_builder_join_array_fn_ty, .string_builder_join_array_fn = string_builder_join_array_fn, .string_copy_fn_ty = string_copy_fn_ty, .string_copy_fn = string_copy_fn, .string_to_c_fn_ty = string_to_c_fn_ty, .string_to_c_fn = string_to_c_fn, .string_from_c_fn_ty = string_from_c_fn_ty, .string_from_c_fn = string_from_c_fn, .string_from_parts_fn_ty = string_from_parts_fn_ty, .string_from_parts_fn = string_from_parts_fn, .string_trim_fn_ty = string_trim_fn_ty, .string_trim_fn = string_trim_fn, .string_compare_fn_ty = string_compare_fn_ty, .string_compare_fn = string_compare_fn, .string_contains_fn_ty = string_contains_fn_ty, .string_contains_fn = string_contains_fn, .string_begins_with_fn_ty = string_begins_with_fn_ty, .string_begins_with_fn = string_begins_with_fn, .string_find_fn_ty = string_find_fn_ty, .string_find_fn = string_find_fn, .string_split_fn_ty = string_split_fn_ty, .string_split_fn = string_split_fn, .string_parse_int_fn_ty = string_parse_int_fn_ty, .string_parse_int_fn = string_parse_int_fn, .string_parse_int_ok_fn_ty = string_parse_int_ok_fn_ty, .string_parse_int_ok_fn = string_parse_int_ok_fn, .string_parse_float_fn_ty = string_parse_float_fn_ty, .string_parse_float_fn = string_parse_float_fn, .string_parse_float_ok_fn_ty = string_parse_float_ok_fn_ty, .string_parse_float_ok_fn = string_parse_float_ok_fn, .string_replace_fn_ty = string_replace_fn_ty, .string_replace_fn = string_replace_fn, .path_strip_filename_fn_ty = path_strip_filename_fn_ty, .path_strip_filename_fn = path_strip_filename_fn, .array_add_fn_ty = array_add_fn_ty, .array_add_fn = array_add_fn, .array_free_fn_ty = array_free_fn_ty, .array_free_fn = array_free_fn, .new_array_fn_ty = new_array_fn_ty, .new_array_fn = new_array_fn, .array_count_fn_ty = array_count_fn_ty, .array_count_fn = array_count_fn, .array_data_fn_ty = array_data_fn_ty, .array_data_fn = array_data_fn, .array_index_fn_ty = array_index_fn_ty, .array_index_fn = array_index_fn, .set_type_info_table_fn_ty = set_type_info_table_fn_ty, .set_type_info_table_fn = set_type_info_table_fn, .type_info_get_members_fn_ty = type_info_get_members_fn_ty, .type_info_get_members_fn = type_info_get_members_fn, .type_info_member_name_fn_ty = type_info_member_name_fn_ty, .type_info_member_name_fn = type_info_member_name_fn, .type_info_member_type_name_fn_ty = type_info_member_type_name_fn_ty, .type_info_member_type_name_fn = type_info_member_type_name_fn, .type_info_member_int_field_fn_ty = type_info_member_int_field_fn_ty, .type_info_member_int_field_fn = type_info_member_int_field_fn, .type_info_lookup_fn_ty = type_info_lookup_fn_ty, .type_info_lookup_fn = type_info_lookup_fn, .llvm_i32 = llvm_i32, .llvm_i64 = llvm_i64, .llvm_f32 = llvm_f32, .llvm_f64 = llvm_f64, .ptr_ty = ptr_ty };
 
     for (program.procs.items, 0..) |*helper_proc, i| {
         if (program.main_proc != null and i == program.main_proc.?) continue;
@@ -483,6 +513,10 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     if (program.main_proc) |main_proc| {
         const entry = c.LLVMAppendBasicBlockInContext(context, user_main_fn.?, "entry");
         c.LLVMPositionBuilderAtEnd(builder, entry);
+
+        // Generate type info table as global data and call __openjai_set_type_info_table
+        try emitTypeInfoTable(&env);
+
         const proc = &program.procs.items[main_proc];
         env.current_proc_name = proc.name;
         env.current_proc_index = main_proc;
@@ -566,7 +600,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
     }
     for (proc.instructions.items, 0..) |inst, idx| {
         switch (inst.opcode) {
-            .jump, .jump_if_false, .ret, .ret_multi, .ret_void => {
+            .jump, .jump_if_false, .ret, .ret_multi, .ret_void, .exit_process => {
                 if (idx + 1 <= instruction_count) is_block_start[idx + 1] = true;
             },
             else => {},
@@ -956,9 +990,13 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .format_static_int_array => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend static array print register out of range", .{});
+                const count_val = if (inst.arg5 == 1 and inst.arg2 < registers.len)
+                    try valueAsInt(env, registers[inst.arg2], diag)
+                else
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0);
                 var args = [_]c.LLVMValueRef{
                     try pointerValue(env, registers[inst.arg1], diag, "static array print"),
-                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                    count_val,
                     c.LLVMConstInt(env.llvm_i64, if (inst.arg3 != 0) inst.arg3 else 8, 0),
                 };
                 _ = c.LLVMBuildCall2(env.builder, env.print_static_int_array_fn_ty, env.print_static_int_array_fn, &args, args.len, "");
@@ -973,9 +1011,13 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     else => "__openjai_print_static_string_array",
                 };
                 const fn_ref = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, fn_ty);
+                const count_val = if (inst.arg5 == 1 and inst.arg2 < registers.len)
+                    try valueAsInt(env, registers[inst.arg2], diag)
+                else
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0);
                 var args = [_]c.LLVMValueRef{
                     try pointerValue(env, registers[inst.arg1], diag, "static array print"),
-                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                    count_val,
                 };
                 _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
             },
@@ -1271,13 +1313,23 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 };
                 try setPointerResult(env, registers, inst.dest, c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "pool_get"));
             },
-            .pool_release, .pool_reset => {
-                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend pool release/reset register out of range", .{});
+            .pool_release => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend pool release register out of range", .{});
                 const params = [_]c.LLVMTypeRef{env.ptr_ty};
                 const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
-                const fn_name = if (inst.opcode == .pool_release) "__openjai_pool_release" else "__openjai_pool_reset";
-                const fn_ref = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, fn_ty);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_pool_release") orelse c.LLVMAddFunction(env.module, "__openjai_pool_release", fn_ty);
                 var args = [_]c.LLVMValueRef{try pointerValue(env, registers[inst.arg1], diag, "pool pointer")};
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .pool_reset => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend pool reset register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_pool_reset") orelse c.LLVMAddFunction(env.module, "__openjai_pool_reset", fn_ty);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "pool pointer"),
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0),
+                };
                 _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
             },
             .pool_bytes_left => {
@@ -2115,7 +2167,8 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .exit_process => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend exit_process register out of range", .{});
-                const status = c.LLVMBuildIntCast2(env.builder, registers[inst.arg1].llvm_value, env.llvm_i32, 1, "exit_status");
+                const status_i64 = try valueAsInt(env, registers[inst.arg1], diag);
+                const status = c.LLVMBuildIntCast2(env.builder, status_i64, env.llvm_i32, 1, "exit_status");
                 var args = [_]c.LLVMValueRef{status};
                 _ = c.LLVMBuildCall2(env.builder, env.exit_fn_ty, env.exit_fn, &args, args.len, "");
                 _ = c.LLVMBuildUnreachable(env.builder);
@@ -2345,28 +2398,63 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     return diag.failAt(0, "LLVM backend type_info_field register out of range", .{});
                 }
                 const field_name = env.program.strings.items[inst.arg2];
+                // Check for builtin type handling (type texts that aren't in the type_info table)
+                const builtin_tag = builtinTypeInfoTag(env, registers[inst.arg1]);
+                // Resolve the source register to a type_id (i64).
+                // The source may be a type_id (int), a string (type text from load_type_text),
+                // or a pointer (from a previous "members" access).
+                const type_id_val = try resolveTypeInfoId(env, registers[inst.arg1], diag);
                 if (std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "type")) {
-                    const type_info_name_params = [_]c.LLVMTypeRef{env.llvm_i64};
-                    const type_info_name_fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&type_info_name_params), type_info_name_params.len, 0);
-                    const fn_name = if (std.mem.eql(u8, field_name, "type")) "__openjai_type_info_tag_name" else "__openjai_type_info_name";
-                    const type_info_name_fn = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, type_info_name_fn_ty);
-                    const type_id = try valueAsInt(env, registers[inst.arg1], diag);
-                    var args = [_]c.LLVMValueRef{type_id};
-                    const result = c.LLVMBuildCall2(env.builder, type_info_name_fn_ty, type_info_name_fn, &args, args.len, "type_info_name");
-                    try setStringResult(env, registers, inst.dest, result);
+                    if (builtin_tag) |tag_info| {
+                        // For builtin types, emit the name/tag directly as a string literal
+                        const text = if (std.mem.eql(u8, field_name, "type")) tag_info.tag_name else tag_info.type_name;
+                        const result = try emitInlineRuntimeString(env, text);
+                        try setStringResult(env, registers, inst.dest, result);
+                    } else {
+                        const type_info_name_params = [_]c.LLVMTypeRef{env.llvm_i64};
+                        const type_info_name_fn_ty = c.LLVMFunctionType(env.ptr_ty, @constCast(&type_info_name_params), type_info_name_params.len, 0);
+                        const fn_name = if (std.mem.eql(u8, field_name, "type")) "__openjai_type_info_tag_name" else "__openjai_type_info_name";
+                        const type_info_name_fn = c.LLVMGetNamedFunction(env.module, fn_name) orelse c.LLVMAddFunction(env.module, fn_name, type_info_name_fn_ty);
+                        var args = [_]c.LLVMValueRef{type_id_val};
+                        const result = c.LLVMBuildCall2(env.builder, type_info_name_fn_ty, type_info_name_fn, &args, args.len, "type_info_name");
+                        try setStringResult(env, registers, inst.dest, result);
+                    }
                 } else if (std.mem.eql(u8, field_name, "members")) {
-                    registers[inst.dest] = registers[inst.arg1];
+                    // Call __openjai_type_info_get_members(type_id) -> returns dynamic array ptr
+                    var args = [_]c.LLVMValueRef{type_id_val};
+                    const result = c.LLVMBuildCall2(env.builder, env.type_info_get_members_fn_ty, env.type_info_get_members_fn, &args, args.len, "type_info_members");
+                    try setPointerResult(env, registers, inst.dest, result);
+                } else if (std.mem.eql(u8, field_name, "count")) {
+                    // "count" may be called on either a type_id (for member_count) or a pointer (from members array)
+                    const src_kind = registers[inst.arg1].kind;
+                    if (src_kind == .pointer or src_kind == .pointer_addr) {
+                        // Source is a members array pointer - use array_count
+                        const ptr = try pointerValue(env, registers[inst.arg1], diag, "type_info_field count");
+                        var args = [_]c.LLVMValueRef{ptr};
+                        const result = c.LLVMBuildCall2(env.builder, env.array_count_fn_ty, env.array_count_fn, &args, args.len, "members_count");
+                        try setIntResult(env, registers, inst.dest, result);
+                    } else {
+                        // Source is a type_id - use type_info_int_field with field_id 3
+                        const type_info_int_params = [_]c.LLVMTypeRef{ env.llvm_i64, env.llvm_i64 };
+                        const type_info_int_fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&type_info_int_params), type_info_int_params.len, 0);
+                        const type_info_int_fn = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_int_field") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_int_field", type_info_int_fn_ty);
+                        var args = [_]c.LLVMValueRef{ type_id_val, c.LLVMConstInt(env.llvm_i64, 3, 0) };
+                        const result = c.LLVMBuildCall2(env.builder, type_info_int_fn_ty, type_info_int_fn, &args, args.len, "type_info_int");
+                        try setIntResult(env, registers, inst.dest, result);
+                    }
                 } else {
-                    const type_info_int_params = [_]c.LLVMTypeRef{ env.llvm_i64, env.llvm_i64 };
-                    const type_info_int_fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&type_info_int_params), type_info_int_params.len, 0);
-                    const type_info_int_fn = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_int_field") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_int_field", type_info_int_fn_ty);
-                    const field_str_idx = try env.allocator.dupeZ(u8, field_name);
-                    defer env.allocator.free(field_str_idx);
-                    const type_id = try valueAsInt(env, registers[inst.arg1], diag);
-                    const field_id: u64 = if (std.mem.eql(u8, field_name, "runtime_size")) 1 else if (std.mem.eql(u8, field_name, "tag")) 2 else if (std.mem.eql(u8, field_name, "count")) 3 else if (std.mem.eql(u8, field_name, "signed")) 4 else if (std.mem.eql(u8, field_name, "enum_type_flags")) 5 else if (std.mem.eql(u8, field_name, "internal_type")) 6 else 0;
-                    var args = [_]c.LLVMValueRef{ type_id, c.LLVMConstInt(env.llvm_i64, field_id, 0) };
-                    const result = c.LLVMBuildCall2(env.builder, type_info_int_fn_ty, type_info_int_fn, &args, args.len, "type_info_int");
-                    try setIntResult(env, registers, inst.dest, result);
+                    if (builtin_tag != null and std.mem.eql(u8, field_name, "tag")) {
+                        // For builtin types, return the tag value directly
+                        try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, builtin_tag.?.tag_value, 0));
+                    } else {
+                        const type_info_int_params = [_]c.LLVMTypeRef{ env.llvm_i64, env.llvm_i64 };
+                        const type_info_int_fn_ty = c.LLVMFunctionType(env.llvm_i64, @constCast(&type_info_int_params), type_info_int_params.len, 0);
+                        const type_info_int_fn = c.LLVMGetNamedFunction(env.module, "__openjai_type_info_int_field") orelse c.LLVMAddFunction(env.module, "__openjai_type_info_int_field", type_info_int_fn_ty);
+                        const field_id: u64 = if (std.mem.eql(u8, field_name, "runtime_size")) 1 else if (std.mem.eql(u8, field_name, "tag")) 2 else if (std.mem.eql(u8, field_name, "signed")) 4 else if (std.mem.eql(u8, field_name, "enum_type_flags")) 5 else if (std.mem.eql(u8, field_name, "internal_type")) 6 else 0;
+                        var args = [_]c.LLVMValueRef{ type_id_val, c.LLVMConstInt(env.llvm_i64, field_id, 0) };
+                        const result = c.LLVMBuildCall2(env.builder, type_info_int_fn_ty, type_info_int_fn, &args, args.len, "type_info_int");
+                        try setIntResult(env, registers, inst.dest, result);
+                    }
                 }
             },
             .type_info_member_field => {
@@ -2374,15 +2462,45 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     return diag.failAt(0, "LLVM backend type_info_member_field register out of range", .{});
                 }
                 const field_name = env.program.strings.items[inst.arg2];
-                if (std.mem.eql(u8, field_name, "name") or std.mem.eql(u8, field_name, "type_name")) {
-                    registers[inst.dest] = try staticStringRegister(env, 0, diag);
+                // The source register is a pointer to a TypeInfoMemberEntry, either from:
+                // - array_index (pointer to element in the members array data)
+                // - load_type_info_member (pointer into the global member pool)
+                const member_ptr = try pointerValue(env, registers[inst.arg1], diag, "type_info_member_field");
+                if (std.mem.eql(u8, field_name, "name")) {
+                    var args = [_]c.LLVMValueRef{member_ptr};
+                    const result = c.LLVMBuildCall2(env.builder, env.type_info_member_name_fn_ty, env.type_info_member_name_fn, &args, args.len, "member_name");
+                    try setStringResult(env, registers, inst.dest, result);
+                } else if (std.mem.eql(u8, field_name, "type") or std.mem.eql(u8, field_name, "type_name")) {
+                    var args = [_]c.LLVMValueRef{member_ptr};
+                    const result = c.LLVMBuildCall2(env.builder, env.type_info_member_type_name_fn_ty, env.type_info_member_type_name_fn, &args, args.len, "member_type_name");
+                    try setStringResult(env, registers, inst.dest, result);
                 } else {
-                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, 0, 0), .kind = .int };
+                    // flags, offset_in_bytes, etc.
+                    const field_id: u64 = if (std.mem.eql(u8, field_name, "flags")) 0 else if (std.mem.eql(u8, field_name, "offset_in_bytes")) 1 else 0;
+                    var args = [_]c.LLVMValueRef{ member_ptr, c.LLVMConstInt(env.llvm_i64, field_id, 0) };
+                    const result = c.LLVMBuildCall2(env.builder, env.type_info_member_int_field_fn_ty, env.type_info_member_int_field_fn, &args, args.len, "member_int_field");
+                    try setIntResult(env, registers, inst.dest, result);
                 }
             },
             .load_type_info_member => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend load_type_info_member register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, inst.arg1, 0), .kind = .int };
+                // Return a pointer into the global type_info_member_pool array
+                const pool_global = c.LLVMGetNamedGlobal(env.module, "openjai_type_info_member_pool");
+                if (pool_global != null) {
+                    // GEP into the pool array to get a pointer to the member entry
+                    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                    const member_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&member_entry_fields), member_entry_fields.len, 0);
+                    const pool_arr_ty = c.LLVMArrayType(member_entry_ty, @intCast(env.program.type_info_members.items.len));
+                    var gep_indices = [_]c.LLVMValueRef{
+                        c.LLVMConstInt(env.llvm_i64, 0, 0),
+                        c.LLVMConstInt(env.llvm_i64, inst.arg1, 0),
+                    };
+                    const member_ptr = c.LLVMBuildGEP2(env.builder, pool_arr_ty, pool_global, &gep_indices, gep_indices.len, "member_ptr");
+                    try setPointerResult(env, registers, inst.dest, member_ptr);
+                } else {
+                    // Fallback: no pool was generated, return null pointer
+                    try setPointerResult(env, registers, inst.dest, c.LLVMConstPointerNull(env.ptr_ty));
+                }
             },
             .load_build_options,
             .host_set_build_options,
@@ -2955,6 +3073,286 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
         .tuple => return diag.failAt(0, "LLVM backend cannot print an undestructured multi-return value", .{}),
         .unset => return diag.failAt(0, "LLVM backend print argument register was not initialized", .{}),
     }
+}
+
+const BuiltinTagInfo = struct {
+    type_name: []const u8,
+    tag_name: []const u8,
+    tag_value: u64,
+};
+
+fn builtinTypeInfoTag(env: *LlvmEnv, value: RegisterValue) ?BuiltinTagInfo {
+    const type_name = switch (value.kind) {
+        .string => |string_idx| blk: {
+            if (string_idx >= env.program.strings.items.len) break :blk null;
+            break :blk env.program.strings.items[string_idx];
+        },
+        else => null,
+    } orelse return null;
+    // Check if this is a builtin type that won't be in the type_info_table
+    if (env.program.typeInfoIndexByName(type_name) != null) return null;
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "s64") or std.mem.eql(u8, type_name, "s32") or std.mem.eql(u8, type_name, "s16") or std.mem.eql(u8, type_name, "s8") or std.mem.eql(u8, type_name, "u8") or std.mem.eql(u8, type_name, "u16") or std.mem.eql(u8, type_name, "u32") or std.mem.eql(u8, type_name, "u64")) return .{ .type_name = type_name, .tag_name = "INTEGER", .tag_value = 1 };
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "float32") or std.mem.eql(u8, type_name, "float64")) return .{ .type_name = type_name, .tag_name = "FLOAT", .tag_value = 2 };
+    if (std.mem.eql(u8, type_name, "bool")) return .{ .type_name = type_name, .tag_name = "BOOL", .tag_value = 3 };
+    if (std.mem.eql(u8, type_name, "string")) return .{ .type_name = type_name, .tag_name = "STRING", .tag_value = 9 };
+    if (std.mem.eql(u8, type_name, "void")) return .{ .type_name = type_name, .tag_name = "VOID", .tag_value = 0 };
+    if (std.mem.eql(u8, type_name, "Any")) return .{ .type_name = type_name, .tag_name = "ANY", .tag_value = 0 };
+    if (std.mem.eql(u8, type_name, "Procedure")) return .{ .type_name = type_name, .tag_name = "PROCEDURE", .tag_value = 8 };
+    if (std.mem.startsWith(u8, type_name, "*")) return .{ .type_name = type_name, .tag_name = "POINTER", .tag_value = 4 };
+    return null;
+}
+
+/// Create a runtime string from inline text (not from the string pool).
+fn emitInlineRuntimeString(env: *LlvmEnv, text: []const u8) !c.LLVMValueRef {
+    // Create a global constant for the text
+    const ty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(text.len));
+    const g = c.LLVMAddGlobal(env.module, ty, "builtin_type_str");
+    c.LLVMSetGlobalConstant(g, 1);
+    c.LLVMSetLinkage(g, c.LLVMPrivateLinkage);
+    if (text.len > 0) {
+        c.LLVMSetInitializer(g, c.LLVMConstStringInContext(env.context, text.ptr, @intCast(text.len), 1));
+    } else {
+        c.LLVMSetInitializer(g, c.LLVMConstNull(ty));
+    }
+    const data_ptr = c.LLVMBuildPointerCast(env.builder, g, env.ptr_ty, "builtin_str_ptr");
+    const len = c.LLVMConstInt(env.llvm_i64, text.len, 0);
+    var args = [_]c.LLVMValueRef{ data_ptr, len };
+    return c.LLVMBuildCall2(env.builder, env.string_from_parts_fn_ty, env.string_from_parts_fn, &args, args.len, "builtin_runtime_string");
+}
+
+/// Resolve a register value that may be a type_id (int), type_text (string), or pointer
+/// into an i64 type_id value suitable for calling __openjai_type_info_* runtime functions.
+/// For string type texts, this calls __openjai_type_info_lookup at runtime.
+/// For type_id/int values, this returns the value directly.
+fn resolveTypeInfoId(env: *LlvmEnv, value: RegisterValue, diag: Diagnostic) !c.LLVMValueRef {
+    return switch (value.kind) {
+        .type_id, .int, .uint, .int_addr, .uint_addr => valueAsInt(env, value, diag),
+        .string => |string_idx| blk: {
+            // Compile-time type text - look up by name at compile time if possible
+            if (string_idx < env.program.strings.items.len) {
+                const type_name = env.program.strings.items[string_idx];
+                if (env.program.typeInfoIndexByName(type_name)) |idx| {
+                    break :blk c.LLVMConstInt(env.llvm_i64, idx, 0);
+                }
+            }
+            // Fallback: runtime lookup
+            const str_ptr = c.LLVMBuildPointerCast(env.builder, value.llvm_value, env.ptr_ty, "type_text_ptr");
+            const str_len = if (string_idx < env.program.strings.items.len)
+                c.LLVMConstInt(env.llvm_i64, env.program.strings.items[string_idx].len, 0)
+            else
+                c.LLVMConstInt(env.llvm_i64, 0, 0);
+            var args = [_]c.LLVMValueRef{ str_ptr, str_len };
+            break :blk c.LLVMBuildCall2(env.builder, env.type_info_lookup_fn_ty, env.type_info_lookup_fn, &args, args.len, "type_info_lookup");
+        },
+        .runtime_string, .string_addr => blk: {
+            // Runtime string - need to extract ptr/len and call lookup
+            // For runtime strings, we get the ptr which is an OpenJaiRuntimeString (len + ptr)
+            const str_val = try runtimeStringValue(env, value, diag);
+            // OpenJaiRuntimeString layout: { len: i64, data_ptr: i64 }
+            // Load len (first i64)
+            const len_ptr = c.LLVMBuildPointerCast(env.builder, str_val, env.ptr_ty, "rs_len_ptr");
+            const len = c.LLVMBuildLoad2(env.builder, env.llvm_i64, len_ptr, "rs_len");
+            // Load data_ptr (second i64, at offset 8)
+            var offset = [_]c.LLVMValueRef{c.LLVMConstInt(env.llvm_i64, 8, 0)};
+            const data_addr = c.LLVMBuildGEP2(env.builder, c.LLVMInt8TypeInContext(env.context), str_val, &offset, 1, "rs_data_addr");
+            const data_int = c.LLVMBuildLoad2(env.builder, env.llvm_i64, data_addr, "rs_data_int");
+            const data_ptr = c.LLVMBuildIntToPtr(env.builder, data_int, env.ptr_ty, "rs_data_ptr");
+            var args = [_]c.LLVMValueRef{ data_ptr, len };
+            break :blk c.LLVMBuildCall2(env.builder, env.type_info_lookup_fn_ty, env.type_info_lookup_fn, &args, args.len, "type_info_lookup");
+        },
+        .pointer, .pointer_addr => valueAsInt(env, value, diag),
+        else => c.LLVMConstInt(env.llvm_i64, 0, 0),
+    };
+}
+
+fn emitTypeInfoTable(env: *LlvmEnv) !void {
+    const type_infos = env.program.type_infos.items;
+    const count = type_infos.len;
+    if (count == 0) {
+        // Even with no type infos, call set_type_info_table with null/0
+        var args = [_]c.LLVMValueRef{
+            c.LLVMConstPointerNull(env.ptr_ty),
+            c.LLVMConstInt(env.llvm_i64, 0, 0),
+        };
+        _ = c.LLVMBuildCall2(env.builder, env.set_type_info_table_fn_ty, env.set_type_info_table_fn, &args, args.len, "");
+        return;
+    }
+
+    // TypeInfoMemberEntry struct layout: { name_ptr: ptr, name_len: i64, type_name_ptr: ptr, type_name_len: i64, flags: i64 }
+    // On 64-bit: 5 x i64 fields = 40 bytes
+    const member_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+    const member_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&member_entry_fields), member_entry_fields.len, 0);
+
+    // TypeInfoEntry struct layout: { name_ptr: ptr, name_len: i64, tag: i64, member_count: i64, members: ptr }
+    const type_entry_fields = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64, env.llvm_i64, env.ptr_ty };
+    const type_entry_ty = c.LLVMStructTypeInContext(env.context, @constCast(&type_entry_fields), type_entry_fields.len, 0);
+
+    // Create global constant arrays for each type's members, and string globals for names
+    var type_entry_values = try env.allocator.alloc(c.LLVMValueRef, count);
+    defer env.allocator.free(type_entry_values);
+
+    for (type_infos, 0..) |ti, ti_idx| {
+        // Create name string global
+        const name_global = blk: {
+            const name_z = try std.fmt.allocPrint(env.allocator, "ti_name_{d}", .{ti_idx});
+            defer env.allocator.free(name_z);
+            const name_z2 = try env.allocator.dupeZ(u8, name_z);
+            defer env.allocator.free(name_z2);
+            const ty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(ti.name.len));
+            const g = c.LLVMAddGlobal(env.module, ty, name_z2.ptr);
+            c.LLVMSetGlobalConstant(g, 1);
+            c.LLVMSetLinkage(g, c.LLVMPrivateLinkage);
+            if (ti.name.len > 0) {
+                c.LLVMSetInitializer(g, c.LLVMConstStringInContext(env.context, ti.name.ptr, @intCast(ti.name.len), 1));
+            } else {
+                c.LLVMSetInitializer(g, c.LLVMConstNull(ty));
+            }
+            break :blk g;
+        };
+
+        // Create member entries array
+        const members_global = blk: {
+            if (ti.members.len == 0) {
+                break :blk c.LLVMConstPointerNull(env.ptr_ty);
+            }
+            var member_values = try env.allocator.alloc(c.LLVMValueRef, ti.members.len);
+            defer env.allocator.free(member_values);
+            for (ti.members, 0..) |member, m_idx| {
+                // Create member name string global
+                const m_name_global = mblk: {
+                    const m_name_z = try std.fmt.allocPrint(env.allocator, "ti_{d}_m_{d}_name", .{ ti_idx, m_idx });
+                    defer env.allocator.free(m_name_z);
+                    const m_name_z2 = try env.allocator.dupeZ(u8, m_name_z);
+                    defer env.allocator.free(m_name_z2);
+                    const mty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(member.name.len));
+                    const mg = c.LLVMAddGlobal(env.module, mty, m_name_z2.ptr);
+                    c.LLVMSetGlobalConstant(mg, 1);
+                    c.LLVMSetLinkage(mg, c.LLVMPrivateLinkage);
+                    if (member.name.len > 0) {
+                        c.LLVMSetInitializer(mg, c.LLVMConstStringInContext(env.context, member.name.ptr, @intCast(member.name.len), 1));
+                    } else {
+                        c.LLVMSetInitializer(mg, c.LLVMConstNull(mty));
+                    }
+                    break :mblk mg;
+                };
+                // Create member type_name string global
+                const m_type_name_global = mblk: {
+                    const m_tn_z = try std.fmt.allocPrint(env.allocator, "ti_{d}_m_{d}_typename", .{ ti_idx, m_idx });
+                    defer env.allocator.free(m_tn_z);
+                    const m_tn_z2 = try env.allocator.dupeZ(u8, m_tn_z);
+                    defer env.allocator.free(m_tn_z2);
+                    const tnty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(member.type_name.len));
+                    const tng = c.LLVMAddGlobal(env.module, tnty, m_tn_z2.ptr);
+                    c.LLVMSetGlobalConstant(tng, 1);
+                    c.LLVMSetLinkage(tng, c.LLVMPrivateLinkage);
+                    if (member.type_name.len > 0) {
+                        c.LLVMSetInitializer(tng, c.LLVMConstStringInContext(env.context, member.type_name.ptr, @intCast(member.type_name.len), 1));
+                    } else {
+                        c.LLVMSetInitializer(tng, c.LLVMConstNull(tnty));
+                    }
+                    break :mblk tng;
+                };
+                // Build TypeInfoMemberEntry struct constant
+                var member_fields_vals = [_]c.LLVMValueRef{
+                    m_name_global, // name_ptr
+                    c.LLVMConstInt(env.llvm_i64, member.name.len, 0), // name_len
+                    m_type_name_global, // type_name_ptr
+                    c.LLVMConstInt(env.llvm_i64, member.type_name.len, 0), // type_name_len
+                    c.LLVMConstInt(env.llvm_i64, member.flags, 0), // flags
+                };
+                member_values[m_idx] = c.LLVMConstStructInContext(env.context, &member_fields_vals, member_fields_vals.len, 0);
+            }
+            // Create global array of member entries
+            const members_arr_ty = c.LLVMArrayType(member_entry_ty, @intCast(ti.members.len));
+            const members_arr_name = try std.fmt.allocPrint(env.allocator, "ti_{d}_members", .{ti_idx});
+            defer env.allocator.free(members_arr_name);
+            const members_arr_name_z = try env.allocator.dupeZ(u8, members_arr_name);
+            defer env.allocator.free(members_arr_name_z);
+            const members_g = c.LLVMAddGlobal(env.module, members_arr_ty, members_arr_name_z.ptr);
+            c.LLVMSetGlobalConstant(members_g, 1);
+            c.LLVMSetLinkage(members_g, c.LLVMPrivateLinkage);
+            c.LLVMSetInitializer(members_g, c.LLVMConstArray(member_entry_ty, member_values.ptr, @intCast(ti.members.len)));
+            break :blk members_g;
+        };
+
+        // Build TypeInfoEntry struct constant
+        var type_fields_vals = [_]c.LLVMValueRef{
+            name_global, // name_ptr
+            c.LLVMConstInt(env.llvm_i64, ti.name.len, 0), // name_len
+            c.LLVMConstInt(env.llvm_i64, ti.tag, 0), // tag
+            c.LLVMConstInt(env.llvm_i64, ti.members.len, 0), // member_count
+            members_global, // members pointer
+        };
+        type_entry_values[ti_idx] = c.LLVMConstStructInContext(env.context, &type_fields_vals, type_fields_vals.len, 0);
+    }
+
+    // Create global array of TypeInfoEntry
+    const table_arr_ty = c.LLVMArrayType(type_entry_ty, @intCast(count));
+    const table_global = c.LLVMAddGlobal(env.module, table_arr_ty, "openjai_type_info_table");
+    c.LLVMSetGlobalConstant(table_global, 1);
+    c.LLVMSetLinkage(table_global, c.LLVMPrivateLinkage);
+    c.LLVMSetInitializer(table_global, c.LLVMConstArray(type_entry_ty, type_entry_values.ptr, @intCast(count)));
+
+    // Also create a global array for type_info_members pool (used by load_type_info_member)
+    const ti_members = env.program.type_info_members.items;
+    if (ti_members.len > 0) {
+        var pool_values = try env.allocator.alloc(c.LLVMValueRef, ti_members.len);
+        defer env.allocator.free(pool_values);
+        for (ti_members, 0..) |member, m_idx| {
+            const m_name_global = mblk: {
+                const nm = try std.fmt.allocPrint(env.allocator, "tim_{d}_name", .{m_idx});
+                defer env.allocator.free(nm);
+                const nm_z = try env.allocator.dupeZ(u8, nm);
+                defer env.allocator.free(nm_z);
+                const mty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(member.name.len));
+                const mg = c.LLVMAddGlobal(env.module, mty, nm_z.ptr);
+                c.LLVMSetGlobalConstant(mg, 1);
+                c.LLVMSetLinkage(mg, c.LLVMPrivateLinkage);
+                if (member.name.len > 0) {
+                    c.LLVMSetInitializer(mg, c.LLVMConstStringInContext(env.context, member.name.ptr, @intCast(member.name.len), 1));
+                } else {
+                    c.LLVMSetInitializer(mg, c.LLVMConstNull(mty));
+                }
+                break :mblk mg;
+            };
+            const m_type_name_global = mblk: {
+                const tn = try std.fmt.allocPrint(env.allocator, "tim_{d}_typename", .{m_idx});
+                defer env.allocator.free(tn);
+                const tn_z = try env.allocator.dupeZ(u8, tn);
+                defer env.allocator.free(tn_z);
+                const tnty = c.LLVMArrayType(c.LLVMInt8TypeInContext(env.context), @intCast(member.type_name.len));
+                const tng = c.LLVMAddGlobal(env.module, tnty, tn_z.ptr);
+                c.LLVMSetGlobalConstant(tng, 1);
+                c.LLVMSetLinkage(tng, c.LLVMPrivateLinkage);
+                if (member.type_name.len > 0) {
+                    c.LLVMSetInitializer(tng, c.LLVMConstStringInContext(env.context, member.type_name.ptr, @intCast(member.type_name.len), 1));
+                } else {
+                    c.LLVMSetInitializer(tng, c.LLVMConstNull(tnty));
+                }
+                break :mblk tng;
+            };
+            var member_fields_vals = [_]c.LLVMValueRef{
+                m_name_global,
+                c.LLVMConstInt(env.llvm_i64, member.name.len, 0),
+                m_type_name_global,
+                c.LLVMConstInt(env.llvm_i64, member.type_name.len, 0),
+                c.LLVMConstInt(env.llvm_i64, member.flags, 0),
+            };
+            pool_values[m_idx] = c.LLVMConstStructInContext(env.context, &member_fields_vals, member_fields_vals.len, 0);
+        }
+        const pool_arr_ty = c.LLVMArrayType(member_entry_ty, @intCast(ti_members.len));
+        const pool_global = c.LLVMAddGlobal(env.module, pool_arr_ty, "openjai_type_info_member_pool");
+        c.LLVMSetGlobalConstant(pool_global, 1);
+        c.LLVMSetLinkage(pool_global, c.LLVMPrivateLinkage);
+        c.LLVMSetInitializer(pool_global, c.LLVMConstArray(member_entry_ty, pool_values.ptr, @intCast(ti_members.len)));
+    }
+
+    // Call __openjai_set_type_info_table(table_ptr, count)
+    var args = [_]c.LLVMValueRef{
+        table_global,
+        c.LLVMConstInt(env.llvm_i64, count, 0),
+    };
+    _ = c.LLVMBuildCall2(env.builder, env.set_type_info_table_fn_ty, env.set_type_info_table_fn, &args, args.len, "");
 }
 
 fn sanitizeLlvmSymbolName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {

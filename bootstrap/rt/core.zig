@@ -360,7 +360,14 @@ export fn __openjai_alloc_owned(size: usize, allocator_raw: ?*OpenJaiAllocator) 
         chargePool(owner_data, @intCast(size));
     }
     const ptr = rtAllocOwned(size, allocator.proc, owner_data, allocator.proc == allocator_proc_pool);
-    if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+    if (ptr) |p| {
+        @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+        if (allocator.proc == allocator_proc_pool or allocator.proc == allocator_proc_flat_pool) {
+            if (findPoolState(owner_data)) |state| {
+                registerPoolAllocation(state, @as([*]u8, @ptrCast(p)), size);
+            }
+        }
+    }
     return ptr;
 }
 
@@ -425,19 +432,55 @@ export fn __openjai_pool_get(pool: ?*anyopaque, size_raw: i64, kind: i64) ?*anyo
     const size: usize = @intCast(@max(size_raw, 0));
     const owner = if (kind == 1) allocator_proc_flat_pool else allocator_proc_pool;
     const ptr = rtAllocOwned(size, owner, key, kind != 1);
-    if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+    if (ptr) |p| {
+        @memset(@as([*]u8, @ptrCast(p))[0..size], 0);
+        registerPoolAllocation(state, @as([*]u8, @ptrCast(p)), size);
+    }
     chargePoolStateRaw(state, @intCast(size));
     return ptr;
 }
 
 export fn __openjai_pool_release(pool: ?*anyopaque) void {
     const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
-    if (findPoolState(key)) |state| state.bytes_left = 0;
+    if (findPoolState(key)) |state| {
+        freePoolAllocationNodes(state);
+        state.bytes_left = 0;
+    }
 }
 
-export fn __openjai_pool_reset(pool: ?*anyopaque) void {
+export fn __openjai_pool_reset(pool: ?*anyopaque, overwrite_memory: i64) void {
     const key = if (pool) |ptr| @intFromPtr(ptr) else 0;
-    if (findPoolState(key)) |state| state.bytes_left = 65536;
+    if (findPoolState(key)) |state| {
+        if (overwrite_memory != 0) {
+            zeroOwnedAllocations(state);
+        }
+        state.bytes_left = 65536;
+    }
+}
+
+fn zeroOwnedAllocations(state: *OpenJaiPoolState) void {
+    var node = state.alloc_list;
+    while (node) |n| {
+        @memset(n.data_ptr[0..n.data_len], 0);
+        node = n.next;
+    }
+}
+
+fn registerPoolAllocation(state: *OpenJaiPoolState, data: [*]u8, len: usize) void {
+    const node_mem = oj_rt_mmap(@sizeOf(PoolAllocationNode)) orelse return;
+    const n: *PoolAllocationNode = @ptrCast(@alignCast(node_mem));
+    n.* = .{ .data_ptr = data, .data_len = len, .next = state.alloc_list };
+    state.alloc_list = n;
+}
+
+fn freePoolAllocationNodes(state: *OpenJaiPoolState) void {
+    var node = state.alloc_list;
+    while (node) |n| {
+        const next = n.next;
+        oj_rt_munmap(@ptrCast(n), @sizeOf(PoolAllocationNode));
+        node = next;
+    }
+    state.alloc_list = null;
 }
 
 export fn __openjai_pool_bytes_left(pool: ?*anyopaque) i64 {
@@ -526,10 +569,17 @@ const OpenJaiAllocator = extern struct {
     data: ?*anyopaque,
 };
 
+const PoolAllocationNode = struct {
+    data_ptr: [*]u8,
+    data_len: usize,
+    next: ?*PoolAllocationNode,
+};
+
 const OpenJaiPoolState = extern struct {
     key: usize,
     bytes_left: i64,
     next: ?*OpenJaiPoolState,
+    alloc_list: ?*PoolAllocationNode = null,
 };
 
 var pool_states: ?*OpenJaiPoolState = null;
@@ -1625,11 +1675,83 @@ export fn __openjai_type_info_name(type_id: i64) ?*OpenJaiRuntimeString {
 }
 
 export fn __openjai_type_info_tag_name(type_id: i64) ?*OpenJaiRuntimeString {
-    _ = type_id;
-    return makeRuntimeString("<type>");
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("<type>");
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    return makeRuntimeString(tagNameFromId(entry.tag));
+}
+
+fn tagNameFromId(tag: u64) []const u8 {
+    // Must match typeInfoTagValue() in bytecode_gen.zig
+    return switch (tag) {
+        1 => "INTEGER",
+        2 => "FLOAT",
+        3 => "BOOL",
+        4 => "POINTER",
+        5 => "ARRAY",
+        6 => "STRUCT",
+        7 => "ENUM",
+        8 => "PROCEDURE",
+        9 => "STRING",
+        else => "<type>",
+    };
 }
 
 export fn auto_release_temp() void {}
+
+export fn __openjai_type_info_lookup(name_ptr: [*]const u8, name_len: usize) i64 {
+    const name = name_ptr[0..name_len];
+    const table = type_info_table orelse return -1;
+    for (0..type_info_count) |i| {
+        const entry = table[i];
+        if (entry.name_len == name_len and std.mem.eql(u8, entry.name_ptr[0..entry.name_len], name)) return @intCast(i);
+    }
+    return -1;
+}
+
+export fn __openjai_type_info_get_members(type_id: i64) ?*OpenJaiArray {
+    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return null;
+    const idx: usize = @intCast(type_id);
+    const entry = type_info_table.?[idx];
+    const members_ptr = entry.members;
+    const count = entry.member_count;
+    // Allocate a dynamic array and populate it with copies of member entries
+    const array_raw = rtAlloc(@sizeOf(OpenJaiArray)) orelse return null;
+    const array: *OpenJaiArray = @ptrCast(@alignCast(array_raw));
+    if (count == 0) {
+        array.* = .{ .count = 0, .capacity = 0, .data = null };
+        return array;
+    }
+    // Each element is a full TypeInfoMemberEntry (40 bytes on 64-bit)
+    const elem_size = @sizeOf(TypeInfoMemberEntry);
+    const data_size = count * elem_size;
+    const data = rtAlloc(data_size) orelse return null;
+    const entries: [*]TypeInfoMemberEntry = @ptrCast(@alignCast(data));
+    for (0..count) |i| {
+        entries[i] = members_ptr[i];
+    }
+    array.* = .{ .count = count, .capacity = count, .data = data };
+    return array;
+}
+
+export fn __openjai_type_info_member_name(member_ptr: ?*const TypeInfoMemberEntry) ?*OpenJaiRuntimeString {
+    const member = member_ptr orelse return makeRuntimeString("");
+    return makeRuntimeString(member.name_ptr[0..member.name_len]);
+}
+
+export fn __openjai_type_info_member_type_name(member_ptr: ?*const TypeInfoMemberEntry) ?*OpenJaiRuntimeString {
+    const member = member_ptr orelse return makeRuntimeString("");
+    return makeRuntimeString(member.type_name_ptr[0..member.type_name_len]);
+}
+
+export fn __openjai_type_info_member_int_field(member_ptr: ?*const TypeInfoMemberEntry, field_id: i64) i64 {
+    const member = member_ptr orelse return 0;
+    return switch (field_id) {
+        0 => @intCast(member.flags), // flags
+        1 => 0, // offset_in_bytes (placeholder)
+        else => 0,
+    };
+}
 
 export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
     if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return 0;
