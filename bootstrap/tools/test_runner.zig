@@ -237,7 +237,9 @@ fn extractExpected(source: []const u8, allocator: std.mem.Allocator, out: *std.A
             raw_text[0..comment_pos]
         else
             raw_text;
-        const text = std.mem.trimEnd(u8, stripped_text, &[_]u8{ ' ', '\t', '\r' });
+        var text = std.mem.trimEnd(u8, stripped_text, &[_]u8{ ' ', '\t', '\r' });
+        // Strip trailing ellipsis (wildcard suffix in expected output).
+        if (std.mem.endsWith(u8, text, "...")) text = std.mem.trimEnd(u8, text[0 .. text.len - 3], &[_]u8{ ' ', '\t' });
         // Skip empty annotations and Error: annotations (compile-time error docs).
         if (text.len == 0) continue;
         if (std.mem.startsWith(u8, text, "Error:")) continue;
