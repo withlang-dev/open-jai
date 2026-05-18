@@ -992,8 +992,12 @@ const GenContext = struct {
                         if (arg_type != null and p_type != null) {
                             const a = firstTypeWord(arg_type.?);
                             const p = p_type.?;
-                            if (std.mem.eql(u8, a, p) or operatorTypeMatches(p, a)) {
+                            if (std.mem.eql(u8, a, p)) {
+                                score += 3;
+                            } else if (isIntegerTypeText(a) and isIntegerTypeText(p)) {
                                 score += 2;
+                            } else if (operatorTypeMatches(p, a)) {
+                                score += 1;
                             } else if (ast.tag(arg_node) == .integer_literal) {
                                 if (intLiteralFitsType(ast, arg_node, p)) {
                                     score += 1;
