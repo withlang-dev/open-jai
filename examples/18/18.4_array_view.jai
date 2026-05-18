@@ -24,5 +24,5 @@ main :: () {
     v.count = 3;
     print("v is %\n", v);  // (4) => v is [3, 4, 5]
     // print("%\n", arrv[6]); // (5)
-    // Would print: Array bounds check failed. (The attempted index is 6, but the highest valid index is 5).
+    // => Array bounds check failed. (The attempted index is 6, but the highest valid index is 5).
 }

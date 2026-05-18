@@ -28,7 +28,7 @@ main                              d:\Jai\The_Way_to_Jai\examples\6\6.3_numbers.j
     b: u8  = 10;
     c: u16 = 50;
     d := a + b; 
-    print("d is %\n", d); // => d is -5069095
+    print("d is %\n", d); // => d is -5068898
     print("total_score has type %\n", type_of(total_score));
     // => total_score has type s64
     // total_score *= 3.14; // (2) => Error: Number mismatch. Type wanted: s64; type given: float32.
@@ -59,7 +59,7 @@ main                              d:\Jai\The_Way_to_Jai\examples\6\6.3_numbers.j
     b = cast, no_check(u8) a;
     print("a is % and b is %\n", a, b); // => a is -5069105 and b is 207
     a, b += 1;
-    print("a is % and b is %\n", a, b); // => a is -5069104 and b is 208
+    print("a is % and b is %\n", a, b); // =>  is -5069104 and b is 208
  
     // Casting float to integer type truncates:
     pi := 3.14; 

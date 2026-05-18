@@ -95,7 +95,7 @@ main :: () {
 
     // Allocation with New:
 	arr_heap2 := New([3] int);    // (11)
-    print("% \n", arr_heap2);     // address is non-deterministic
+    print("% \n", arr_heap2);     // => 202_bdf0_8d50
     defer free(arr_heap2);        // (12)
 	for 0..arr_heap2.count-1 { (<<arr_heap2)[it] = it * it; }   // (13)
 	print("arr_heap2: %\n", << arr_heap2);  // (14) => arr_heap2: [0, 1, 4]

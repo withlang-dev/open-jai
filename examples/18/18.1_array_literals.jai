@@ -15,7 +15,7 @@ main :: () {
     // or array literal that did not specify its type, 
     // so there is no way to know its type.
     print("count is %, and data is %.\n", numbers.count, numbers.data); // (2)
-    // => count is 5, and data is...
+    // => count is 5, and data is f8_01ba_f828.
     print("%\n", type_of(numbers)); // (3) => [5] s64
     print("%\n", type_of([4]int) == type_of([5]int)); // (4) => true because both are Type
     numbers[2] = 42;
@@ -35,7 +35,7 @@ main :: () {
 
     // empty array literal:
     emp := string.[]; // (5)
-    print("% - %\n", emp.count, emp.data); // => 0 -...
+    print("% - %\n", emp.count, emp.data); // => 0 - null
     // arr1 : [4]float = float.[10.0, 20.0, 1.4, 10.0]; // (6)
     // shorter:
     arr1: = float.[10.0, 20.0, 1.4, 10.0];

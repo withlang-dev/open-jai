@@ -10,5 +10,5 @@
 
 main :: () {
    print("TRUTH is %, is it a constant? %\n", TRUTH, is_constant(TRUTH));
-   // => TRUTH is true, is it a constant? true
+   // => TRUTH is true, is a constant? true
 }

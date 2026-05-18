@@ -29,14 +29,14 @@ main :: () {
     while n1 {
         print(" % - ", n1); 
         n1 -=1; // loop stops when n1 reaches 0
-    } // => 5 -  4 -  3 -  2 -  1 -
+    } // => 5 - 4 - 3 - 2 - 1 -
 
     ptr: *int;      // (5)
     print("%\n", ptr); // => null
     a : int = 42; 
     while !ptr {
         count += 1;
-        print("This is a null pointer\n"); // => This is a null pointer
+        print("This is a null pointer\n"); // => This is printed out 3 times
         if count == 3 then ptr = *a; // then or {} are necessary here!
     }
     print("ptr now is %\n", ptr);

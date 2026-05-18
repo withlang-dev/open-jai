@@ -47,11 +47,11 @@ main :: () {
   t.a = 100;        // (4)
   print("t.a = %\n", t.a); // => 100
   t.b = 3.0;        // (5)
-  print("t.b = %\n", t.b); // => t.b = 3
+  print("t.b = %\n", t.b); // => 3.0
   print("t.a = %\n", t.a); // (6) prints out gibberish, since b has been assigned
   t.c = s64;
   print("t.c = %\n", t.c); // => s64
-  print("t.a = %\n", t.a); // (same as (6))
+  print("t.a = %\n", t.a); // => same as (6)
   print("The size of the union T is %\n", size_of(T)); // => 8
 }
 

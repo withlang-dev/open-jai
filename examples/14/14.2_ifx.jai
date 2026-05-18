@@ -43,7 +43,7 @@ main :: () {
     //     print("Really, it is going to happen.\n");
     //     get_default_name();
     // }
-    // (would print: This is the true block.)
+    // => This is the true block.
     print("Your name is %\n", name); // => Your name is Liz
 
     x := 7;
@@ -52,9 +52,9 @@ main :: () {
     y2 := ifx x else 1;     // (5)
     print("y2 is %\n", y2); // => y2 is 7
     y3 := ifx x > 5 else 0; // (6)
-    print("y3 is %\n", y3); // => y3 is 1
+    print("y3 is %\n", y3); // => y3 is 7
     y4 := ifx is_even(x);
     print("y4 is %\n", y4); // => y4 is 0
     y5 := ifx !is_even(x);
-    print("y5 is %\n", y5); // => y5 is true
+    print("y5 is %\n", y5); // => y4 is 7
 }
