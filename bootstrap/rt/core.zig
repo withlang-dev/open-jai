@@ -1694,16 +1694,22 @@ export fn __openjai_set_type_info_table(table: [*]const TypeInfoEntry, count: us
     type_info_count = count;
 }
 
+fn resolveTypeInfoIndex(type_id: i64) ?usize {
+    if (type_id < 0) return null;
+    const raw: usize = @intCast(type_id);
+    const idx: usize = if (raw >= 1000) raw - 1000 else raw;
+    if (idx >= type_info_count) return null;
+    return idx;
+}
+
 export fn __openjai_type_info_name(type_id: i64) ?*OpenJaiRuntimeString {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("<?>");
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return makeRuntimeString("<?>");
     const entry = type_info_table.?[idx];
     return makeRuntimeString(entry.name_ptr[0..entry.name_len]);
 }
 
 export fn __openjai_type_info_tag_name(type_id: i64) ?*OpenJaiRuntimeString {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("<type>");
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return makeRuntimeString("<type>");
     const entry = type_info_table.?[idx];
     return makeRuntimeString(tagNameFromId(entry.tag));
 }
@@ -1752,8 +1758,7 @@ export fn __openjai_type_info_lookup(name_ptr: [*]const u8, name_len: usize) i64
 }
 
 export fn __openjai_type_info_get_field(type_id: i64, name_ptr: [*]const u8, name_len: usize) ?*TypeInfoMemberEntry {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return null;
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return null;
     const entry = type_info_table.?[idx];
     const name = name_ptr[0..name_len];
     for (0..entry.member_count) |i| {
@@ -1766,8 +1771,7 @@ export fn __openjai_type_info_get_field(type_id: i64, name_ptr: [*]const u8, nam
 }
 
 export fn __openjai_type_info_get_members(type_id: i64) ?*OpenJaiArray {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return null;
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return null;
     const entry = type_info_table.?[idx];
     const members_ptr = entry.members;
     const count = entry.member_count;
@@ -1815,8 +1819,7 @@ export fn __openjai_type_info_member_type_id(member_ptr: ?*const TypeInfoMemberE
 }
 
 export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return 0;
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return 0;
     const entry = type_info_table.?[idx];
     return switch (field_id) {
         1 => @intCast(entry.runtime_size),
@@ -1830,8 +1833,7 @@ export fn __openjai_type_info_int_field(type_id: i64, field_id: i64) i64 {
 }
 
 export fn __openjai_type_info_notes(type_id: i64) ?*OpenJaiRuntimeString {
-    if (type_id < 0 or @as(usize, @intCast(type_id)) >= type_info_count) return makeRuntimeString("[]");
-    const idx: usize = @intCast(type_id);
+    const idx = resolveTypeInfoIndex(type_id) orelse return makeRuntimeString("[]");
     const entry = type_info_table.?[idx];
     return makeRuntimeString(entry.notes_ptr[0..entry.notes_len]);
 }
