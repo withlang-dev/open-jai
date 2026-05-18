@@ -10937,6 +10937,16 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             return null;
         },
         .field_access => {
+            // Enum member access: EnumType.MEMBER → type is "EnumType"
+            {
+                const lhs = ast.data(expr).lhs;
+                if (lhs != @import("Ast.zig").null_node and lhs < ast.node_tags.items.len and ast.tag(lhs) == .identifier) {
+                    const lhs_name = ast.tokenSlice(ast.mainToken(lhs));
+                    if ((structTypeNodeByName(ctx, lhs_name) catch null)) |type_node| {
+                        if (ast.tag(type_node) == .enum_type) return lhs_name;
+                    }
+                }
+            }
             const base_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
             const field_name = ast.tokenSlice(ast.data(expr).rhs);
             if (std.mem.eql(u8, firstTypeWord(base_ty), "Code")) {
@@ -13954,11 +13964,12 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
     if (std.mem.eql(u8, field_name, "IS_THIS_YOURS")) return allocator_cap_is_this_yours;
     for (ctx.ast.node_tags.items, 0..) |tag, node_index| {
         if (tag != .enum_type) continue;
+        const is_flags = ctx.ast.tokens[ctx.ast.mainToken(@intCast(node_index))].tag == .keyword_enum_flags;
         var tok = ctx.ast.mainToken(@intCast(node_index));
         while (tok < ctx.ast.tokens.len and ctx.ast.tokens[tok].tag != .l_brace) tok += 1;
         if (tok >= ctx.ast.tokens.len) continue;
         tok += 1;
-        var value: u32 = 0;
+        var value: u32 = if (is_flags) 1 else 0;
         var depth: u32 = 1;
         var waiting_for_member = true;
         while (tok < ctx.ast.tokens.len and depth != 0) : (tok += 1) {
@@ -13968,9 +13979,17 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
                 .semicolon, .comma => {
                     if (depth == 1) waiting_for_member = true;
                 },
+                .colon_colon => if (depth == 1) {
+                    if (tok + 1 < ctx.ast.tokens.len and ctx.ast.tokens[tok + 1].tag == .integer_literal) {
+                        value = @intCast(parseSimpleIntLiteral(ctx.ast.tokenSlice(tok + 1)));
+                    }
+                },
                 .identifier => if (depth == 1 and waiting_for_member) {
                     if (std.mem.eql(u8, ctx.ast.tokenSlice(tok), field_name)) return value;
-                    value += 1;
+                    if (is_flags)
+                        value <<= 1
+                    else
+                        value += 1;
                     waiting_for_member = false;
                 },
                 else => {},
@@ -13981,29 +14000,96 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
 }
 
 fn enumValueInNode(ctx: *GenContext, enum_node: NodeIndex, field_name: []const u8) !?u32 {
-    var tok = ctx.ast.mainToken(enum_node);
-    while (tok < ctx.ast.tokens.len and ctx.ast.tokens[tok].tag != .l_brace) tok += 1;
-    if (tok >= ctx.ast.tokens.len) return null;
+    const ast = ctx.ast;
+    const is_flags = ast.tokens[ast.mainToken(enum_node)].tag == .keyword_enum_flags;
+    var tok = ast.mainToken(enum_node);
+    while (tok < ast.tokens.len and ast.tokens[tok].tag != .l_brace) tok += 1;
+    if (tok >= ast.tokens.len) return null;
     tok += 1;
-    var value: u32 = 0;
+    var value: u32 = if (is_flags) 1 else 0;
     var depth: u32 = 1;
     var waiting_for_member = true;
-    while (tok < ctx.ast.tokens.len and depth != 0) : (tok += 1) {
-        switch (ctx.ast.tokens[tok].tag) {
+    while (tok < ast.tokens.len and depth != 0) : (tok += 1) {
+        switch (ast.tokens[tok].tag) {
             .l_brace => depth += 1,
             .r_brace => depth -= 1,
             .semicolon, .comma => {
                 if (depth == 1) waiting_for_member = true;
             },
+            .colon_colon => if (depth == 1) {
+                if (tok + 1 < ast.tokens.len and ast.tokens[tok + 1].tag == .integer_literal) {
+                    value = @intCast(parseSimpleIntLiteral(ast.tokenSlice(tok + 1)));
+                }
+            },
             .identifier => if (depth == 1 and waiting_for_member) {
-                if (std.mem.eql(u8, ctx.ast.tokenSlice(tok), field_name)) return value;
-                value += 1;
+                if (std.mem.eql(u8, ast.tokenSlice(tok), field_name)) return value;
+                if (is_flags)
+                    value <<= 1
+                else
+                    value += 1;
                 waiting_for_member = false;
             },
             else => {},
         }
     }
     return null;
+}
+
+const EnumMember = struct {
+    name: []const u8,
+    value: u64,
+};
+
+fn collectEnumMembersFromNode(ctx: *GenContext, enum_node: NodeIndex) std.ArrayList(EnumMember) {
+    const ast = ctx.ast;
+    const is_flags = ast.tokens[ast.mainToken(enum_node)].tag == .keyword_enum_flags;
+    var members: std.ArrayList(EnumMember) = .empty;
+    var tok = ast.mainToken(enum_node);
+    while (tok < ast.tokens.len and ast.tokens[tok].tag != .l_brace) tok += 1;
+    if (tok >= ast.tokens.len) return members;
+    tok += 1;
+    var value: u64 = if (is_flags) 1 else 0;
+    var depth: u32 = 1;
+    var waiting_for_member = true;
+    while (tok < ast.tokens.len and depth != 0) : (tok += 1) {
+        switch (ast.tokens[tok].tag) {
+            .l_brace => depth += 1,
+            .r_brace => depth -= 1,
+            .semicolon, .comma => {
+                if (depth == 1) waiting_for_member = true;
+            },
+            .colon_colon => if (depth == 1) {
+                // Explicit value assignment: NAME :: <value>
+                // Skip the value expression for now — we'd need to evaluate it.
+                // This handles simple integer literals only.
+                if (tok + 1 < ast.tokens.len and ast.tokens[tok + 1].tag == .integer_literal) {
+                    value = parseSimpleIntLiteral(ast.tokenSlice(tok + 1));
+                }
+            },
+            .identifier => if (depth == 1 and waiting_for_member) {
+                members.append(ctx.program.allocator, .{ .name = ast.tokenSlice(tok), .value = value }) catch {};
+                if (is_flags)
+                    value <<= 1
+                else
+                    value += 1;
+                waiting_for_member = false;
+            },
+            else => {},
+        }
+    }
+    return members;
+}
+
+fn parseSimpleIntLiteral(text: []const u8) u64 {
+    var val: u64 = 0;
+    for (text) |c| {
+        if (c >= '0' and c <= '9') {
+            val = val *% 10 +% (c - '0');
+        } else if (c == '_') {
+            continue;
+        } else break;
+    }
+    return val;
 }
 
 fn allocatorProcIdByName(name: []const u8) ?u32 {
@@ -14367,7 +14453,7 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
             continue;
         }
         if (typeTextForExpr(ctx, arg_node, diag)) |arg_type| {
-            if (try typeTextIsEmbeddedStruct(ctx, arg_type, diag)) {
+            if (try typeTextIsEmbeddedStruct(ctx, arg_type, diag) or try resolveEnumTypeNode(ctx, std.mem.trim(u8, arg_type, " \t\r\n"), arg_node) != null) {
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
                 try emitFormattedValueForType(ctx, arg_reg, arg_type, arg_node, false, diag);
             } else if (staticArrayElementText(arg_type)) |elem_type| {
@@ -14567,6 +14653,14 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
         try emitLiteralPrint(ctx.program, ctx.proc, "]", source_node);
         return;
     }
+    if (try resolveEnumTypeNode(ctx, clean_type, source_node)) |type_node| {
+        const is_flags = ctx.ast.tokens[ctx.ast.mainToken(type_node)].tag == .keyword_enum_flags;
+        if (is_flags)
+            try emitFormattedEnumFlagsValue(ctx, value_reg, type_node, source_node)
+        else
+            try emitFormattedEnumValue(ctx, value_reg, type_node, source_node);
+        return;
+    }
     if (try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
         try emitFormattedStructValue(ctx, value_reg, clean_type, source_node, diag);
         return;
@@ -14582,6 +14676,154 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
         return;
     }
     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+}
+
+fn resolveEnumTypeNode(ctx: *GenContext, clean_type: []const u8, source_node: NodeIndex) !?NodeIndex {
+    const ast = ctx.ast;
+    const type_word = firstTypeWord(clean_type);
+    if (type_word.len == 0) return null;
+
+    // Named enum: look up by type name.
+    if (!std.mem.eql(u8, type_word, "enum") and !std.mem.eql(u8, type_word, "enum_flags")) {
+        if (try structTypeNodeByName(ctx, type_word)) |type_node| {
+            if (ast.tag(type_node) == .enum_type) return type_node;
+        }
+        return null;
+    }
+
+    // Anonymous enum: resolve from the source expression's declaration.
+    if (source_node != @import("Ast.zig").null_node and source_node < ast.node_tags.items.len and ast.tag(source_node) == .identifier) {
+        if (ctx.resolved.local_values.get(source_node)) |decl| {
+            if (decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len and ast.tag(decl) == .var_decl) {
+                const type_node = ast.data(decl).lhs;
+                if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len and ast.tag(type_node) == .enum_type)
+                    return type_node;
+            }
+        }
+        // Global var: check resolved symbols.
+        const ident_name = ast.tokenSlice(ast.mainToken(source_node));
+        if (ctx.resolved.lookup(ident_name)) |sym| switch (sym) {
+            .const_value => |node| {
+                if (node != @import("Ast.zig").null_node and node < ast.node_tags.items.len) {
+                    if (ast.tag(node) == .var_decl) {
+                        const type_node = ast.data(node).lhs;
+                        if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len and ast.tag(type_node) == .enum_type)
+                            return type_node;
+                    } else if (ast.tag(node) == .enum_type) {
+                        return node;
+                    }
+                }
+            },
+            else => {},
+        };
+    }
+
+    return null;
+}
+
+fn emitFormattedEnumValue(ctx: *GenContext, value_reg: Bytecode.Register, enum_node: NodeIndex, source_node: NodeIndex) !void {
+    const proc = ctx.proc;
+    const program = ctx.program;
+    const alloc = program.allocator;
+    var members = collectEnumMembersFromNode(ctx, enum_node);
+    defer members.deinit(alloc);
+
+    if (members.items.len == 0) {
+        try proc.instructions.append(alloc, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+        return;
+    }
+
+    // Emit comparison chain: for each member, compare value_reg == member_value,
+    // if match print member name and jump to end.
+    var end_jumps: std.ArrayList(usize) = .empty;
+    defer end_jumps.deinit(alloc);
+
+    for (members.items) |member| {
+        const const_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = const_reg, .arg1 = @intCast(member.value), .source_node = source_node });
+        const cmp_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .cmp_eq, .dest = cmp_reg, .arg1 = value_reg, .arg2 = const_reg, .source_node = source_node });
+        const jump_if_index = proc.instructions.items.len;
+        try proc.instructions.append(alloc, .{ .opcode = .jump_if_false, .arg1 = cmp_reg, .arg2 = 0, .source_node = source_node });
+        try emitLiteralPrint(program, proc, member.name, source_node);
+        try end_jumps.append(alloc, proc.instructions.items.len);
+        try proc.instructions.append(alloc, .{ .opcode = .jump, .arg1 = 0, .source_node = source_node });
+        proc.instructions.items[jump_if_index].arg2 = @intCast(proc.instructions.items.len);
+    }
+
+    // Fallback: print numeric value for unknown enum values.
+    try proc.instructions.append(alloc, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+
+    const end_target: u32 = @intCast(proc.instructions.items.len);
+    for (end_jumps.items) |idx| {
+        proc.instructions.items[idx].arg1 = end_target;
+    }
+}
+
+fn emitFormattedEnumFlagsValue(ctx: *GenContext, value_reg: Bytecode.Register, enum_node: NodeIndex, source_node: NodeIndex) !void {
+    const proc = ctx.proc;
+    const program = ctx.program;
+    const alloc = program.allocator;
+    var members = collectEnumMembersFromNode(ctx, enum_node);
+    defer members.deinit(alloc);
+
+    if (members.items.len == 0) {
+        try proc.instructions.append(alloc, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
+        return;
+    }
+
+    // For enum_flags, check each bit. Print "FLAG1 | FLAG2 | ..." for set bits.
+    // Track whether we've printed anything to know whether to print " | " separator.
+    const printed_reg = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = printed_reg, .arg1 = 0, .source_node = source_node });
+
+    for (members.items) |member| {
+        // Check: (value_reg & member_value) != 0
+        const mask_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = mask_reg, .arg1 = @intCast(member.value), .source_node = source_node });
+        const and_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .bit_and, .dest = and_reg, .arg1 = value_reg, .arg2 = mask_reg, .source_node = source_node });
+        const zero_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = zero_reg, .arg1 = 0, .source_node = source_node });
+        const cmp_reg = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .cmp_ne, .dest = cmp_reg, .arg1 = and_reg, .arg2 = zero_reg, .source_node = source_node });
+        const skip_index = proc.instructions.items.len;
+        try proc.instructions.append(alloc, .{ .opcode = .jump_if_false, .arg1 = cmp_reg, .arg2 = 0, .source_node = source_node });
+
+        // Print " | " separator if not first.
+        const sep_cmp = proc.num_registers;
+        proc.num_registers += 1;
+        try proc.instructions.append(alloc, .{ .opcode = .cmp_ne, .dest = sep_cmp, .arg1 = printed_reg, .arg2 = zero_reg, .source_node = source_node });
+        const sep_skip = proc.instructions.items.len;
+        try proc.instructions.append(alloc, .{ .opcode = .jump_if_false, .arg1 = sep_cmp, .arg2 = 0, .source_node = source_node });
+        try emitLiteralPrint(program, proc, " | ", source_node);
+        proc.instructions.items[sep_skip].arg2 = @intCast(proc.instructions.items.len);
+
+        try emitLiteralPrint(program, proc, member.name, source_node);
+        // Mark that we printed something.
+        try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = printed_reg, .arg1 = 1, .source_node = source_node });
+
+        proc.instructions.items[skip_index].arg2 = @intCast(proc.instructions.items.len);
+    }
+
+    // If nothing was printed (value is 0), print "0".
+    const final_zero = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(alloc, .{ .opcode = .load_int, .dest = final_zero, .arg1 = 0, .source_node = source_node });
+    const final_cmp = proc.num_registers;
+    proc.num_registers += 1;
+    try proc.instructions.append(alloc, .{ .opcode = .cmp_eq, .dest = final_cmp, .arg1 = printed_reg, .arg2 = final_zero, .source_node = source_node });
+    const final_skip = proc.instructions.items.len;
+    try proc.instructions.append(alloc, .{ .opcode = .jump_if_false, .arg1 = final_cmp, .arg2 = 0, .source_node = source_node });
+    try emitLiteralPrint(program, proc, "0", source_node);
+    proc.instructions.items[final_skip].arg2 = @intCast(proc.instructions.items.len);
 }
 
 fn emitFormattedApolloTimeValue(ctx: *GenContext, low_reg: Bytecode.Register, source_node: NodeIndex) !void {
