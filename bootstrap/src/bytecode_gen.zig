@@ -7310,6 +7310,13 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "array_free")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
                     if (args.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "array_free expects one argument", .{});
+                    const arg_type = typeTextForExpr(ctx, @intCast(args[0]), diag);
+                    if (arg_type != null and isViewArrayTypeText(arg_type.?)) {
+                        const reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = 0, .source_node = expr });
+                        return reg;
+                    }
                     const array_reg = try ctx.genExpr(@intCast(args[0]), diag);
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
@@ -8682,6 +8689,26 @@ const GenContext = struct {
     fn genUndefinedValue(ctx: *GenContext, type_expr: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
         if (type_expr == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(source_node)].start, "explicit uninitialization requires an explicit type", .{});
+        if (ast.tag(type_expr) == .array_type) {
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            if (ast.data(type_expr).lhs == @import("Ast.zig").null_node) {
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = 16, .source_node = source_node });
+            } else {
+                const elem_text = ctx.nodeSource(ast.data(type_expr).rhs);
+                const count = try evalIntegerConstExpr(ctx, ast.data(type_expr).lhs, diag);
+                const elem_size = try typeTextSize(ctx, elem_text, diag);
+                const size: u64 = @as(u64, @intCast(@max(count, 0))) * elem_size;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
+            }
+            return reg;
+        }
+        if (ast.tag(type_expr) == .pointer_type) {
+            const reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_null_ptr, .dest = reg, .source_node = source_node });
+            return reg;
+        }
         if (ast.tag(type_expr) != .type_expr) return try ctx.genTypedPlaceholderValue(source_node, diag);
         const type_name = ast.tokenSlice(ast.mainToken(type_expr));
         const reg = ctx.proc.num_registers;
@@ -9570,10 +9597,30 @@ fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const 
         try ctx.emitAggregateToStruct(arg, struct_reg, target_type, arg, diag);
         return struct_reg;
     }
+    if (isViewArrayTypeText(target_type) and isArrayLiteralNode(ctx.ast, arg)) {
+        const elems = arrayLiteralElements(ctx.ast, arg) orelse return genCallArg(ctx, arg, diag);
+        const elem_text = dynamicArrayElementText(target_type) orelse "int";
+        const array_type_text = try ctx.ownedTypeTextFmt("[{d}] {s}", .{ elems.len, elem_text });
+        const arr_reg = try ctx.genDefaultValueFromText(array_type_text, arg, diag);
+        try ctx.emitStaticArrayLiteralIntoAddress(arr_reg, arg, array_type_text, arg, diag);
+        return try ctx.wrapStaticArrayAsView(arr_reg, elems.len, arg);
+    }
     const source_type = typeTextForExpr(ctx, arg, diag) orelse return genCallArg(ctx, arg, diag);
     if (typeTextsEquivalent(source_type, target_type)) return genCallArg(ctx, arg, diag);
     if (isViewArrayTypeText(target_type) and isStaticArrayTypeText(source_type)) {
-        const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse 0;
+        const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse blk: {
+            const decl = if (ctx.ast.tag(arg) == .identifier) ctx.resolved.local_values.get(arg) orelse null else null;
+            if (decl) |d| {
+                if (d != @import("Ast.zig").null_node and d < ctx.ast.node_tags.items.len and ctx.ast.tag(d) == .var_decl) {
+                    const type_node = ctx.ast.data(d).lhs;
+                    if (type_node != @import("Ast.zig").null_node and ctx.ast.tag(type_node) == .array_type) {
+                        const count_val = evalIntegerConstExpr(ctx, ctx.ast.data(type_node).lhs, diag) catch break :blk @as(u64, 0);
+                        if (count_val >= 0) break :blk @as(u64, @intCast(count_val));
+                    }
+                }
+            }
+            break :blk @as(u64, 0);
+        };
         const data_reg = try genCallArg(ctx, arg, diag);
         return try ctx.wrapStaticArrayAsView(data_reg, sa_count, arg);
     }

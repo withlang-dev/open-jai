@@ -1545,8 +1545,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .array_free => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend array_free register out of range", .{});
-                const slot_ptr = try pointerValue(env, registers[inst.arg1], diag, "array_free array");
-                const array_ptr = c.LLVMBuildLoad2(env.builder, env.ptr_ty, slot_ptr, "array_free_load");
+                const array_ptr = try pointerValue(env, registers[inst.arg1], diag, "array_free array");
                 var args = [_]c.LLVMValueRef{array_ptr};
                 _ = c.LLVMBuildCall2(env.builder, env.array_free_fn_ty, env.array_free_fn, &args, args.len, "");
             },
