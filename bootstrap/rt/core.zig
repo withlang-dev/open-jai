@@ -1703,9 +1703,30 @@ fn resolveTypeInfoIndex(type_id: i64) ?usize {
 }
 
 export fn __openjai_type_info_name(type_id: i64) ?*OpenJaiRuntimeString {
+    if (builtinTypeName(@intCast(@as(u64, @bitCast(type_id))))) |name| return makeRuntimeString(name);
     const idx = resolveTypeInfoIndex(type_id) orelse return makeRuntimeString("<?>");
     const entry = type_info_table.?[idx];
     return makeRuntimeString(entry.name_ptr[0..entry.name_len]);
+}
+
+fn builtinTypeName(type_id: u64) ?[]const u8 {
+    return switch (type_id) {
+        1 => "bool",
+        4 => "s32",
+        5 => "s64",
+        7 => "u8",
+        8 => "u16",
+        9 => "u32",
+        10 => "*void",
+        12 => "float32",
+        13 => "float64",
+        14 => "string",
+        15 => "Type",
+        16 => "Any",
+        20 => "int",
+        21 => "float",
+        else => null,
+    };
 }
 
 export fn __openjai_type_info_tag_name(type_id: i64) ?*OpenJaiRuntimeString {

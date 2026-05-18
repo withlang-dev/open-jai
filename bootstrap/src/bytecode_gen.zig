@@ -5218,16 +5218,21 @@ const GenContext = struct {
                 if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
                     const type_text = firstTypeWord(stripPointerText(ctx.nodeSource(ast.data(expr).lhs)));
                     try ctx.ensureTypeInfoForText(type_text, diag);
-                    return try ctx.emitTypeText(expr, type_text, diag);
+                    const str_idx = try program.addString(type_text);
+                    const reg = proc.num_registers;
+                    proc.num_registers += 1;
+                    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_ptr, .dest = reg, .arg1 = str_idx, .source_node = expr });
+                    return reg;
                 }
-                if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |type_text| {
+                const type_of_text = declaredTypeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse typeTextForExpr(ctx, ast.data(expr).lhs, diag);
+                if (type_of_text) |type_text| {
                     const clean_type = std.mem.trim(u8, type_text, " \t\r\n");
                     const type_name = firstTypeWord(stripPointerText(clean_type));
                     if (!isBuiltinTypeName(type_name) and (try structTypeNodeByName(ctx, type_name)) != null) {
                         return try ctx.emitTypeText(expr, try displayTypeTextForTypeOf(ctx, clean_type, diag), diag);
                     }
                 }
-                const type_id = if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |type_text| typeIdFromTypeText(type_text) else try ctx.phase2TypeId(ast.data(expr).lhs, diag);
+                const type_id = if (type_of_text) |type_text| typeIdFromTypeText(type_text) else try ctx.phase2TypeId(ast.data(expr).lhs, diag);
                 const reg = proc.num_registers;
                 proc.num_registers += 1;
                 try proc.instructions.append(program.allocator, .{ .opcode = .load_type, .dest = reg, .arg1 = type_id, .source_node = expr });
@@ -10213,6 +10218,22 @@ fn lookupConstValueType(ctx: *GenContext, name: []const u8, diag: Diagnostic) ?[
     }
 }
 
+fn declaredTypeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
+    const ast = ctx.ast;
+    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len) return null;
+    if (ast.tag(expr) != .identifier) return null;
+    const decl = ctx.resolved.local_values.get(expr) orelse return null;
+    if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return null;
+    if (ast.tag(decl) == .var_decl) {
+        const type_node = ast.data(decl).lhs;
+        if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len) {
+            return std.mem.trim(u8, ctx.nodeSource(type_node), " \t\r\n");
+        }
+    }
+    _ = diag;
+    return null;
+}
+
 fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const u8 {
     const ast = ctx.ast;
     if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
@@ -13868,21 +13889,11 @@ fn emitFormattedApolloTimeValue(ctx: *GenContext, low_reg: Bytecode.Register, so
 }
 
 fn emitFormattedTypeValue(ctx: *GenContext, base_reg: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
-    const program = ctx.program;
     const proc = ctx.proc;
-    try emitLiteralPrint(program, proc, "{", source_node);
-    const type_idx = try program.addString("type");
-    const type_reg = proc.num_registers;
+    const str_reg = proc.num_registers;
     proc.num_registers += 1;
-    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = type_reg, .arg1 = base_reg, .arg2 = type_idx, .source_node = source_node });
-    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = type_reg, .source_node = source_node });
-    try emitLiteralPrint(program, proc, ", ", source_node);
-    const size_idx = try program.addString("runtime_size");
-    const size_reg = proc.num_registers;
-    proc.num_registers += 1;
-    try proc.instructions.append(program.allocator, .{ .opcode = .type_info_field, .dest = size_reg, .arg1 = base_reg, .arg2 = size_idx, .source_node = source_node });
-    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = size_reg, .source_node = source_node });
-    try emitLiteralPrint(program, proc, "}", source_node);
+    try proc.instructions.append(ctx.program.allocator, .{ .opcode = .type_to_string, .dest = str_reg, .arg1 = base_reg, .source_node = source_node });
+    try proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = str_reg, .source_node = source_node });
     _ = diag;
 }
 

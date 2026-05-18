@@ -456,7 +456,6 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     const type_info_lookup_params = [_]c.LLVMTypeRef{ ptr_ty, llvm_i64 };
     const type_info_lookup_fn_ty = c.LLVMFunctionType(llvm_i64, @constCast(&type_info_lookup_params), type_info_lookup_params.len, 0);
     const type_info_lookup_fn = c.LLVMAddFunction(module, "__openjai_type_info_lookup", type_info_lookup_fn_ty);
-
     const user_main_fn_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
     const user_main_fn = if (program.main_proc != null) c.LLVMAddFunction(module, "__openjai_user_main", user_main_fn_ty) else null;
     const proc_void_ty = c.LLVMFunctionType(void_ty, null, 0, 0);
@@ -2545,6 +2544,17 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 var args = [_]c.LLVMValueRef{ type_id_val, str_parts.data, str_parts.len };
                 const result = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "get_field_result");
                 try setPointerResult(env, registers, inst.dest, result);
+            },
+            .type_info_ptr => {
+                if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) {
+                    return diag.failAt(0, "LLVM backend type_info_ptr out of range", .{});
+                }
+                const type_name = env.program.strings.items[inst.arg1];
+                const type_id_val = if (env.program.typeInfoIndexByName(type_name)) |idx|
+                    c.LLVMConstInt(env.llvm_i64, type_info_base_id + idx, 0)
+                else
+                    c.LLVMConstInt(env.llvm_i64, typeIdFromTypeTextLlvm(type_name), 0);
+                registers[inst.dest] = .{ .llvm_value = type_id_val, .kind = .type_id };
             },
             .load_build_options,
             .host_set_build_options,

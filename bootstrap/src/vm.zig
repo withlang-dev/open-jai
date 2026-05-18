@@ -1688,6 +1688,19 @@ pub const VM = struct {
                     };
                     regs[inst.dest] = try vm.compilerMessageGetField(index, vm.program.strings.items[inst.arg2], diag);
                 },
+                .type_info_ptr => {
+                    if (inst.dest >= regs.len) return diag.failAt(0, "VM type_info_ptr register out of range", .{});
+                    if (inst.arg1 < vm.program.strings.items.len) {
+                        const type_name = vm.program.strings.items[inst.arg1];
+                        if (vm.program.typeInfoIndexByName(type_name)) |idx| {
+                            regs[inst.dest] = .{ .type_id = idx };
+                        } else {
+                            regs[inst.dest] = .{ .int = 0 };
+                        }
+                    } else {
+                        regs[inst.dest] = .{ .int = 0 };
+                    }
+                },
                 .type_info_field => {
                     if (inst.dest >= regs.len or inst.arg1 >= regs.len or inst.arg2 >= vm.program.strings.items.len) return diag.failAt(0, "VM Type_Info field access out of range", .{});
                     regs[inst.dest] = try vm.typeInfoField(regs[inst.arg1], vm.program.strings.items[inst.arg2], diag);

@@ -1515,7 +1515,6 @@ const Parser = struct {
     fn parseTypeOrExpr(p: *Parser) !NodeIndex {
         if (p.check(.keyword_struct) or p.check(.keyword_union) or p.check(.keyword_enum) or p.check(.keyword_enum_flags)) return p.parseTypeExpr();
         if (p.check(.star) or p.check(.l_bracket)) return p.parseTypeExpr();
-        if ((p.check(.identifier) or p.check(.keyword_void)) and p.peekTag(1) == .semicolon) return p.parseTypeExpr();
         return p.parseExpr();
     }
 
