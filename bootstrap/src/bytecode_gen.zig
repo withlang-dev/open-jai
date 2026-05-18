@@ -6168,6 +6168,16 @@ const GenContext = struct {
                     return reg;
                 }
                 const field_name = ast.tokenSlice(ast.data(expr).rhs);
+                if (ast.tag(ast.data(expr).lhs) == .identifier) {
+                    const lhs_name = ast.tokenSlice(ast.mainToken(ast.data(expr).lhs));
+                    if (try structTypeNodeByName(ctx, lhs_name)) |type_node| {
+                        if (ast.tag(type_node) == .enum_type) {
+                            if (try enumValueInNode(ctx, type_node, field_name)) |value| {
+                                return try ctx.emitInt(expr, value);
+                            }
+                        }
+                    }
+                }
                 if (ast.tag(ast.data(expr).lhs) == .identifier and std.mem.eql(u8, ast.tokenSlice(ast.mainToken(ast.data(expr).lhs)), "x86_Feature_Flag")) {
                     return try ctx.emitInt(expr, x86FeatureFlagId(field_name));
                 }
@@ -13679,6 +13689,32 @@ fn enumValueByName(ctx: *GenContext, field_name: []const u8, diag: Diagnostic) a
                 },
                 else => {},
             }
+        }
+    }
+    return null;
+}
+
+fn enumValueInNode(ctx: *GenContext, enum_node: NodeIndex, field_name: []const u8) !?u32 {
+    var tok = ctx.ast.mainToken(enum_node);
+    while (tok < ctx.ast.tokens.len and ctx.ast.tokens[tok].tag != .l_brace) tok += 1;
+    if (tok >= ctx.ast.tokens.len) return null;
+    tok += 1;
+    var value: u32 = 0;
+    var depth: u32 = 1;
+    var waiting_for_member = true;
+    while (tok < ctx.ast.tokens.len and depth != 0) : (tok += 1) {
+        switch (ctx.ast.tokens[tok].tag) {
+            .l_brace => depth += 1,
+            .r_brace => depth -= 1,
+            .semicolon, .comma => {
+                if (depth == 1) waiting_for_member = true;
+            },
+            .identifier => if (depth == 1 and waiting_for_member) {
+                if (std.mem.eql(u8, ctx.ast.tokenSlice(tok), field_name)) return value;
+                value += 1;
+                waiting_for_member = false;
+            },
+            else => {},
         }
     }
     return null;
