@@ -2173,6 +2173,13 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         break :blk c.LLVMBuildSelect(env.builder, is_null, slot, loaded, "memcpy_dst_ptr_or_slot");
                     },
                     .int_addr, .uint_addr, .bool_addr => c.LLVMBuildPointerCast(env.builder, registers[inst.dest].llvm_value, env.ptr_ty, "memcpy_dst_scalar_slot"),
+                    .int, .uint => blk_int: {
+                        const fn_parent = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
+                        const slot = buildEntryAlloca(env, fn_parent, env.llvm_i64, "memcpy_dst_int_slot");
+                        _ = c.LLVMBuildStore(env.builder, try valueAsInt(env, registers[inst.dest], diag), slot);
+                        registers[inst.dest] = .{ .llvm_value = slot, .kind = .{ .int_addr = inst.dest } };
+                        break :blk_int c.LLVMBuildPointerCast(env.builder, slot, env.ptr_ty, "memcpy_dst_int_ptr");
+                    },
                     else => return diag.failAt(0, "LLVM backend memcpy destination requires addressable storage, got {s}", .{@tagName(registers[inst.dest].kind)}),
                 };
                 const src_ptr = switch (registers[inst.arg1].kind) {

@@ -576,10 +576,20 @@ export fn __openjai_assert_fail() noreturn {
 }
 
 export fn __openjai_memcpy(dst: ?*anyopaque, src: ?*const anyopaque, len: usize) void {
+    @setRuntimeSafety(false);
     if (len == 0) return;
-    const d = dst orelse unreachable;
-    const s = src orelse unreachable;
-    @memcpy(@as([*]u8, @ptrCast(d))[0..len], @as([*]const u8, @ptrCast(s))[0..len]);
+    const d: [*]u8 = @ptrCast(dst orelse unreachable);
+    const s: [*]const u8 = @ptrCast(src orelse unreachable);
+    if (@intFromPtr(d) == @intFromPtr(s)) return;
+    if (@intFromPtr(d) < @intFromPtr(s)) {
+        for (0..len) |i| d[i] = s[i];
+    } else {
+        var i = len;
+        while (i > 0) {
+            i -= 1;
+            d[i] = s[i];
+        }
+    }
 }
 
 export fn __openjai_memset(dst: ?*anyopaque, byte: u8, len: usize) void {

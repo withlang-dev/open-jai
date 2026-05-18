@@ -1256,19 +1256,53 @@ const GenContext = struct {
         const lhs_type = typeTextForExpr(ctx, lhs, diag) orelse return false;
         const lhs_name = firstTypeWord(lhs_type);
         if (lhs_name.len == 0) return false;
-        const decl = (ctx.findOperatorOverloadProc(lhs_name, .{ .by_token_tag = op }, 2) catch |err| return switch (err) {
+        if (ctx.findOperatorOverloadProc(lhs_name, .{ .by_token_tag = op }, 2) catch |err| return switch (err) {
             error.GenFailed => error.GenFailed,
             error.OutOfMemory => error.OutOfMemory,
             error.Overflow => error.Overflow,
             else => error.GenFailed,
-        }) orelse return false;
-        const args = [_]u32{ lhs, rhs };
-        if (ctx.tryInlineProcCall(decl, &args, expr, diag) catch |err| return switch (err) {
-            error.GenFailed => error.GenFailed,
-            error.OutOfMemory => error.OutOfMemory,
-            error.Overflow => error.Overflow,
-            else => error.GenFailed,
-        }) |_| return true;
+        }) |decl| {
+            const args = [_]u32{ lhs, rhs };
+            if (ctx.tryInlineProcCall(decl, &args, expr, diag) catch |err| return switch (err) {
+                error.GenFailed => error.GenFailed,
+                error.OutOfMemory => error.OutOfMemory,
+                error.Overflow => error.Overflow,
+                else => error.GenFailed,
+            }) |_| return true;
+        }
+        const base_op_name: ?[]const u8 = switch (op) {
+            .plus_equal => "+",
+            .minus_equal => "-",
+            .star_equal => "*",
+            .slash_equal => "/",
+            .percent_equal => "%",
+            .ampersand_equal => "&",
+            .pipe_equal => "|",
+            .caret_equal => "^",
+            else => null,
+        };
+        if (base_op_name) |op_name| {
+            const base_decl = (ctx.findOperatorOverloadProc(lhs_name, .{ .by_name = op_name }, 2) catch |err| return switch (err) {
+                error.GenFailed => error.GenFailed,
+                error.OutOfMemory => error.OutOfMemory,
+                error.Overflow => error.Overflow,
+                else => error.GenFailed,
+            }) orelse return false;
+            const args = [_]u32{ lhs, rhs };
+            const result_reg = (ctx.tryInlineProcCall(base_decl, &args, expr, diag) catch |err| return switch (err) {
+                error.GenFailed => error.GenFailed,
+                error.OutOfMemory => error.OutOfMemory,
+                error.Overflow => error.Overflow,
+                else => error.GenFailed,
+            }) orelse return false;
+            const addr = genAddressOfLvalue(ctx, lhs, diag) catch return false;
+            const size = typeTextSize(ctx, lhs_type, diag) catch 8;
+            const size_reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = size_reg, .arg1 = @intCast(size), .arg2 = 0, .source_node = expr }) catch return false;
+            ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = result_reg, .arg2 = size_reg, .source_node = expr }) catch return false;
+            return true;
+        }
         return false;
     }
 
@@ -6154,7 +6188,7 @@ const GenContext = struct {
                         .proc_decl => {
                             const reg = proc.num_registers;
                             proc.num_registers += 1;
-                            const pidx = ctx.procIndexForNode(decl) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "cannot resolve procedure address for '{s}'", .{ast.tokenSlice(ast.mainToken(expr))});
+                            const pidx = ctx.procIndexForNode(decl) orelse try ctx.emitAnonymousProc(decl, diag);
                             try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                             return reg;
                         },
@@ -10912,6 +10946,15 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) return "int";
                 if (ctx.type_overrides.get(decl)) |cached| return cached;
                 if (ast.tag(decl) == .meta_expr and ast.tokens[ast.mainToken(decl)].tag == .directive_code) return "Code";
+                if (ast.tag(decl) == .var_decl) {
+                    const type_node = ast.data(decl).lhs;
+                    if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len) {
+                        const declared_type = std.mem.trim(u8, ctx.nodeSource(type_node), " \t\r\n");
+                        const tw = firstTypeWord(declared_type);
+                        if ((structTypeNodeByName(ctx, tw) catch null) != null)
+                            return declared_type;
+                    }
+                }
                 if (ast.tag(decl) == .const_decl or ast.tag(decl) == .var_decl) {
                     const init = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else ast.data(decl).rhs;
                     if (init != @import("Ast.zig").null_node and init != using_param_sentinel and init < ast.node_tags.items.len) {
@@ -10924,12 +10967,6 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                             .binary_expr => if (typeTextForExpr(ctx, init, diag)) |init_type| return init_type,
                             else => {},
                         }
-                    }
-                }
-                if (ast.tag(decl) == .var_decl) {
-                    const type_node = ast.data(decl).lhs;
-                    if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len) {
-                        return std.mem.trim(u8, ctx.nodeSource(type_node), " \t\r\n");
                     }
                 }
             }
@@ -12129,6 +12166,9 @@ fn operatorTypeMatches(param_type: []const u8, arg_type: []const u8) bool {
     if ((std.mem.eql(u8, param_type, "float32") or std.mem.eql(u8, param_type, "float64")) and std.mem.eql(u8, arg_type, "float")) return true;
     if (std.mem.eql(u8, param_type, "int") and (std.mem.eql(u8, arg_type, "s64") or std.mem.eql(u8, arg_type, "int"))) return true;
     if (std.mem.eql(u8, param_type, "s64") and std.mem.eql(u8, arg_type, "int")) return true;
+    const param_is_float = std.mem.eql(u8, param_type, "float") or std.mem.eql(u8, param_type, "float32") or std.mem.eql(u8, param_type, "float64");
+    const arg_is_int = std.mem.eql(u8, arg_type, "int") or std.mem.eql(u8, arg_type, "s64") or std.mem.eql(u8, arg_type, "s32") or std.mem.eql(u8, arg_type, "u8") or std.mem.eql(u8, arg_type, "u16") or std.mem.eql(u8, arg_type, "u32") or std.mem.eql(u8, arg_type, "u64");
+    if (param_is_float and arg_is_int) return true;
     return false;
 }
 
