@@ -9608,19 +9608,7 @@ fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const 
     const source_type = typeTextForExpr(ctx, arg, diag) orelse return genCallArg(ctx, arg, diag);
     if (typeTextsEquivalent(source_type, target_type)) return genCallArg(ctx, arg, diag);
     if (isViewArrayTypeText(target_type) and isStaticArrayTypeText(source_type)) {
-        const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse blk: {
-            const decl = if (ctx.ast.tag(arg) == .identifier) ctx.resolved.local_values.get(arg) orelse null else null;
-            if (decl) |d| {
-                if (d != @import("Ast.zig").null_node and d < ctx.ast.node_tags.items.len and ctx.ast.tag(d) == .var_decl) {
-                    const type_node = ctx.ast.data(d).lhs;
-                    if (type_node != @import("Ast.zig").null_node and ctx.ast.tag(type_node) == .array_type) {
-                        const count_val = evalIntegerConstExpr(ctx, ctx.ast.data(type_node).lhs, diag) catch break :blk @as(u64, 0);
-                        if (count_val >= 0) break :blk @as(u64, @intCast(count_val));
-                    }
-                }
-            }
-            break :blk @as(u64, 0);
-        };
+        const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse 0;
         const data_reg = try genCallArg(ctx, arg, diag);
         return try ctx.wrapStaticArrayAsView(data_reg, sa_count, arg);
     }
@@ -10966,15 +10954,28 @@ fn staticArrayCountFromText(ctx: *GenContext, raw: []const u8, diag: Diagnostic)
     if (evalIntegerTextExpr(ctx, count_text)) |count| {
         if (count >= 0) return @intCast(count);
     } else |_| {}
-    const sym = ctx.resolved.lookup(count_text) orelse return null;
-    const decl = switch (sym) {
-        .const_value => |node| node,
-        else => return null,
-    };
-    if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len or ctx.ast.tag(decl) != .const_decl) return null;
-    const value = try evalIntegerConstExpr(ctx, ctx.ast.data(decl).lhs, diag);
-    if (value < 0) return null;
-    return @intCast(value);
+    if (ctx.resolved.lookup(count_text)) |sym| {
+        const decl = switch (sym) {
+            .const_value => |node| node,
+            else => null,
+        };
+        if (decl) |d| {
+            if (d != @import("Ast.zig").null_node and d < ctx.ast.node_tags.items.len and ctx.ast.tag(d) == .const_decl) {
+                const value = try evalIntegerConstExpr(ctx, ctx.ast.data(d).lhs, diag);
+                if (value >= 0) return @intCast(value);
+            }
+        }
+    }
+    var it = ctx.decl_registers.iterator();
+    while (it.next()) |entry| {
+        const d = entry.key_ptr.*;
+        if (d == @import("Ast.zig").null_node or d >= ctx.ast.node_tags.items.len) continue;
+        if (ctx.ast.tag(d) != .const_decl) continue;
+        if (!std.mem.eql(u8, ctx.ast.tokenSlice(ctx.ast.mainToken(d)), count_text)) continue;
+        const value = evalIntegerConstExpr(ctx, ctx.ast.data(d).lhs, diag) catch continue;
+        if (value >= 0) return @intCast(value);
+    }
+    return null;
 }
 
 fn typeTextIsScalarComparable(raw: []const u8) bool {
