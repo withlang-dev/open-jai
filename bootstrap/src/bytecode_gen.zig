@@ -432,6 +432,11 @@ const GenContext = struct {
             if (std.mem.startsWith(u8, type_text, "$")) type_text = std.mem.trim(u8, type_text[1..], " \t\r\n");
             const name = firstTypeWord(type_text);
             if (name.len == 0) {
+                if (std.mem.indexOfScalar(u8, type_text, '$') != null) {
+                    const arg: NodeIndex = @intCast(args[arg_index]);
+                    const actual_type = typeTextForExpr(ctx, arg, diag);
+                    if (actual_type) |at| try ctx.bindPolymorphsFromArrayPattern(type_text, at);
+                }
                 arg_index += 1;
                 continue;
             }
@@ -463,6 +468,7 @@ const GenContext = struct {
             if (std.mem.indexOfScalar(u8, type_text, '$') != null) {
                 if (typeTextForExpr(ctx, source, diag)) |actual_type| {
                     try ctx.bindPolymorphsFromTypePattern(type_text, actual_type, restores);
+                    try ctx.bindPolymorphsFromArrayPattern(type_text, actual_type);
                 }
             }
             const explicitly_polymorphic = std.mem.startsWith(u8, type_text, "$");
@@ -477,6 +483,31 @@ const GenContext = struct {
                 .old = ctx.polymorph_types.get(name) orelse "",
             });
             try ctx.polymorph_types.put(ctx.program.allocator, name, actual_type);
+        }
+    }
+
+    fn bindPolymorphsFromArrayPattern(ctx: *GenContext, pattern_raw: []const u8, actual_raw: []const u8) !void {
+        const pattern = std.mem.trim(u8, pattern_raw, " \t\r\n");
+        const actual = std.mem.trim(u8, actual_raw, " \t\r\n");
+        if (!std.mem.startsWith(u8, pattern, "[") or !std.mem.startsWith(u8, actual, "[")) return;
+        const p_close = std.mem.indexOfScalar(u8, pattern, ']') orelse return;
+        const a_close = std.mem.indexOfScalar(u8, actual, ']') orelse return;
+        const p_count = std.mem.trim(u8, pattern[1..p_close], " \t\r\n");
+        const a_count = std.mem.trim(u8, actual[1..a_close], " \t\r\n");
+        if (std.mem.startsWith(u8, p_count, "$")) {
+            const int_name = p_count[1..];
+            if (int_name.len > 0) {
+                const count_val = std.fmt.parseInt(i64, a_count, 10) catch return;
+                try ctx.polymorph_ints.put(ctx.program.allocator, int_name, count_val);
+            }
+        }
+        const p_elem = std.mem.trim(u8, pattern[p_close + 1 ..], " \t\r\n");
+        const a_elem = std.mem.trim(u8, actual[a_close + 1 ..], " \t\r\n");
+        if (std.mem.startsWith(u8, p_elem, "$")) {
+            const type_name = p_elem[1..];
+            if (type_name.len > 0) {
+                try ctx.polymorph_types.put(ctx.program.allocator, type_name, a_elem);
+            }
         }
     }
 
