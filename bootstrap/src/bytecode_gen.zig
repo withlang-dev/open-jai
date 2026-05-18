@@ -12932,6 +12932,10 @@ fn phase3SizeOf(ctx: *GenContext, operand: NodeIndex, diag: Diagnostic) !u64 {
             if (ctx.resolved.local_values.get(operand)) |decl| {
                 if (decl == @import("Ast.zig").null_node) break :blk 16;
                 if (ast.tag(decl) == .type_expr) break :blk try typeIdFromToken(ast, ast.mainToken(decl), diag);
+                if (ast.tag(decl) == .identifier) {
+                    const decl_name = ast.tokenSlice(ast.mainToken(decl));
+                    if (isBuiltinTypeName(decl_name)) break :blk try typeIdFromTypeName(ast, decl, diag);
+                }
                 if (ast.tag(decl) == .const_decl and ast.tag(ast.data(decl).lhs) == .type_expr) break :blk try typeIdFromToken(ast, ast.mainToken(ast.data(decl).lhs), diag);
                 if (ast.tag(decl) == .const_decl and (ast.tag(ast.data(decl).lhs) == .struct_type or ast.tag(ast.data(decl).lhs) == .union_type)) break :blk 10;
                 if (ast.tag(decl) == .const_decl and (ast.tag(ast.data(decl).lhs) == .enum_type or ast.tag(ast.data(decl).lhs) == .array_type)) break :blk 16;
@@ -12956,12 +12960,12 @@ fn phase3SizeOf(ctx: *GenContext, operand: NodeIndex, diag: Diagnostic) !u64 {
 fn structSizeByName(ctx: *GenContext, name: []const u8, diag: Diagnostic) anyerror!?u64 {
     if (try structTypeNodeByName(ctx, name)) |type_node| return try containerSizeFromSource(ctx, type_node, diag);
     if (ctx.type_context_parent) |parent| if (try structSizeByName(parent, name, diag)) |size| return size;
-    if (containerBodySourceByName(ctx, name)) |body| return try containerSizeFromBody(ctx, body, diag);
+    if (containerBodySourceByName(ctx, name)) |body| return try containerSizeFromBody(ctx, body, false, diag);
     return null;
 }
 
 fn structSizeFromTypeText(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerror!?u64 {
-    if (anonymousContainerBodyText(raw_type)) |body| return try containerSizeFromBody(ctx, body, diag);
+    if (anonymousContainerBodyText(raw_type)) |body| return try containerSizeFromBody(ctx, body, false, diag);
     const stripped = stripPointerText(raw_type);
     const type_name = firstTypeWord(stripped);
     // If the type text is just a bare name that aliases a parametrized type call,
@@ -12979,7 +12983,7 @@ fn structSizeFromTypeText(ctx: *GenContext, raw_type: []const u8, diag: Diagnost
             const actual_name = firstTypeWord(qualified_part);
             if (actual_name.len > 0) {
                 if (try structTypeNodeByName(ctx, actual_name)) |node| break :blk node;
-                if (containerBodySourceByName(ctx, actual_name)) |body| return try containerSizeFromBody(ctx, body, diag);
+                if (containerBodySourceByName(ctx, actual_name)) |body| return try containerSizeFromBody(ctx, body, false, diag);
             }
         }
         if (ctx.type_context_parent) |parent| return try structSizeFromTypeText(parent, raw_type, diag);
@@ -13038,10 +13042,11 @@ fn fieldOffsetFromAccess(ctx: *GenContext, access: NodeIndex, diag: Diagnostic) 
 
 fn containerSizeFromSource(ctx: *GenContext, type_node: NodeIndex, diag: Diagnostic) anyerror!u64 {
     const body = containerBodySource(ctx.ast, type_node) orelse return 8;
-    return try containerSizeFromBody(ctx, body, diag);
+    const is_union = ctx.ast.tag(type_node) == .union_type;
+    return try containerSizeFromBody(ctx, body, is_union, diag);
 }
 
-fn containerSizeFromBody(ctx: *GenContext, body: []const u8, diag: Diagnostic) anyerror!u64 {
+fn containerSizeFromBody(ctx: *GenContext, body: []const u8, is_union: bool, diag: Diagnostic) anyerror!u64 {
     var total: u64 = 0;
     var it = FieldSegmentIterator{ .source = body };
     var max_align: u64 = 1;
@@ -13051,10 +13056,14 @@ fn containerSizeFromBody(ctx: *GenContext, body: []const u8, diag: Diagnostic) a
         const field_size = try typeTextSize(ctx, field_type, diag);
         const field_align = try typeTextAlign(ctx, field_type, diag);
         max_align = @max(max_align, field_align);
-        var n: u64 = 0;
-        while (n < parsed.name_count) : (n += 1) {
-            total = alignForward(total, field_align);
-            total += field_size;
+        if (is_union) {
+            total = @max(total, field_size);
+        } else {
+            var n: u64 = 0;
+            while (n < parsed.name_count) : (n += 1) {
+                total = alignForward(total, field_align);
+                total += field_size;
+            }
         }
     }
     return if (total == 0) 0 else alignForward(total, max_align);
@@ -14139,7 +14148,7 @@ fn typeTextSize(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) anyerr
         };
         return count * try typeTextSize(ctx, ty[close + 1 ..], diag);
     }
-    if (anonymousContainerBodyText(ty)) |body| return try containerSizeFromBody(ctx, body, diag);
+    if (anonymousContainerBodyText(ty)) |body| return try containerSizeFromBody(ctx, body, false, diag);
     const name = firstTypeWord(ty);
     if (ctx.polymorph_types.get(name)) |actual_type| {
         if (!std.mem.eql(u8, firstTypeWord(actual_type), name)) return try typeTextSize(ctx, actual_type, diag);

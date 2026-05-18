@@ -5,6 +5,6 @@ main :: () {
     y: type_of(x);
 
     memcpy(*y, *x, size_of(type_of(x)));
-    print("y is %\n", y);  // => y is 42; 
+    print("y is %\n", y);  // => y is 42
 }
 

@@ -17,5 +17,5 @@ main :: () {
     // calling all code of which we want to measure performance
 
     // executing defer block:
-    // => Factorial 20 took 0.1857 ms
+    // => Factorial 20 took...
 }

@@ -9,12 +9,12 @@ main :: () {
     s: TI = 7;
     t: TI = 9;
     print("s * t = %\n", s * t); // => 63
-    print("size_of(TI) is %\n", size_of(TI)); // => 4 (bytes)    
+    print("size_of(TI) is %\n", size_of(TI)); // => size_of(TI) is 4
     
     // type Type
     a: Type = float64;  // (1)
     b := int;           // (2)
-    print("b is %\n", b); // => s64  (int is an alias for s64)
+    print("b is %\n", b); // => b is s64
     c := type_of(42);   // (3)
     print("c is of type %, value %\n", type_of(c), c); // => c is of type Type, value s64
     d := type_of(b);    // (4)
@@ -27,7 +27,7 @@ main :: () {
     t1 := 3.14; 
     print("the type of t1 is %\n", type_of(t1)); // => float32
     print("the size of t1 is %\n", size_of(type_of(t1))); // => 4
-    print("the size of u16 is: % bytes\n", size_of(u16)); // => The size of u16 is: 2 bytes
+    print("the size of u16 is: % bytes\n", size_of(u16)); // => the size of u16 is: 2 bytes
     t2 := "Hello!";
     print("the type of t2 is %\n", type_of(t2)); // => string
     print("the size of t2 is %\n", size_of(type_of(t2))); // (6) => 16

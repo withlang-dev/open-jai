@@ -8,7 +8,7 @@ COMP_CALC :: #run (234 * 15);      // (2B)
 main :: () {
     MASS_MARS :: MASS_EARTH * 0.15;  // (3)
     print("The earth mass is %\n", MASS_EARTH);
-    // => The earth mass is 5972189887017193070000000
+    // => The earth mass is 5972190000000000000000000
 
     // MASS_EARTH = 5.98e24; // => (4) Error: Attempt to assign to a constant.
 

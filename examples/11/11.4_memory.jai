@@ -5,7 +5,7 @@ main :: () {
 
     n1 := cast(*int) alloc(size_of(int));  // (2) - on heap
     defer free(n1);             // (3)
-    print("The address n1 points at is %\n", n1); // => The address n1 points at is 2ad_131f_5700
+    print("The address n1 points at is %\n", n1); // => The address n1 points at is...
     print("The value n1 points at is %\n", << n1); // => The value n1 points at is 0
     print("The type of n1 is %\n", type_of(n1)); // => The type of n1 is *s64
     << n1 = 7;   // (4) fill in a value for n1 to point to

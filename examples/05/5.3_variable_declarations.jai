@@ -19,13 +19,13 @@ main :: () {
     valid2 : bool; 
     print("valid2: %\n", valid2);           // => false
     first_name2 : string;   
-    print("first_name2: %\n", first_name2); // => ""
+    print("first_name2: %\n", first_name2); // =>
     
     // change default value afterwards:
     counter2 = 100;
     first_name2 = "Jon";
     print("counter2: %\n", counter2);       // => 100
-    print("first_name2: %\n", first_name2); // => "Jon"
+    print("first_name2: %\n", first_name2); // => first_name2: Jon
   
     // Case 3: only initialization (type is inferred):
     counter3 := 100;         // an int
@@ -38,7 +38,7 @@ main :: () {
     // Case 4: uninitialized declaration (no default value is given):
     counter4 : int = ---;
     average : float = ---;
-    print("counter4 contains the value %\n", counter4); // => 31525674139189348
+    print("counter4 contains the value %\n", counter4); // => counter4 contains the value...
     print("average contains the value %\n", average);  // => 0
 
     print("the global var is %\n", global_var); // => the global var is 108

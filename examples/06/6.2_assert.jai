@@ -9,7 +9,7 @@ main :: () {
     assert(type_of(n) == int);
 }
 
-// => With line 5 uncommented:
+// With line 5 uncommented:
 /*
 d:/Jai/The_Way_to_Jai/6_Bool_and_number types/examples/6.3_assert.jai:5,3: Assertion failed: 4 does not equal 5
 
