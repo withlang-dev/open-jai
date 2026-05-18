@@ -220,6 +220,7 @@ const GenContext = struct {
     field_values: std.AutoHashMapUnmanaged(u64, Bytecode.Register) = .empty,
     array_last_items: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
     loop_index_registers: std.AutoHashMapUnmanaged(NodeIndex, Bytecode.Register) = .empty,
+    proc_param_bindings: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex) = .empty,
     polymorph_types: std.StringHashMapUnmanaged([]const u8) = .empty,
     polymorph_ints: std.StringHashMapUnmanaged(i64) = .empty,
     type_overrides: std.AutoHashMapUnmanaged(NodeIndex, []const u8) = .empty,
@@ -287,6 +288,7 @@ const GenContext = struct {
         ctx.decl_addresses.deinit(ctx.program.allocator);
         ctx.string_materialized.deinit(ctx.program.allocator);
         ctx.pointer_addrs.deinit(ctx.program.allocator);
+        ctx.proc_param_bindings.deinit(ctx.program.allocator);
         ctx.field_values.deinit(ctx.program.allocator);
         ctx.array_last_items.deinit(ctx.program.allocator);
         ctx.loop_index_registers.deinit(ctx.program.allocator);
@@ -1465,6 +1467,26 @@ const GenContext = struct {
             try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
             _ = ctx.decl_addresses.remove(param);
             try ctx.decl_registers.put(allocator, param, arg_reg);
+            {
+                var bound_proc = source;
+                if (ast.tag(source) == .identifier) {
+                    if (ctx.resolved.local_values.get(source)) |decl| {
+                        if (ast.tag(decl) == .proc_decl) bound_proc = decl
+                        else if (ast.tag(decl) == .const_decl and ast.data(decl).lhs != @import("Ast.zig").null_node and ast.tag(ast.data(decl).lhs) == .proc_decl)
+                            bound_proc = ast.data(decl).lhs;
+                    }
+                    if (bound_proc == source) if (ctx.resolved.lookup(ast.tokenSlice(ast.mainToken(source)))) |sym| switch (sym) {
+                        .proc => |decl| bound_proc = decl,
+                        .const_value => |decl| if (ast.tag(decl) == .proc_decl) {
+                            bound_proc = decl;
+                        },
+                        else => {},
+                    };
+                }
+                if (ast.tag(bound_proc) == .proc_decl) {
+                    try ctx.proc_param_bindings.put(allocator, param, bound_proc);
+                }
+            }
             const inline_type = if (std.mem.eql(u8, param_type_text, "Code"))
                 "Code"
             else
@@ -1509,6 +1531,7 @@ const GenContext = struct {
         }
         try ctx.restoreParamBindings(restores.items);
         try ctx.restoreTypeOverrides(type_restores.items);
+        for (params) |param_idx| _ = ctx.proc_param_bindings.remove(@intCast(param_idx));
         return result;
     }
 
@@ -4190,6 +4213,11 @@ const GenContext = struct {
                                         const size_reg = try ctx.emitInt(stmt, @intCast(try typeTextSize(ctx, result_type_text, diag)));
                                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = frame.result_reg, .arg1 = reg, .arg2 = size_reg, .source_node = stmt });
                                     }
+                                } else if (isViewArrayTypeText(result_type_text) and isDynArrayReturnValue(ctx, value, diag)) {
+                                    const reg = try ctx.genExpr(value, diag);
+                                    const elem_text = dynamicArrayElementText(result_type_text) orelse "int";
+                                    const view_reg = try ctx.wrapDynamicArrayAsView(reg, elem_text, stmt, diag);
+                                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_reg, .arg1 = view_reg, .source_node = stmt });
                                 } else {
                                     const reg = try ctx.genExpr(value, diag);
                                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_reg, .arg1 = reg, .source_node = stmt });
@@ -4273,6 +4301,11 @@ const GenContext = struct {
                                     try ctx.emitAggregateToStruct(value, result, return_text, stmt, diag);
                                     break :blk result;
                                 }
+                            }
+                            if (isViewArrayTypeText(return_text) and isDynArrayReturnValue(ctx, value, diag)) {
+                                const val_reg = try ctx.genExpr(value, diag);
+                                const elem_text = dynamicArrayElementText(return_text) orelse "int";
+                                break :blk try ctx.wrapDynamicArrayAsView(val_reg, elem_text, stmt, diag);
                             }
                         }
                         break :blk try ctx.genExpr(value, diag);
@@ -5442,7 +5475,11 @@ const GenContext = struct {
                         false;
                     if (ctx.typed != null and !ctx.typed.?.typeOf(operand).isPointer() and !operand_source_is_pointer) return operand_reg;
                     if (ctx.pointer_addrs.get(operand_reg)) |addr_decl| {
-                        return ctx.decl_registers.get(addr_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "pointer dereference target has no generated storage", .{});
+                        const src = ctx.decl_registers.get(addr_decl) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "pointer dereference target has no generated storage", .{});
+                        const copy = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load, .dest = copy, .arg1 = src, .source_node = expr });
+                        return copy;
                     }
                     if (ctx.resolved.local_values.get(operand)) |decl| {
                         if (typeTextForExpr(ctx, operand, diag)) |operand_ty| {
@@ -7529,6 +7566,11 @@ const GenContext = struct {
                 }
                 if (!std.mem.eql(u8, name, "print") and !std.mem.eql(u8, name, "log") and !isNameLoweredAsMathIntrinsic(name)) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
+                    if (ctx.resolved.local_values.get(callee)) |decl| {
+                        if (ctx.proc_param_bindings.get(decl)) |bound_proc| {
+                            if (try ctx.tryInlineProcCall(bound_proc, args, expr, diag)) |reg| return reg;
+                        }
+                    }
                     var is_user_proc_call = false;
                     if (ctx.resolved.local_values.get(callee)) |decl| is_user_proc_call = ctx.localDeclIsProcedureCallable(decl);
                     if (!is_user_proc_call and ctx.resolved.overloads(name) != null) {
@@ -10803,6 +10845,11 @@ fn isViewArrayTypeText(raw: []const u8) bool {
 fn isResizableArrayTypeText(raw: []const u8) bool {
     const ty = std.mem.trim(u8, raw, " \t\r\n");
     return std.mem.startsWith(u8, ty, "[..]");
+}
+
+fn isDynArrayReturnValue(ctx: *GenContext, value: NodeIndex, diag: Diagnostic) bool {
+    const val_type = typeTextForExpr(ctx, value, diag) orelse return false;
+    return isResizableArrayTypeText(val_type);
 }
 
 fn arrayValueOperand(ast: *const Ast, arg: NodeIndex) NodeIndex {

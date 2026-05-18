@@ -1351,10 +1351,7 @@ const Parser = struct {
                 } else if (p.matchDiscard(.colon_equal)) {
                     param_init = try p.parseExpr();
                 } else if (param_name != 0) {
-                    p.index -= 1;
-                    const synth = p.index;
-                    p.index += 1;
-                    const param = try p.ast.addNode(.var_decl, synth, .{ .lhs = try p.ast.addNode(.type_expr, synth, .{}), .rhs = null_node });
+                    const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = null_node, .rhs = null_node });
                     try params.append(p.allocator, param);
                     if (!p.matchDiscard(.comma)) break;
                     continue;

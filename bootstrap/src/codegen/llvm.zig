@@ -951,7 +951,17 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         else => registers[inst.dest] = registers[inst.arg1],
                     }
                 } else {
-                    registers[inst.dest] = registers[inst.arg1];
+                    switch (registers[inst.arg1].kind) {
+                        .int_addr, .uint_addr => {
+                            const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_i64, registers[inst.arg1].llvm_value, "copy_from_addr");
+                            registers[inst.dest] = .{ .llvm_value = loaded, .kind = if (registers[inst.arg1].kind == .uint_addr) .uint else .int };
+                        },
+                        .float_addr => {
+                            const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_f64, registers[inst.arg1].llvm_value, "copy_float_from_addr");
+                            registers[inst.dest] = .{ .llvm_value = loaded, .kind = .float };
+                        },
+                        else => registers[inst.dest] = registers[inst.arg1],
+                    }
                 }
             },
             .call_extern => {
