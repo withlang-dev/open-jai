@@ -9074,6 +9074,32 @@ const GenContext = struct {
             .bool_literal => {
                 bytes[0] = if (std.mem.eql(u8, ctx.ast.tokenSlice(ctx.ast.mainToken(init)), "true")) 1 else 0;
             },
+            .run_expr => {
+                if (ctx.typed) |typed| {
+                    if (typed.comptime_ints.get(init)) |v| {
+                        const write_len = @min(size, @sizeOf(i64));
+                        var buf: [8]u8 = undefined;
+                        std.mem.writeInt(u64, &buf, @bitCast(v), .little);
+                        @memcpy(bytes[0..write_len], buf[0..write_len]);
+                    } else if (typed.comptime_floats.get(init)) |v| {
+                        if (size == 4) {
+                            const f32_val: f32 = @floatCast(v);
+                            const f32_bytes: [4]u8 = @bitCast(f32_val);
+                            @memcpy(bytes[0..4], &f32_bytes);
+                        } else {
+                            const f64_bytes: [8]u8 = @bitCast(v);
+                            const write_len = @min(size, 8);
+                            @memcpy(bytes[0..write_len], f64_bytes[0..write_len]);
+                        }
+                    } else {
+                        ctx.program.allocator.free(bytes);
+                        return null;
+                    }
+                } else {
+                    ctx.program.allocator.free(bytes);
+                    return null;
+                }
+            },
             else => {
                 ctx.program.allocator.free(bytes);
                 return null;
