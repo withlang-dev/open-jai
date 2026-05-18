@@ -14128,6 +14128,9 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
             } else if (isFormattedSpecialType(arg_type)) {
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
                 try emitFormattedValueForType(ctx, arg_reg, arg_type, arg_node, false, diag);
+            } else if (std.mem.startsWith(u8, std.mem.trim(u8, arg_type, " \t\r\n"), "*")) {
+                const arg_reg = try genCallArg(ctx, arg_node, diag);
+                try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = arg_reg, .arg3 = 1, .source_node = arg_node });
             } else {
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
                 const is_mat_string = isMaterializedStringArg(ctx, arg_node);
@@ -14248,6 +14251,10 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
         try emitLiteralPrint(ctx.program, ctx.proc, "\"", source_node);
         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });
         try emitLiteralPrint(ctx.program, ctx.proc, "\"", source_node);
+        return;
+    }
+    if (std.mem.startsWith(u8, clean_type, "*")) {
+        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .arg3 = 1, .source_node = source_node });
         return;
     }
     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .format_print, .arg1 = value_reg, .source_node = source_node });

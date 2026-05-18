@@ -894,7 +894,19 @@ pub const VM = struct {
                 },
                 .format_print => {
                     if (inst.arg1 >= regs.len) return diag.failAt(0, "VM format_print register out of range", .{});
-                    try vm.printValue(regs[inst.arg1], diag, "format_print");
+                    if (inst.arg3 == 1) {
+                        const v = switch (regs[inst.arg1]) {
+                            .int => |i| i,
+                            .ptr => |p| @as(i64, @intCast(p.offset)),
+                            else => 0,
+                        };
+                        if (v == 0)
+                            std.debug.print("null", .{})
+                        else
+                            std.debug.print("{x}", .{@as(u64, @bitCast(v))});
+                    } else {
+                        try vm.printValue(regs[inst.arg1], diag, "format_print");
+                    }
                 },
                 .current_time_consensus_low => {
                     if (inst.dest >= regs.len) return diag.failAt(0, "VM time destination register out of range", .{});

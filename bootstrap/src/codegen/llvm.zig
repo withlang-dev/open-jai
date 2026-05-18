@@ -996,6 +996,9 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     const data = c.LLVMBuildIntToPtr(env.builder, data_ptr_int, env.ptr_ty, "mat_strdata");
                     var args = [_]c.LLVMValueRef{ data, len };
                     _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &args, args.len, "");
+                } else if (inst.arg3 == 1) {
+                    const int_val = try valueAsInt(env, registers[inst.arg1], diag);
+                    try emitPrintPointerOrNull(env, int_val);
                 } else {
                     try emitPrintValue(env, registers[inst.arg1], diag);
                 }
@@ -3062,6 +3065,25 @@ fn emitBuilderAppendValue(env: *LlvmEnv, builder_slot_value: RegisterValue, arg:
     }
 }
 
+fn emitPrintPointerOrNull(env: *LlvmEnv, int_value: c.LLVMValueRef) !void {
+    const func = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
+    const is_null = c.LLVMBuildICmp(env.builder, c.LLVMIntEQ, int_value, c.LLVMConstInt(env.llvm_i64, 0, 0), "ptr_is_null");
+    const then_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_null");
+    const else_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_nonnull");
+    const merge_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_merge");
+    _ = c.LLVMBuildCondBr(env.builder, is_null, then_bb, else_bb);
+    c.LLVMPositionBuilderAtEnd(env.builder, then_bb);
+    const null_str = c.LLVMBuildGlobalStringPtr(env.builder, "null", "null_str");
+    var null_args = [_]c.LLVMValueRef{ null_str, c.LLVMConstInt(env.llvm_i64, 4, 0) };
+    _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &null_args, null_args.len, "");
+    _ = c.LLVMBuildBr(env.builder, merge_bb);
+    c.LLVMPositionBuilderAtEnd(env.builder, else_bb);
+    var hex_args = [_]c.LLVMValueRef{ int_value, c.LLVMConstInt(env.llvm_i64, 16, 0), c.LLVMConstInt(env.llvm_i64, 0, 0) };
+    _ = c.LLVMBuildCall2(env.builder, env.print_format_int_fn_ty, env.print_format_int_fn, &hex_args, hex_args.len, "");
+    _ = c.LLVMBuildBr(env.builder, merge_bb);
+    c.LLVMPositionBuilderAtEnd(env.builder, merge_bb);
+}
+
 fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
     switch (arg.kind) {
         .string => |string_idx| {
@@ -3111,14 +3133,12 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
         },
         .pointer => {
             const as_int = c.LLVMBuildPtrToInt(env.builder, arg.llvm_value, env.llvm_i64, "ptrtoint");
-            var args = [_]c.LLVMValueRef{as_int};
-            _ = c.LLVMBuildCall2(env.builder, env.print_int_fn_ty, env.print_int_fn, &args, args.len, "");
+            try emitPrintPointerOrNull(env, as_int);
         },
         .pointer_addr => {
             const ptr = c.LLVMBuildLoad2(env.builder, env.ptr_ty, arg.llvm_value, "print_load_ptr_addr");
             const as_int = c.LLVMBuildPtrToInt(env.builder, ptr, env.llvm_i64, "ptraddrtoint");
-            var args = [_]c.LLVMValueRef{as_int};
-            _ = c.LLVMBuildCall2(env.builder, env.print_int_fn_ty, env.print_int_fn, &args, args.len, "");
+            try emitPrintPointerOrNull(env, as_int);
         },
         .calendar => {
             var cal_args = [_]c.LLVMValueRef{arg.llvm_value};
