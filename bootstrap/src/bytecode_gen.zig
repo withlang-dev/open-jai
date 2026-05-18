@@ -395,6 +395,21 @@ const GenContext = struct {
         return try ctx.program.addProc(helper, proc_node);
     }
 
+    fn emitAnonymousProc(ctx: *GenContext, proc_node: NodeIndex, diag: Diagnostic) !u32 {
+        if (ctx.procIndexForNode(proc_node)) |idx| return idx;
+        var helper = Bytecode.ProcBytecode{ .name = "(anonymous)" };
+        errdefer helper.deinit(ctx.program.allocator);
+        try initProcBytecodeSignature(ctx.program.allocator, ctx.ast, proc_node, &helper, diag);
+        const helper_index: u32 = @intCast(ctx.program.procs.items.len);
+        var helper_ctx = GenContext{ .ast = ctx.ast, .program = ctx.program, .proc = &helper, .resolved = ctx.resolved, .typed = ctx.typed, .compile_time_host = ctx.compile_time_host, .allow_root_proc_calls = true, .current_proc_node = proc_node, .current_proc_index = helper_index };
+        defer helper_ctx.deinit();
+        helper_ctx.return_type_node = if (procSignature(ctx.ast, proc_node)) |sig| sig.return_type else @import("Ast.zig").null_node;
+        try helper_ctx.bindProcParams(proc_node, helper.param_count, diag);
+        try helper_ctx.genBlock(ctx.ast.data(proc_node).lhs, diag);
+        try helper.instructions.append(ctx.program.allocator, .{ .opcode = .ret_void });
+        return try ctx.program.addProc(helper, proc_node);
+    }
+
     fn ensureProcEmitted(ctx: *GenContext, proc_node: NodeIndex, diag: Diagnostic) !u32 {
         for (ctx.program.procs.items, 0..) |p, i| {
             if (std.mem.eql(u8, p.name, ctx.ast.tokenSlice(ctx.ast.mainToken(proc_node)))) return @intCast(i);
@@ -959,18 +974,29 @@ const GenContext = struct {
                 }
                 if (arg_count < required or (!variadic and arg_count > params.len)) continue;
                 var score: usize = 1;
+                var disqualified = false;
                 if (args) |actual_args| {
                     for (actual_args, 0..) |arg_idx, i| {
                         if (i >= params.len) break;
-                        const arg_type = typeTextForExpr(ctx, @intCast(arg_idx), Diagnostic.nop());
+                        const arg_node: NodeIndex = @intCast(arg_idx);
+                        const arg_type = typeTextForExpr(ctx, arg_node, Diagnostic.nop());
                         const p_type = paramTypeText(ctx, @intCast(params[i]));
                         if (arg_type != null and p_type != null) {
                             const a = firstTypeWord(arg_type.?);
                             const p = p_type.?;
-                            if (std.mem.eql(u8, a, p) or operatorTypeMatches(p, a)) score += 2;
+                            if (std.mem.eql(u8, a, p) or operatorTypeMatches(p, a)) {
+                                score += 2;
+                            } else if (ast.tag(arg_node) == .integer_literal) {
+                                if (intLiteralFitsType(ast, arg_node, p)) {
+                                    score += 1;
+                                } else {
+                                    disqualified = true;
+                                }
+                            }
                         }
                     }
                 }
+                if (disqualified) continue;
                 if (score > best_score) {
                     best_score = score;
                     best_candidate = candidate;
@@ -5625,6 +5651,13 @@ const GenContext = struct {
                 const type_of_text = declaredTypeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse typeTextForExpr(ctx, ast.data(expr).lhs, diag);
                 if (type_of_text) |type_text| {
                     const clean_type = std.mem.trim(u8, type_text, " \t\r\n");
+                    if (std.mem.startsWith(u8, clean_type, "*")) {
+                        const pointee = std.mem.trim(u8, clean_type[1..], " \t\r\n");
+                        const canon = canonicalBuiltinTypeName(pointee) orelse pointee;
+                        const ptr_text = try std.fmt.allocPrint(program.allocator, "*{s}", .{canon});
+                        try ctx.owned_type_texts.append(program.allocator, ptr_text);
+                        return try ctx.emitTypeText(expr, ptr_text, diag);
+                    }
                     const type_name = firstTypeWord(clean_type);
                     if (!isBuiltinTypeName(type_name) and (try structTypeNodeByName(ctx, type_name)) != null) {
                         return try ctx.emitTypeText(expr, try displayTypeTextForTypeOf(ctx, clean_type, diag), diag);
@@ -6128,7 +6161,7 @@ const GenContext = struct {
             .proc_decl => {
                 const reg = proc.num_registers;
                 proc.num_registers += 1;
-                const pidx = ctx.procIndexForNode(expr) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "cannot resolve procedure address for '{s}'", .{ast.tokenSlice(ast.mainToken(expr))});
+                const pidx = ctx.procIndexForNode(expr) orelse try ctx.emitAnonymousProc(expr, diag);
                 try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                 return reg;
             },
@@ -6997,6 +7030,11 @@ const GenContext = struct {
                     }
                     if (isImportAliasField(ctx, callee) and ctx.resolved.lookup(field_name) == null) {
                         return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "call to undefined function '{s}'", .{field_name});
+                    }
+                    if (try resolveStructMemberProc(ctx, callee, field_name)) |member_proc_node| {
+                        _ = try ctx.emitAnonymousProc(member_proc_node, diag);
+                        if (try ctx.tryEmitDirectProcCall(member_proc_node, args, expr, diag)) |reg| return reg;
+                        if (try ctx.tryInlineProcCall(member_proc_node, args, expr, diag)) |reg| return reg;
                     }
                     _ = try ctx.genExpr(ast.data(callee).lhs, diag);
                     for (args) |arg_idx| {
@@ -10304,6 +10342,33 @@ fn handleArgNode(ast: *const Ast, arg: NodeIndex) NodeIndex {
     return arg;
 }
 
+fn resolveStructMemberProc(ctx: *GenContext, field_access: NodeIndex, member_name: []const u8) !?NodeIndex {
+    const ast = ctx.ast;
+    const lhs = ast.data(field_access).lhs;
+    if (lhs == @import("Ast.zig").null_node or lhs >= ast.node_tags.items.len or ast.tag(lhs) != .identifier) return null;
+    const struct_name = ast.tokenSlice(ast.mainToken(lhs));
+    const type_node = try structTypeNodeByName(ctx, struct_name) orelse return null;
+    if (ast.tag(type_node) != .struct_type and ast.tag(type_node) != .union_type) return null;
+    const body = ast.data(type_node).lhs;
+    if (body >= ast.extra_data.items.len) return null;
+    const members = ast.extraSlice(body);
+    for (members) |member_idx| {
+        const member: NodeIndex = @intCast(member_idx);
+        if (ast.tag(member) == .const_decl) {
+            const val = ast.data(member).lhs;
+            if (val != @import("Ast.zig").null_node and val < ast.node_tags.items.len and ast.tag(val) == .proc_decl) {
+                const decl_name = ast.tokenSlice(ast.mainToken(member));
+                if (std.mem.eql(u8, decl_name, member_name)) return val;
+            }
+        }
+        if (ast.tag(member) == .proc_decl) {
+            const decl_name = ast.tokenSlice(ast.mainToken(member));
+            if (std.mem.eql(u8, decl_name, member_name)) return member;
+        }
+    }
+    return null;
+}
+
 fn isImportAliasField(ctx: *const GenContext, field_access: NodeIndex) bool {
     const ast = ctx.ast;
     if (field_access == @import("Ast.zig").null_node or field_access >= ast.node_tags.items.len or ast.tag(field_access) != .field_access) return false;
@@ -11939,6 +12004,21 @@ fn decodeCharLiteral(allocator: std.mem.Allocator, raw: []const u8, diag: Diagno
     return decoded[0];
 }
 
+fn intLiteralFitsType(ast: *const Ast, node: NodeIndex, type_name: []const u8) bool {
+    const tok = ast.mainToken(node);
+    const src = ast.tokenSlice(tok);
+    const val = std.fmt.parseInt(i128, src, 10) catch return true;
+    if (std.mem.eql(u8, type_name, "u8")) return val >= 0 and val <= 255;
+    if (std.mem.eql(u8, type_name, "u16")) return val >= 0 and val <= 65535;
+    if (std.mem.eql(u8, type_name, "u32")) return val >= 0 and val <= 4294967295;
+    if (std.mem.eql(u8, type_name, "u64")) return val >= 0;
+    if (std.mem.eql(u8, type_name, "s8")) return val >= -128 and val <= 127;
+    if (std.mem.eql(u8, type_name, "s16")) return val >= -32768 and val <= 32767;
+    if (std.mem.eql(u8, type_name, "s32")) return val >= -2147483648 and val <= 2147483647;
+    if (std.mem.eql(u8, type_name, "s64") or std.mem.eql(u8, type_name, "int")) return true;
+    return true;
+}
+
 fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "s16") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
 }
@@ -12028,6 +12108,23 @@ fn ensureBuiltinTypeInfo(program: *Bytecode.Program, name: []const u8) bool {
 
 fn typeIdFromTypeName(ast: *const Ast, node: NodeIndex, diag: Diagnostic) !u32 {
     return typeIdFromToken(ast, ast.mainToken(node), diag);
+}
+
+fn canonicalBuiltinTypeName(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "int")) return "s64";
+    if (std.mem.eql(u8, name, "float")) return "float32";
+    if (std.mem.eql(u8, name, "void") or
+        std.mem.eql(u8, name, "bool") or
+        std.mem.eql(u8, name, "string") or
+        std.mem.eql(u8, name, "float32") or
+        std.mem.eql(u8, name, "float64") or
+        std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "s16") or
+        std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s64") or
+        std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or
+        std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or
+        std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any"))
+        return name;
+    return null;
 }
 
 fn typeIdFromTypeText(raw: []const u8) u32 {

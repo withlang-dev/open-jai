@@ -1778,6 +1778,22 @@ const Parser = struct {
                     }
                     continue;
                 }
+                if (p.matchDiscard(.colon_colon)) {
+                    const name_tok = names.items[0];
+                    if (p.check(.keyword_inline) or p.check(.keyword_no_inline) or p.check(.l_paren)) {
+                        const proc_node = try p.parseProcDeclAfterName(name_tok);
+                        try fields.append(p.allocator, proc_node);
+                    } else {
+                        const value = try p.parseTypeOrExpr();
+                        if (nodeAllowsImplicitTerminator(&p.ast, value)) {
+                            _ = p.matchDiscard(.semicolon);
+                        } else {
+                            _ = p.matchDiscard(.semicolon);
+                        }
+                        try fields.append(p.allocator, try p.ast.addNode(.const_decl, name_tok, .{ .lhs = value }));
+                    }
+                    continue;
+                }
                 if (p.matchDiscard(.colon_equal) or p.matchDiscard(.equal)) {
                     try p.skipContainerMemberRemainder();
                     continue;

@@ -817,7 +817,21 @@ fn resolveNode(ast: *const Ast, r: *Resolved, node: NodeIndex, file_id: u32, dia
             const module_name = ast.stringTokenContents(ast.data(node).lhs);
             _ = module_name;
         },
-        .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .struct_type, .union_type, .enum_type, .load_decl, .scope_decl => {},
+        .string_literal, .integer_literal, .float_literal, .bool_literal, .null_literal, .char_literal, .undefined_literal, .type_expr, .load_decl, .scope_decl => {},
+        .struct_type, .union_type, .enum_type => {
+            const members_extra = ast.data(node).lhs;
+            if (members_extra < ast.extra_data.items.len) {
+                for (ast.extraSlice(members_extra)) |member_idx| {
+                    const member: NodeIndex = @intCast(member_idx);
+                    if (ast.tag(member) == .proc_decl) try resolveProc(ast, r, member, file_id, diag);
+                    if (ast.tag(member) == .const_decl) {
+                        const val = ast.data(member).lhs;
+                        if (val != @import("Ast.zig").null_node and val < ast.node_tags.items.len and ast.tag(val) == .proc_decl)
+                            try resolveProc(ast, r, val, file_id, diag);
+                    }
+                }
+            }
+        },
         .proc_decl => try resolveProc(ast, r, node, file_id, diag),
         .pointer_type => try resolveNode(ast, r, ast.data(node).lhs, file_id, diag),
         .array_type => {

@@ -8,8 +8,8 @@ main :: () {
   print("%\n", << a); // => 5
 
   free(a);
-  print("%\n", << a); // => 5
-  print("%\n", a);    // address is non-deterministic
+  // print("%\n", << a); // UB: accessing freed memory may crash
+  // print("%\n", a);    // address is non-deterministic
   a = null;
   print("%\n", a);    // => null
 }
