@@ -1424,11 +1424,18 @@ const GenContext = struct {
         defer allocator.free(param_args);
         @memset(param_args, @import("Ast.zig").null_node);
 
+        var vararg_nodes_buf = std.ArrayList(NodeIndex).empty;
+        defer vararg_nodes_buf.deinit(allocator);
+        const variadic_param_name: []const u8 = if (has_variadic) ast.tokenSlice(ast.mainToken(@as(NodeIndex, @intCast(params[params.len - 1])))) else "";
         var positional_index: usize = 0;
         for (args) |arg_idx| {
             const arg: NodeIndex = @intCast(arg_idx);
             if (ast.tag(arg) == .assign_stmt and ast.tag(ast.data(arg).lhs) == .identifier) {
                 const arg_name = ast.tokenSlice(ast.mainToken(ast.data(arg).lhs));
+                if (has_variadic and std.mem.eql(u8, arg_name, variadic_param_name)) {
+                    try vararg_nodes_buf.append(allocator, ast.data(arg).rhs);
+                    continue;
+                }
                 var matched = false;
                 for (params, 0..) |param_idx, i| {
                     const param: NodeIndex = @intCast(param_idx);
@@ -1441,6 +1448,7 @@ const GenContext = struct {
             } else {
                 while (positional_index < params.len and param_args[positional_index] != @import("Ast.zig").null_node) positional_index += 1;
                 if (has_variadic and positional_index >= params.len - 1) {
+                    try vararg_nodes_buf.append(allocator, arg);
                     positional_index += 1;
                     continue;
                 }
@@ -1514,8 +1522,7 @@ const GenContext = struct {
                 ctx.proc.num_registers += 1;
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = slot_reg, .arg1 = 8, .source_node = call_expr });
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = slot_reg, .arg1 = array_reg, .source_node = call_expr });
-                for (args[i..]) |var_arg_idx| {
-                    const var_arg: NodeIndex = @intCast(var_arg_idx);
+                for (vararg_nodes_buf.items) |var_arg| {
                     const is_spread = ast.tag(var_arg) == .unary_expr and ast.tokens[ast.mainToken(var_arg)].tag == .dot_dot;
                     const item_reg = try genCallArg(ctx, var_arg, diag);
                     if (is_spread) {
@@ -14149,6 +14156,22 @@ fn emitFormattedValueForType(ctx: *GenContext, value_reg: Bytecode.Register, raw
     }
     if (std.mem.eql(u8, firstTypeWord(clean_type), "Type")) {
         try emitFormattedTypeValue(ctx, value_reg, source_node, diag);
+        return;
+    }
+    if (staticArrayElementText(clean_type)) |inner_elem| {
+        const inner_count = staticArrayCountFromText(ctx, clean_type, diag) catch null orelse 0;
+        const inner_elem_size = typeTextSize(ctx, inner_elem, diag) catch 0;
+        try emitLiteralPrint(ctx.program, ctx.proc, "[", source_node);
+        var idx: u64 = 0;
+        while (idx < inner_count) : (idx += 1) {
+            if (idx > 0) try emitLiteralPrint(ctx.program, ctx.proc, ", ", source_node);
+            const elem_addr = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = elem_addr, .arg1 = value_reg, .arg2 = @intCast(idx * @max(inner_elem_size, 1)), .source_node = source_node });
+            const elem_val = try emitLoadFromAddressForType(ctx, elem_addr, inner_elem, source_node, diag);
+            try emitFormattedValueForType(ctx, elem_val, inner_elem, source_node, quote_strings, diag);
+        }
+        try emitLiteralPrint(ctx.program, ctx.proc, "]", source_node);
         return;
     }
     if (try typeTextIsEmbeddedStruct(ctx, clean_type, diag)) {
