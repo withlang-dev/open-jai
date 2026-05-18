@@ -185,7 +185,6 @@ fn runTest(
         while (actual_idx < actual_lines.items.len) {
             // Use substring match: annotation text may be a suffix/part of the full output line.
             if (std.mem.indexOf(u8, actual_lines.items[actual_idx], exp_line) != null) {
-                actual_idx += 1;
                 found = true;
                 break;
             }

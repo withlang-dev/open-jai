@@ -9,6 +9,7 @@ const NodeIndex = @import("Ast.zig").NodeIndex;
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
 const numeric_literal = @import("numeric_literal.zig");
 const using_param_sentinel: u32 = 0xfffffffe;
+const variadic_param_sentinel: u32 = 0xfffffffd;
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8, tags: []const Tag, starts: []const u32, ends: []const u32, diag: Diagnostic) !Ast {
     const tokens = try allocator.alloc(Token, tags.len);
@@ -247,7 +248,7 @@ const Parser = struct {
                 } else if (p.matchDiscard(.colon_equal)) {
                     param_init = try p.parseExpr();
                 }
-                const rhs: u32 = if (is_variadic_param) 1 else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
+                const rhs: u32 = if (is_variadic_param) variadic_param_sentinel else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
                 const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = rhs });
                 try params.append(p.allocator, param);
                 if (!p.matchDiscard(.comma)) break;
@@ -1356,7 +1357,7 @@ const Parser = struct {
                     if (!p.matchDiscard(.comma)) break;
                     continue;
                 } else return p.failCurrent("expected parameter name", .{});
-                const rhs: u32 = if (is_variadic_param) 1 else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
+                const rhs: u32 = if (is_variadic_param) variadic_param_sentinel else if (is_using_param and param_init == null_node) using_param_sentinel else param_init;
                 const param = try p.ast.addNode(.var_decl, param_name, .{ .lhs = param_type, .rhs = rhs });
                 try params.append(p.allocator, param);
                 if (!p.matchDiscard(.comma)) break;

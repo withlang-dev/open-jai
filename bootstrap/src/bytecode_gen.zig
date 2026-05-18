@@ -6,6 +6,7 @@ const Typed = @import("Sema.zig").Typed;
 const Type = @import("Type.zig").Type;
 const TokenTag = @import("Token.zig").Token.Tag;
 const using_param_sentinel: u32 = 0xfffffffe;
+const variadic_param_sentinel: u32 = 0xfffffffd;
 const InternPool = @import("InternPool.zig").InternPool;
 const Bytecode = @import("Bytecode.zig");
 const vm_mod = @import("vm.zig");
@@ -460,7 +461,7 @@ const GenContext = struct {
             if (param_type == @import("Ast.zig").null_node) continue;
             var type_text = std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n");
             const param_rhs = ctx.ast.data(param).rhs;
-            const rhs_is_default = param_rhs != @import("Ast.zig").null_node and param_rhs != 1 and param_rhs != using_param_sentinel;
+            const rhs_is_default = param_rhs != @import("Ast.zig").null_node and param_rhs != variadic_param_sentinel and param_rhs != using_param_sentinel;
             const source = if (i < param_args.len and param_args[i] != @import("Ast.zig").null_node)
                 param_args[i]
             else if (rhs_is_default)
@@ -589,7 +590,7 @@ const GenContext = struct {
         if (procSignatureContainsPolymorphicType(ctx, sig)) return null;
         const params = ast.extraSlice(sig.params_extra);
         if (args.len > params.len) return null;
-        if (params.len > 0 and ast.data(@as(NodeIndex, @intCast(params[params.len - 1]))).rhs == 1) return null;
+        if (params.len > 0 and ast.data(@as(NodeIndex, @intCast(params[params.len - 1]))).rhs == variadic_param_sentinel) return null;
         for (args) |arg_idx| {
             const arg: NodeIndex = @intCast(arg_idx);
             if (ast.tag(arg) == .unary_expr and ast.tokens[ast.mainToken(arg)].tag == .dot_dot) return null;
@@ -605,7 +606,7 @@ const GenContext = struct {
             } else blk: {
                 const param: NodeIndex = @intCast(param_idx);
                 const default_value = ast.data(param).rhs;
-                if (default_value == @import("Ast.zig").null_node) return null;
+                if (default_value == @import("Ast.zig").null_node or default_value == variadic_param_sentinel or default_value == using_param_sentinel) return null;
                 break :blk default_value;
             };
             const param: NodeIndex = @intCast(param_idx);
@@ -687,7 +688,7 @@ const GenContext = struct {
                 break :blk if (ast.tag(arg) == .assign_stmt) ast.data(arg).rhs else arg;
             } else blk: {
                 const default_value = ast.data(param).rhs;
-                if (default_value == @import("Ast.zig").null_node) {
+                if (default_value == @import("Ast.zig").null_node or default_value == variadic_param_sentinel or default_value == using_param_sentinel) {
                     return diag.failAt(ast.tokens[ast.mainToken(call_expr)].start, "foreign procedure '{s}' is missing argument for parameter '{s}'", .{ ast.tokenSlice(ast.mainToken(proc_node)), ast.tokenSlice(ast.mainToken(param)) });
                 }
                 break :blk default_value;
@@ -950,7 +951,7 @@ const GenContext = struct {
                 var variadic = false;
                 for (params) |param_idx| {
                     const param: NodeIndex = @intCast(param_idx);
-                    if (ast.data(param).rhs == 1) {
+                    if (ast.data(param).rhs == variadic_param_sentinel) {
                         variadic = true;
                         break;
                     }
@@ -1023,7 +1024,7 @@ const GenContext = struct {
         var variadic = false;
         for (params) |param_idx| {
             const param: NodeIndex = @intCast(param_idx);
-            if (ast.data(param).rhs == 1) {
+            if (ast.data(param).rhs == variadic_param_sentinel) {
                 variadic = true;
                 break;
             }
@@ -1548,10 +1549,11 @@ const GenContext = struct {
                 try ctx.type_overrides.put(ctx.program.allocator, param, array_type_text);
                 continue;
             }
+            const param_rhs_val = ast.data(param).rhs;
             const source = if (param_args[i] != @import("Ast.zig").null_node)
                 param_args[i]
-            else if (ast.data(param).rhs != @import("Ast.zig").null_node)
-                ast.data(param).rhs
+            else if (param_rhs_val != @import("Ast.zig").null_node and param_rhs_val != variadic_param_sentinel and param_rhs_val != using_param_sentinel)
+                param_rhs_val
             else
                 return null;
             const param_type = ast.data(param).lhs;
@@ -1736,7 +1738,7 @@ const GenContext = struct {
             const param: NodeIndex = @intCast(param_idx);
             const using_default = i >= args.len;
             const arg = if (!using_default) @as(NodeIndex, @intCast(args[i])) else ast.data(param).rhs;
-            if (arg == @import("Ast.zig").null_node) return diag.failAt(ast.tokens[ast.mainToken(param)].start, "#expand parameter has no argument or default value", .{});
+            if (arg == @import("Ast.zig").null_node or arg == variadic_param_sentinel or arg == using_param_sentinel) return diag.failAt(ast.tokens[ast.mainToken(param)].start, "#expand parameter has no argument or default value", .{});
             const param_type = ast.data(param).lhs;
             const param_type_text = if (param_type != @import("Ast.zig").null_node) std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n") else "";
             const captures_syntax = std.mem.eql(u8, param_type_text, "Code") or (using_default and isCallerCodeExpr(ast, arg));
@@ -10254,7 +10256,7 @@ fn isCallerLocationExpr(ast: *const Ast, node: NodeIndex) bool {
 }
 
 fn isCallerCodeExpr(ast: *const Ast, node: NodeIndex) bool {
-    return node != @import("Ast.zig").null_node and
+    return node != @import("Ast.zig").null_node and node < ast.node_tags.items.len and
         ast.tag(node) == .meta_expr and
         ast.tokens[ast.mainToken(node)].tag == .directive_caller_code;
 }
