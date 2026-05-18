@@ -7964,16 +7964,20 @@ const GenContext = struct {
                 }
                 const args = ast.extraSlice(ast.data(expr).rhs);
                 if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "print expects at least one argument", .{});
+                const is_log = std.mem.eql(u8, name, "log");
                 const first_reg = try ctx.genExpr(@intCast(args[0]), diag);
                 if (args.len == 1) {
                     try proc.instructions.append(program.allocator, .{ .opcode = .call_extern, .dest = @intFromEnum(Bytecode.ExternSymbol.openjai_print), .arg1 = first_reg, .source_node = expr });
+                    if (is_log) try emitLiteralPrint(program, proc, "\n", expr);
                     return first_reg;
                 }
                 if (ast.tag(@intCast(args[0])) != .string_literal) {
                     for (args[1..]) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+                    if (is_log) try emitLiteralPrint(program, proc, "\n", expr);
                     return first_reg;
                 }
                 try emitFormattedPrint(ctx, @intCast(args[0]), args[1..], diag);
+                if (is_log) try emitLiteralPrint(program, proc, "\n", expr);
                 const count_reg = proc.num_registers;
                 proc.num_registers += 1;
                 const byte_count = if (isReturnedPrint(ctx, expr)) try formattedPrintByteCount(ctx, @intCast(args[0]), args[1..], diag) else 0;
