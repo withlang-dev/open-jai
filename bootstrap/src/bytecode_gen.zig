@@ -251,6 +251,8 @@ const GenContext = struct {
     pending_inline_result_regs: ?[]const Bytecode.Register = null,
     pending_inline_results_consumed: bool = false,
     active_expand_bindings: []const MacroCodeBinding = &.{},
+    inline_param_sources: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex) = .empty,
+    inline_vararg_sources: std.AutoHashMapUnmanaged(NodeIndex, []const u32) = .empty,
 
     const CodeBinding = struct {
         decl: NodeIndex,
@@ -310,6 +312,12 @@ const GenContext = struct {
         ctx.loop_stack.deinit(ctx.program.allocator);
         ctx.defer_stmts.deinit(ctx.program.allocator);
         ctx.inline_stack.deinit(ctx.program.allocator);
+        ctx.inline_param_sources.deinit(ctx.program.allocator);
+        {
+            var it = ctx.inline_vararg_sources.iterator();
+            while (it.next()) |entry| ctx.program.allocator.free(entry.value_ptr.*);
+        }
+        ctx.inline_vararg_sources.deinit(ctx.program.allocator);
         ctx.local_code_bindings.deinit(ctx.program.allocator);
         for (ctx.owned_type_texts.items) |text| ctx.program.allocator.free(text);
         ctx.owned_type_texts.deinit(ctx.program.allocator);
@@ -1438,7 +1446,7 @@ const GenContext = struct {
             return result;
         };
         const params = ast.extraSlice(sig.params_extra);
-        const has_variadic = params.len != 0 and ast.data(@as(NodeIndex, @intCast(params[params.len - 1]))).rhs == 1;
+        const has_variadic = params.len != 0 and ast.data(@as(NodeIndex, @intCast(params[params.len - 1]))).rhs == variadic_param_sentinel;
         if (args.len > params.len and !has_variadic) return null;
         const allocator = ctx.program.allocator;
         var param_args = try allocator.alloc(NodeIndex, params.len);
@@ -1568,6 +1576,9 @@ const GenContext = struct {
                 try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
                 _ = ctx.decl_addresses.remove(param);
                 try ctx.decl_registers.put(allocator, param, slot_reg);
+                const vararg_nodes_copy = try allocator.dupe(u32, @as([]const u32, @ptrCast(vararg_nodes_buf.items)));
+                if (ctx.inline_vararg_sources.get(param)) |old_slice| allocator.free(old_slice);
+                try ctx.inline_vararg_sources.put(allocator, param, vararg_nodes_copy);
                 const array_type_text = if (std.mem.eql(u8, firstTypeWord(elem_text), "Allocator"))
                     "[..]Allocator"
                 else
@@ -1603,6 +1614,7 @@ const GenContext = struct {
             try restores.append(allocator, .{ .decl = param, .had_old = old != null, .old = old orelse 0 });
             _ = ctx.decl_addresses.remove(param);
             try ctx.decl_registers.put(allocator, param, arg_reg);
+            try ctx.inline_param_sources.put(allocator, param, source);
             {
                 var bound_proc = source;
                 if (ast.tag(source) == .identifier) {
@@ -1675,7 +1687,11 @@ const GenContext = struct {
         }
         try ctx.restoreParamBindings(restores.items);
         try ctx.restoreTypeOverrides(type_restores.items);
-        for (params) |param_idx| _ = ctx.proc_param_bindings.remove(@intCast(param_idx));
+        for (params) |param_idx| {
+            _ = ctx.proc_param_bindings.remove(@intCast(param_idx));
+            _ = ctx.inline_param_sources.remove(@intCast(param_idx));
+            if (ctx.inline_vararg_sources.fetchRemove(@intCast(param_idx))) |entry| allocator.free(entry.value);
+        }
         return result;
     }
 
@@ -4115,6 +4131,24 @@ const GenContext = struct {
         switch (ast.tag(stmt)) {
             .import_decl, .load_decl, .scope_decl => {},
             .expr_stmt => {
+                if (ast.tokens[ast.mainToken(stmt)].tag == .keyword_using) {
+                    const using_expr = ast.data(stmt).lhs;
+                    if (using_expr != @import("Ast.zig").null_node and using_expr < ast.node_tags.items.len and ast.tag(using_expr) == .identifier) {
+                        const type_name = ast.tokenSlice(ast.mainToken(using_expr));
+                        if (try resolveEnumTypeNode(ctx, type_name, using_expr)) |enum_node| {
+                            var members = collectEnumMembersFromNode(ctx, enum_node);
+                            defer members.deinit(ctx.program.allocator);
+                            for (members.items) |member| {
+                                const reg = ctx.proc.num_registers;
+                                ctx.proc.num_registers += 1;
+                                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = @intCast(member.value), .source_node = stmt });
+                                try ctx.external_registers.put(ctx.program.allocator, member.name, reg);
+                                try ctx.external_types.put(ctx.program.allocator, member.name, type_name);
+                            }
+                            return;
+                        }
+                    }
+                }
                 if (try ctx.tryEmitExpandProcCall(ast.data(stmt).lhs, diag)) return;
                 _ = try ctx.genExpr(ast.data(stmt).lhs, diag);
             },
@@ -5637,7 +5671,19 @@ const GenContext = struct {
             },
             .type_of_expr => {
                 if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
-                    const type_text = firstTypeWord(ctx.nodeSource(ast.data(expr).lhs));
+                    const arg_node = ast.data(expr).lhs;
+                    const type_text = blk: {
+                        if (arg_node != @import("Ast.zig").null_node and
+                            arg_node < ast.node_tags.items.len and
+                            ast.tag(arg_node) == .type_of_expr)
+                        {
+                            const inner = ast.data(arg_node).lhs;
+                            if (try procTypeTextForExpr(ctx, inner)) |pt| break :blk firstTypeWord(pt);
+                            const resolved = declaredTypeTextForExpr(ctx, inner, diag) orelse typeTextForExpr(ctx, inner, diag);
+                            if (resolved) |tt| break :blk firstTypeWord(std.mem.trim(u8, tt, " \t\r\n"));
+                        }
+                        break :blk firstTypeWord(ctx.nodeSource(arg_node));
+                    };
                     try ctx.ensureTypeInfoForText(type_text, diag);
                     const str_idx = try program.addString(type_text);
                     const reg = proc.num_registers;
@@ -6027,6 +6073,10 @@ const GenContext = struct {
                     }
                     if (ast.tag(decl) == .for_stmt and ctx.isLoopIndexIdentifier(expr, decl)) {
                         if (ctx.loop_index_registers.get(decl)) |index_reg| return index_reg;
+                    }
+                    {
+                        const ident_name = ast.tokenSlice(ast.mainToken(expr));
+                        if (ctx.external_registers.get(ident_name)) |reg| return reg;
                     }
                     if (try genUsingFallbackFieldValue(ctx, expr, decl, diag)) |reg| return reg;
                     if (ctx.decl_addresses.get(decl)) |addr| {
@@ -8123,7 +8173,47 @@ const GenContext = struct {
                     return first_reg;
                 }
                 if (ast.tag(@intCast(args[0])) != .string_literal) {
-                    for (args[1..]) |arg| _ = try genCallArg(ctx, @intCast(arg), diag);
+                    const fmt_source = blk: {
+                        const fmt_node: NodeIndex = @intCast(args[0]);
+                        if (ast.tag(fmt_node) == .identifier) {
+                            if (ctx.resolved.local_values.get(fmt_node)) |decl| {
+                                if (ctx.inline_param_sources.get(decl)) |src| {
+                                    if (ast.tag(src) == .string_literal) break :blk src;
+                                }
+                            }
+                        }
+                        break :blk @as(NodeIndex, @import("Ast.zig").null_node);
+                    };
+                    if (fmt_source != @import("Ast.zig").null_node) {
+                        var expanded_args = std.ArrayList(u32).empty;
+                        defer expanded_args.deinit(program.allocator);
+                        for (args[1..]) |arg_val| {
+                            const arg_n: NodeIndex = @intCast(arg_val);
+                            if (ast.tag(arg_n) == .unary_expr and ast.tokens[ast.mainToken(arg_n)].tag == .dot_dot) {
+                                const spread_src = ast.data(arg_n).lhs;
+                                if (ast.tag(spread_src) == .identifier) {
+                                    if (ctx.resolved.local_values.get(spread_src)) |spread_decl| {
+                                        if (ctx.inline_vararg_sources.get(spread_decl)) |vararg_nodes| {
+                                            try expanded_args.appendSlice(program.allocator, vararg_nodes);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            try expanded_args.append(program.allocator, arg_val);
+                        }
+                        try emitFormattedPrint(ctx, fmt_source, expanded_args.items, diag);
+                        if (is_log) try emitLiteralPrint(program, proc, "\n", expr);
+                        const count_reg = proc.num_registers;
+                        proc.num_registers += 1;
+                        try proc.instructions.append(program.allocator, .{ .opcode = .load_int, .dest = count_reg, .arg1 = 0, .source_node = expr });
+                        return count_reg;
+                    }
+                    try proc.instructions.append(program.allocator, .{ .opcode = .call_extern, .dest = @intFromEnum(Bytecode.ExternSymbol.openjai_print), .arg1 = first_reg, .source_node = expr });
+                    for (args[1..]) |arg| {
+                        const arg_reg = try genCallArg(ctx, @intCast(arg), diag);
+                        try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = arg_reg, .source_node = expr });
+                    }
                     if (is_log) try emitLiteralPrint(program, proc, "\n", expr);
                     return first_reg;
                 }
@@ -10814,6 +10904,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
     if (expr == @import("Ast.zig").null_node or expr == using_param_sentinel or expr >= ast.node_tags.items.len) return null;
     if (ctx.type_overrides.get(expr)) |cached| return cached;
     if (ast.tag(expr) == .identifier) {
+        if (ctx.external_types.get(ast.tokenSlice(ast.mainToken(expr)))) |ext_type| return ext_type;
         if (ctx.resolved.local_values.get(expr)) |decl| {
             if (decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len) {
                 if ((usingFallbackFieldInfoForIdentifier(ctx, expr, decl, diag) catch null)) |info|
@@ -11124,7 +11215,10 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             }
             if (op == .shift_left or op == .dot_star) {
                 const operand_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
-                return std.mem.trim(u8, stripPointerText(operand_ty), " \t\r\n");
+                const trimmed = std.mem.trim(u8, operand_ty, " \t\r\n");
+                if (std.mem.startsWith(u8, trimmed, "*"))
+                    return std.mem.trim(u8, trimmed[1..], " \t\r\n");
+                return trimmed;
             }
             return typeTextForExpr(ctx, ast.data(expr).lhs, diag);
         },
