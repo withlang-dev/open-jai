@@ -580,11 +580,13 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
             const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(stmt)));
             if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
             const already_declared = containsName(declared.items, name);
+            const proc_node = if (ast.tag(stmt) == .proc_decl) stmt else ast.data(stmt).rhs;
             const sym: Symbol = if (ast.tag(stmt) == .proc_decl) .{ .proc = stmt } else .{ .const_value = stmt };
             const old = try r.symbols.fetchPut(r.allocator, name, sym);
             try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
             if (!already_declared) try declared.append(r.allocator, name);
             try predeclared_nodes.put(stmt, {});
+            try r.addProc(name, proc_node);
         } else if (ast.tag(stmt) == .stmt_list) {
             for (ast.extraSlice(ast.data(stmt).lhs)) |child_idx| {
                 const child: NodeIndex = @intCast(child_idx);
@@ -592,11 +594,13 @@ fn resolveBlock(ast: *const Ast, r: *Resolved, block: NodeIndex, file_id: u32, d
                     const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
                     if (std.mem.eql(u8, name, "it") or std.mem.eql(u8, name, "it_index")) continue;
                     const already_declared = containsName(declared.items, name);
+                    const proc_node = if (ast.tag(child) == .proc_decl) child else ast.data(child).rhs;
                     const sym: Symbol = if (ast.tag(child) == .proc_decl) .{ .proc = child } else .{ .const_value = child };
                     const old = try r.symbols.fetchPut(r.allocator, name, sym);
                     try restores.append(r.allocator, .{ .name = name, .old = if (old) |entry| entry.value else undefined, .had_old = old != null });
                     if (!already_declared) try declared.append(r.allocator, name);
                     try predeclared_nodes.put(child, {});
+                    try r.addProc(name, proc_node);
                 } else if (ast.tag(child) == .var_decl or ast.tag(child) == .const_decl) {
                     const name = try r.normalizedName(ast.tokenSlice(ast.mainToken(child)));
                     const already_declared = containsName(declared.items, name);

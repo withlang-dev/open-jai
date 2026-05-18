@@ -987,7 +987,7 @@ const GenContext = struct {
                     for (actual_args, 0..) |arg_idx, i| {
                         if (i >= params.len) break;
                         const arg_node: NodeIndex = @intCast(arg_idx);
-                        const arg_type = typeTextForExpr(ctx, arg_node, Diagnostic.nop());
+                        const arg_type = declaredOrInferredType(ctx, arg_node);
                         const p_type = paramTypeText(ctx, @intCast(params[i]));
                         if (arg_type != null and p_type != null) {
                             const a = firstTypeWord(arg_type.?);
@@ -995,7 +995,11 @@ const GenContext = struct {
                             if (std.mem.eql(u8, a, p)) {
                                 score += 3;
                             } else if (isIntegerTypeText(a) and isIntegerTypeText(p)) {
-                                score += 2;
+                                if (ast.tag(arg_node) == .integer_literal and !intLiteralFitsType(ast, arg_node, p)) {
+                                    disqualified = true;
+                                } else {
+                                    score += 2;
+                                }
                             } else if (operatorTypeMatches(p, a)) {
                                 score += 1;
                             } else if (ast.tag(arg_node) == .integer_literal) {
@@ -12164,6 +12168,23 @@ fn intLiteralFitsType(ast: *const Ast, node: NodeIndex, type_name: []const u8) b
 
 fn isBuiltinTypeName(name: []const u8) bool {
     return std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s8") or std.mem.eql(u8, name, "s16") or std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32") or std.mem.eql(u8, name, "float64") or std.mem.eql(u8, name, "Vector2") or std.mem.eql(u8, name, "Vector3") or std.mem.eql(u8, name, "Vector4") or std.mem.eql(u8, name, "Type") or std.mem.eql(u8, name, "Any");
+}
+
+fn declaredOrInferredType(ctx: *GenContext, expr: NodeIndex) ?[]const u8 {
+    const ast = ctx.ast;
+    if (ast.tag(expr) == .identifier) {
+        if (ctx.resolved.local_values.get(expr)) |decl| {
+            if (decl != @import("Ast.zig").null_node and ast.tag(decl) == .var_decl) {
+                const type_node = ast.data(decl).lhs;
+                if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len) {
+                    const declared = std.mem.trim(u8, ctx.nodeSource(type_node), " \t\r\n");
+                    const tw = firstTypeWord(declared);
+                    if (isBuiltinTypeName(tw)) return tw;
+                }
+            }
+        }
+    }
+    return typeTextForExpr(ctx, expr, Diagnostic.nop());
 }
 
 fn paramTypeText(ctx: *GenContext, param: NodeIndex) ?[]const u8 {
