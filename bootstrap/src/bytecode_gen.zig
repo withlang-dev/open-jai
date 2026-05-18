@@ -5752,7 +5752,8 @@ const GenContext = struct {
                         .proc_decl => {
                             const reg = proc.num_registers;
                             proc.num_registers += 1;
-                            try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .source_node = expr });
+                            const pidx = ctx.procIndexForNode(decl) orelse 0;
+                            try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                             return reg;
                         },
                         .for_stmt => {
@@ -5808,7 +5809,8 @@ const GenContext = struct {
             .proc_decl => {
                 const reg = proc.num_registers;
                 proc.num_registers += 1;
-                try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .source_node = expr });
+                const pidx = ctx.procIndexForNode(expr) orelse 0;
+                try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                 return reg;
             },
             .binary_expr => {
@@ -9035,7 +9037,23 @@ const GenContext = struct {
         if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return false;
         if (ast.tag(decl) == .proc_decl) return true;
         if (ast.tag(decl) != .var_decl) return false;
-        if (ast.data(decl).rhs != @import("Ast.zig").null_node and ast.data(decl).rhs < ast.node_tags.items.len and ast.tag(ast.data(decl).rhs) == .proc_decl) return true;
+        if (ast.data(decl).rhs != @import("Ast.zig").null_node and ast.data(decl).rhs < ast.node_tags.items.len) {
+            if (ast.tag(ast.data(decl).rhs) == .proc_decl) return true;
+            if (ast.tag(ast.data(decl).rhs) == .identifier) {
+                const init_name = ast.tokenSlice(ast.mainToken(ast.data(decl).rhs));
+                if (ctx.resolved.lookup(init_name)) |sym| switch (sym) {
+                    .proc => return true,
+                    .const_value => |cv| {
+                        if (cv != @import("Ast.zig").null_node and ast.tag(cv) == .proc_decl) return true;
+                    },
+                    else => {},
+                };
+                if (ctx.resolved.local_values.get(ast.data(decl).rhs)) |init_decl| {
+                    if (ast.tag(init_decl) == .proc_decl) return true;
+                    if (ast.tag(init_decl) == .var_decl and ast.data(init_decl).rhs != @import("Ast.zig").null_node and ast.data(init_decl).rhs < ast.node_tags.items.len and ast.tag(ast.data(init_decl).rhs) == .proc_decl) return true;
+                }
+            }
+        }
         const type_node = ast.data(decl).lhs;
         if (type_node == @import("Ast.zig").null_node or type_node >= ast.node_tags.items.len) return false;
         if (ast.tag(type_node) == .proc_type) return true;

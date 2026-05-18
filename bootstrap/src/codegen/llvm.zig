@@ -1102,7 +1102,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .proc_addr => {
                 if (inst.dest >= registers.len) return diag.failAt(0, "LLVM backend proc_addr destination register out of range", .{});
-                registers[inst.dest] = .{ .llvm_value = c.LLVMConstIntToPtr(c.LLVMConstInt(env.llvm_i64, 1, 0), env.ptr_ty), .kind = .pointer };
+                if (inst.arg1 < env.proc_functions.len and env.proc_functions[inst.arg1] != null) {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMBuildPointerCast(env.builder, env.proc_functions[inst.arg1].?, env.ptr_ty, "proc_addr"), .kind = .pointer };
+                } else {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstIntToPtr(c.LLVMConstInt(env.llvm_i64, 0, 0), env.ptr_ty), .kind = .pointer };
+                }
             },
             .load_ptr => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend load_ptr register out of range", .{});
