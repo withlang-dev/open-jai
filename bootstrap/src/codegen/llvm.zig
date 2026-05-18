@@ -962,11 +962,19 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     switch (registers[inst.arg1].kind) {
                         .int_addr, .uint_addr => {
                             const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_i64, registers[inst.arg1].llvm_value, "copy_from_addr");
-                            registers[inst.dest] = .{ .llvm_value = loaded, .kind = if (registers[inst.arg1].kind == .uint_addr) .uint else .int };
+                            try setIntResult(env, registers, inst.dest, loaded);
                         },
                         .float_addr => {
                             const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_f64, registers[inst.arg1].llvm_value, "copy_float_from_addr");
-                            registers[inst.dest] = .{ .llvm_value = loaded, .kind = .float };
+                            try setFloatResult(env, registers, inst.dest, loaded);
+                        },
+                        .bool_addr => {
+                            const loaded = c.LLVMBuildLoad2(env.builder, c.LLVMInt1TypeInContext(env.context), registers[inst.arg1].llvm_value, "copy_bool_from_addr");
+                            try setBoolResult(env, registers, inst.dest, loaded);
+                        },
+                        .pointer_addr => {
+                            const loaded = c.LLVMBuildLoad2(env.builder, env.ptr_ty, registers[inst.arg1].llvm_value, "copy_ptr_from_addr");
+                            try setPointerResult(env, registers, inst.dest, loaded);
                         },
                         else => registers[inst.dest] = registers[inst.arg1],
                     }
