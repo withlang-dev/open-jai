@@ -1135,6 +1135,30 @@ const GenContext = struct {
         return null;
     }
 
+    fn tryEmitIndexOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+        const ast = ctx.ast;
+        const base_type = typeTextForExpr(ctx, base, diag) orelse return null;
+        const base_name = firstTypeWord(stripPointerText(base_type));
+        if (base_name.len == 0) return null;
+        if ((try structTypeNodeByName(ctx, base_name)) == null) return null;
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            const mt = ast.mainToken(decl);
+            if (!isOperatorBracketDecl(ast, mt)) continue;
+            const sig = procSignature(ast, decl) orelse continue;
+            const params = ast.extraSlice(sig.params_extra);
+            if (params.len != 2) continue;
+            const p0_type = paramTypeText(ctx, @intCast(params[0]));
+            if (p0_type == null) continue;
+            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_type.?)), base_name)) continue;
+            const args = [_]u32{ base, index };
+            return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
+        }
+        return null;
+    }
+
     fn emitCompoundAssignment(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const ast = ctx.ast;
         const current = try ctx.genLvalueCurrentValue(lhs, diag);
@@ -6463,6 +6487,7 @@ const GenContext = struct {
                         return reg;
                     }
                 }
+                if (try ctx.tryEmitIndexOperatorOverload(base, index, expr, diag)) |reg| return reg;
                 return base_reg;
             },
             .call_expr => {
@@ -11508,6 +11533,12 @@ fn isOperatorIdentifierName(name: []const u8) bool {
         std.mem.eql(u8, name, "<=") or
         std.mem.eql(u8, name, ">") or
         std.mem.eql(u8, name, ">=");
+}
+
+fn isOperatorBracketDecl(ast: *const Ast, main_token: u32) bool {
+    if (ast.tokens[main_token].tag != .l_bracket) return false;
+    if (main_token + 1 < ast.tokens.len and ast.tokens[main_token + 1].tag == .r_bracket) return true;
+    return false;
 }
 
 fn typeInfoTagValue(name: []const u8) ?u32 {
