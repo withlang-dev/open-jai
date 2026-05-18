@@ -5488,6 +5488,15 @@ const GenContext = struct {
                             }
                         }
                     }
+                    if (typeTextForExpr(ctx, operand, diag)) |operand_ty| {
+                        const clean = std.mem.trim(u8, operand_ty, " \t\r\n");
+                        if (std.mem.eql(u8, clean, "*void")) {
+                            const reg = proc.num_registers;
+                            proc.num_registers += 1;
+                            try proc.instructions.append(program.allocator, .{ .opcode = .load_type, .dest = reg, .arg1 = 0, .source_node = expr });
+                            return reg;
+                        }
+                    }
                     const reg = proc.num_registers;
                     proc.num_registers += 1;
                     const opcode: Bytecode.Opcode = if (typeTextForExpr(ctx, operand, diag)) |operand_ty| blk: {

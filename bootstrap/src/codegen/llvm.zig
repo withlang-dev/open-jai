@@ -1069,7 +1069,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                         const rs = try runtimeStringValue(env, registers[inst.arg1], diag);
                         registers[inst.dest] = .{ .llvm_value = rs, .kind = .pointer };
                     },
-                    .string => {
+                    .string, .string_addr => {
                         const str_struct_ty = c.LLVMArrayType(env.llvm_i64, 2);
                         const slot = buildEntryAlloca(env, current_function, str_struct_ty, "addr_local_string");
                         const rs = try runtimeStringValue(env, registers[inst.arg1], diag);
