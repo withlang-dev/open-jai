@@ -1074,6 +1074,7 @@ const GenContext = struct {
         if (ast.tag(rhs_node) != .binary_expr) return null;
         const op = ast.tokens[ast.mainToken(rhs_node)].tag;
         if (!isCompoundAssignmentOp(op)) return null;
+        if (ctx.tryEmitCompoundAssignOperatorOverload(rhs_node, op, diag) catch false) return 0;
         return try ctx.emitCompoundAssignment(lhs, ast.data(rhs_node).rhs, op, source_node, diag);
     }
 
@@ -1157,6 +1158,89 @@ const GenContext = struct {
             return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
         }
         return null;
+    }
+
+    fn tryEmitIndexAssignOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, value_reg: Bytecode.Register, value_node: NodeIndex, source_node: NodeIndex, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }!bool {
+        const ast = ctx.ast;
+        const base_type = typeTextForExpr(ctx, base, diag) orelse return false;
+        const base_name = firstTypeWord(stripPointerText(base_type));
+        if (base_name.len == 0) return false;
+        if ((structTypeNodeByName(ctx, base_name) catch return false) == null) return false;
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            const mt = ast.mainToken(decl);
+            if (!isOperatorBracketAssignDecl(ast, mt)) continue;
+            const sig = procSignature(ast, decl) orelse continue;
+            const params = ast.extraSlice(sig.params_extra);
+            if (params.len != 3) continue;
+            const p0: NodeIndex = @intCast(params[0]);
+            const p0_type_node = ast.data(p0).lhs;
+            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
+            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
+            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), base_name)) continue;
+            const args = [_]u32{ base, index, value_node };
+            if (ctx.tryInlineProcCall(decl, &args, source_node, diag) catch null) |_| {
+                _ = value_reg;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn tryEmitStarBracketOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
+        const ast = ctx.ast;
+        const base_type = typeTextForExpr(ctx, base, diag) orelse return null;
+        const base_name = firstTypeWord(stripPointerText(base_type));
+        if (base_name.len == 0) return null;
+        if ((try structTypeNodeByName(ctx, base_name)) == null) return null;
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            const mt = ast.mainToken(decl);
+            if (!isOperatorStarBracketDecl(ast, mt)) continue;
+            const sig = procSignature(ast, decl) orelse continue;
+            const params = ast.extraSlice(sig.params_extra);
+            if (params.len != 2) continue;
+            const p0: NodeIndex = @intCast(params[0]);
+            const p0_type_node = ast.data(p0).lhs;
+            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
+            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
+            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), base_name)) continue;
+            const args = [_]u32{ base, index };
+            return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
+        }
+        return null;
+    }
+
+    fn tryEmitCompoundAssignOperatorOverload(ctx: *GenContext, expr: NodeIndex, op: TokenTag, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }!bool {
+        const ast = ctx.ast;
+        const lhs = ast.data(expr).lhs;
+        const rhs = ast.data(expr).rhs;
+        const lhs_type = typeTextForExpr(ctx, lhs, diag) orelse return false;
+        const lhs_name = firstTypeWord(stripPointerText(lhs_type));
+        if (lhs_name.len == 0) return false;
+        if ((structTypeNodeByName(ctx, lhs_name) catch return false) == null) return false;
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            const mt = ast.mainToken(decl);
+            if (ast.tokens[mt].tag != op) continue;
+            const sig = procSignature(ast, decl) orelse continue;
+            const params = ast.extraSlice(sig.params_extra);
+            if (params.len != 2) continue;
+            const p0: NodeIndex = @intCast(params[0]);
+            const p0_type_node = ast.data(p0).lhs;
+            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
+            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
+            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), lhs_name)) continue;
+            const args = [_]u32{ lhs, rhs };
+            if (ctx.tryInlineProcCall(decl, &args, expr, diag) catch null) |_| return true;
+        }
+        return false;
     }
 
     fn emitCompoundAssignment(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op: TokenTag, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
@@ -4005,6 +4089,7 @@ const GenContext = struct {
                     return;
                 }
                 if (ast.tag(lhs) == .index_expr) {
+                    if (try ctx.tryEmitIndexAssignOperatorOverload(ast.data(lhs).lhs, ast.data(lhs).rhs, rhs, rhs_node, stmt, diag)) return;
                     const addr = try genAddressOfLvalue(ctx, lhs, diag);
                     const base_text = typeTextForExpr(ctx, ast.data(lhs).lhs, diag);
                     const elem_text = if (base_text) |text|
@@ -5521,6 +5606,10 @@ const GenContext = struct {
             .unary_expr => {
                 const operand = ast.data(expr).lhs;
                 const op = ast.tokens[ast.mainToken(expr)].tag;
+                if (op == .star and ast.tag(operand) == .index_expr) {
+                    if (try ctx.tryEmitStarBracketOperatorOverload(ast.data(operand).lhs, ast.data(operand).rhs, expr, diag)) |result|
+                        return result;
+                }
                 if (op == .star and (ast.tag(operand) == .identifier or ast.tag(operand) == .field_access or ast.tag(operand) == .index_expr)) return try genAddressOfLvalue(ctx, operand, diag);
                 if (op == .star and (ast.tag(operand) == .aggregate_literal or ast.tag(operand) == .typed_aggregate_literal)) return try ctx.genExpr(operand, diag);
                 const operand_reg = try ctx.genExpr(operand, diag);
@@ -5822,6 +5911,8 @@ const GenContext = struct {
             .binary_expr => {
                 const op = ast.tokens[ast.mainToken(expr)].tag;
                 if (isCompoundAssignmentOp(op)) {
+                    if (try ctx.tryEmitCompoundAssignOperatorOverload(expr, op, diag))
+                        return try ctx.genTypedPlaceholderValue(expr, diag);
                     return try ctx.emitCompoundAssignment(ast.data(expr).lhs, ast.data(expr).rhs, op, expr, diag);
                 }
                 if (ast.tag(ast.data(expr).lhs) == .unary_expr and ast.tokens[ast.mainToken(ast.data(expr).lhs)].tag == .shift_left and (op == .star_equal or op == .plus_equal or op == .minus_equal or op == .slash_equal)) {
@@ -9871,6 +9962,12 @@ fn genCoercedCallArg(ctx: *GenContext, arg: NodeIndex, param_type_text: []const 
     }
     const source_type = typeTextForExpr(ctx, arg, diag) orelse return genCallArg(ctx, arg, diag);
     if (typeTextsEquivalent(source_type, target_type)) return genCallArg(ctx, arg, diag);
+    if (std.mem.startsWith(u8, target_type, "*")) {
+        const pointee = std.mem.trim(u8, target_type[1..], " \t\r\n");
+        if (typeTextsEquivalent(source_type, pointee)) {
+            return try genAddressOfLvalue(ctx, arg, diag);
+        }
+    }
     if (isViewArrayTypeText(target_type) and isStaticArrayTypeText(source_type)) {
         const sa_count = try staticArrayCountFromText(ctx, source_type, diag) orelse 0;
         const data_reg = try genCallArg(ctx, arg, diag);
@@ -11561,8 +11658,25 @@ fn isOperatorIdentifierName(name: []const u8) bool {
 
 fn isOperatorBracketDecl(ast: *const Ast, main_token: u32) bool {
     if (ast.tokens[main_token].tag != .l_bracket) return false;
-    if (main_token + 1 < ast.tokens.len and ast.tokens[main_token + 1].tag == .r_bracket) return true;
+    if (main_token + 1 < ast.tokens.len and ast.tokens[main_token + 1].tag == .r_bracket) {
+        if (main_token + 2 < ast.tokens.len and ast.tokens[main_token + 2].tag == .equal) return false;
+        return true;
+    }
     return false;
+}
+
+fn isOperatorBracketAssignDecl(ast: *const Ast, main_token: u32) bool {
+    if (ast.tokens[main_token].tag != .l_bracket) return false;
+    if (main_token + 1 >= ast.tokens.len or ast.tokens[main_token + 1].tag != .r_bracket) return false;
+    if (main_token + 2 >= ast.tokens.len or ast.tokens[main_token + 2].tag != .equal) return false;
+    return true;
+}
+
+fn isOperatorStarBracketDecl(ast: *const Ast, main_token: u32) bool {
+    if (ast.tokens[main_token].tag != .star) return false;
+    if (main_token + 1 >= ast.tokens.len or ast.tokens[main_token + 1].tag != .l_bracket) return false;
+    if (main_token + 2 >= ast.tokens.len or ast.tokens[main_token + 2].tag != .r_bracket) return false;
+    return true;
 }
 
 fn typeInfoTagValue(name: []const u8) ?u32 {
