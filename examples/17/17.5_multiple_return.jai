@@ -26,7 +26,7 @@ main :: () {
     print("a is %\n", a); // => a is 3
 
     b, c := proc3(true);   // (2C)
-    print("%, %\n", b, c); // =>  100, 200
+    print("%, %\n", b, c); // => 100, 200
 
     d, e := proc3(false);  // (2D)
     print("%, %\n", d, e); // => 1000000, 200

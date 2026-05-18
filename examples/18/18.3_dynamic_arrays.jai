@@ -27,13 +27,13 @@ main :: () {
     for arrdyn {
         if it == 5 remove it;       // (7)
     }
-    print("arrdyn is: %\n", arrdyn); // => arrdyn is: [13, 9]
+    print("arrdyn is: %\n", arrdyn); // => arrdyn is: [5, 9]
 
     print("another_array is: %\n", another_array); // => another_array is: []
     array_copy(*another_array, arrdyn); // (8) - copy arrdyn into another_array
-    print("another_array is: %\n", another_array); // => another_array is: [13, 9]
+    print("another_array is: %\n", another_array); // => another_array is: [5, 9]
     another_array2 = array_copy(arrdyn); // (8B)
-    print("another_array2 is: %\n", another_array2); // => another_array2 is: [13, 9]
+    print("another_array2 is: %\n", another_array2); // => another_array2 is: [5, 9]
   
     array_reset(*arrdyn);  // (9) Reset (empties) arrdyn
     print("arrdyn is: %\n", arrdyn); // => arrdyn is: []

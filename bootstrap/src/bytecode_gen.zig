@@ -5619,6 +5619,9 @@ const GenContext = struct {
                     try proc.instructions.append(program.allocator, .{ .opcode = .type_info_ptr, .dest = reg, .arg1 = str_idx, .source_node = expr });
                     return reg;
                 }
+                if (try procTypeTextForExpr(ctx, ast.data(expr).lhs)) |proc_type| {
+                    return try ctx.emitTypeText(expr, proc_type, diag);
+                }
                 const type_of_text = declaredTypeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse typeTextForExpr(ctx, ast.data(expr).lhs, diag);
                 if (type_of_text) |type_text| {
                     const clean_type = std.mem.trim(u8, type_text, " \t\r\n");
@@ -12251,6 +12254,54 @@ fn procReturnTypeText(ast: *const Ast, sig: ProcSig) ?[]const u8 {
     const text = std.mem.trim(u8, ast.source[start..end], " \t\r\n");
     if (text.len == 0) return null;
     return text;
+}
+
+fn procTypeTextForExpr(ctx: *GenContext, expr: NodeIndex) !?[]const u8 {
+    const ast = ctx.ast;
+    if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len) return null;
+    const proc_node = blk: {
+        if (ast.tag(expr) == .proc_decl) break :blk expr;
+        if (ast.tag(expr) == .identifier) {
+            if (ctx.resolved.local_values.get(expr)) |decl| {
+                if (decl != @import("Ast.zig").null_node and decl < ast.node_tags.items.len and ast.tag(decl) == .proc_decl) break :blk decl;
+            }
+            const name = ast.tokenSlice(ast.mainToken(expr));
+            if (ctx.resolved.lookup(name)) |sym| switch (sym) {
+                .proc => |pn| break :blk pn,
+                else => {},
+            };
+        }
+        return null;
+    };
+    const sig = procSignature(ast, proc_node) orelse return "procedure ()";
+    var buf = std.ArrayList(u8).empty;
+    try buf.appendSlice(ctx.program.allocator, "procedure (");
+    const params = ast.extraSlice(sig.params_extra);
+    for (params, 0..) |param_idx, i| {
+        if (i > 0) try buf.appendSlice(ctx.program.allocator, ", ");
+        const param: NodeIndex = @intCast(param_idx);
+        const param_type = ast.data(param).lhs;
+        if (param_type != @import("Ast.zig").null_node and param_type < ast.node_tags.items.len) {
+            const ty_text = std.mem.trim(u8, ctx.nodeSource(param_type), " \t\r\n");
+            if (std.mem.eql(u8, ty_text, "int")) {
+                try buf.appendSlice(ctx.program.allocator, "s64");
+            } else {
+                try buf.appendSlice(ctx.program.allocator, ty_text);
+            }
+        } else {
+            try buf.appendSlice(ctx.program.allocator, "Any");
+        }
+    }
+    try buf.append(ctx.program.allocator, ')');
+    if (procReturnTypeText(ast, sig)) |ret_text| {
+        try buf.appendSlice(ctx.program.allocator, " -> ");
+        if (std.mem.eql(u8, ret_text, "int")) {
+            try buf.appendSlice(ctx.program.allocator, "s64");
+        } else {
+            try buf.appendSlice(ctx.program.allocator, ret_text);
+        }
+    }
+    return try buf.toOwnedSlice(ctx.program.allocator);
 }
 
 fn isCompoundAssignmentOp(op: TokenTag) bool {

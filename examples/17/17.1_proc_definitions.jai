@@ -24,8 +24,8 @@ main :: () {
     print("% \n", lam(1, 2)); // => 3
 
     // The address in memory of the 'sum' proc is:
-    print("%\n", sum); // (7) => procedure 0x7ff7_a9c3_e1b0
-    print("0x%\n", cast(*void) sum);  // => 0x7ff7_a9c3_e1b0
+    print("%\n", sum); // (7) address is non-deterministic
+    print("0x%\n", cast(*void) sum);  // => 0x...
     print("Its type is: %\n", type_of(sum));  // (8)
     // => Its type is: procedure (s64, s64, s64) -> s64
 
