@@ -531,7 +531,8 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
     var verify_msg: [*c]u8 = null;
     if (c.LLVMVerifyModule(module, c.LLVMReturnStatusAction, &verify_msg) != 0) {
         defer c.LLVMDisposeMessage(verify_msg);
-        std.debug.print("LLVM verifier warning (continuing): {s}\n", .{verify_msg});
+        std.debug.print("LLVM verifier error: {s}\n", .{verify_msg});
+        return error.LlvmVerifyFailed;
     }
 
     var target_ref: c.LLVMTargetRef = null;
@@ -599,7 +600,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
     }
     for (proc.instructions.items, 0..) |inst, idx| {
         switch (inst.opcode) {
-            .jump, .jump_if_false, .ret, .ret_multi, .ret_void, .exit_process => {
+            .jump, .jump_if_false, .ret, .ret_multi, .ret_void, .exit_process, .host_set_workspace_status, .host_build_cpp_dynamic_lib, .host_custom_link_complete, .host_run_command, .host_run_command_capture => {
                 if (idx + 1 <= instruction_count) is_block_start[idx + 1] = true;
             },
             else => {},
@@ -2348,21 +2349,13 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .call => {
                 if (inst.arg1 >= env.proc_functions.len or env.proc_functions[inst.arg1] == null or env.proc_function_tys[inst.arg1] == null) {
-                    if (env.program.main_proc != null and inst.arg1 == env.program.main_proc.?) {
-                        if (inst.dest < registers.len) {
-                            try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, 0, 0));
-                        }
-                        continue;
-                    }
                     const name = if (inst.arg1 < env.program.procs.items.len) env.program.procs.items[inst.arg1].name else "?";
-                    return diag.failAt(0, "LLVM backend call target out of range: proc[{d}] '{s}' (total={d}, fn={any}, ty={any}) from '{s}'", .{ inst.arg1, name, env.proc_functions.len, inst.arg1 < env.proc_functions.len and env.proc_functions[inst.arg1] != null, inst.arg1 < env.proc_function_tys.len and env.proc_function_tys[inst.arg1] != null, env.current_proc_name });
+                    return diag.failAt(0, "LLVM backend call target not resolved: proc[{d}] '{s}' (total={d}) from '{s}'", .{ inst.arg1, name, env.proc_functions.len, env.current_proc_name });
                 }
                 const target_proc = &env.program.procs.items[inst.arg1];
                 if (inst.arg2 != target_proc.param_types.items.len) {
-                    if (inst.dest < registers.len) {
-                        try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, 0, 0));
-                    }
-                    continue;
+                    const name = if (inst.arg1 < env.program.procs.items.len) env.program.procs.items[inst.arg1].name else "?";
+                    return diag.failAt(0, "LLVM backend call argument count mismatch for '{s}': got {d}, expected {d}", .{ name, inst.arg2, target_proc.param_types.items.len });
                 }
                 if (inst.arg3 + inst.arg2 > env.program.call_args.items.len) return diag.failAt(0, "LLVM backend call argument table out of range", .{});
                 const args = try env.allocator.alloc(c.LLVMValueRef, inst.arg2);
@@ -2574,8 +2567,11 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const type_name = env.program.strings.items[inst.arg1];
                 const type_id_val = if (env.program.typeInfoIndexByName(type_name)) |idx|
                     c.LLVMConstInt(env.llvm_i64, type_info_base_id + idx, 0)
-                else
-                    c.LLVMConstInt(env.llvm_i64, typeIdFromTypeTextLlvm(type_name), 0);
+                else blk: {
+                    const builtin_id = typeIdFromTypeTextLlvm(type_name);
+                    if (builtin_id == 0) return diag.failAt(0, "LLVM backend type_info_ptr: unknown type '{s}'", .{type_name});
+                    break :blk c.LLVMConstInt(env.llvm_i64, builtin_id, 0);
+                };
                 registers[inst.dest] = .{ .llvm_value = type_id_val, .kind = .type_id };
             },
             .load_build_options,
@@ -2600,7 +2596,12 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             else => return diag.failAt(0, "unsupported bytecode opcode in LLVM backend: {s}", .{@tagName(inst.opcode)}),
         }
-        if (!terminates_block and is_block_start[instruction_index + 1]) {
+        if (terminates_block) {
+            if (instruction_index + 1 < instruction_count and !is_block_start[instruction_index + 1]) {
+                const dead_bb = c.LLVMAppendBasicBlockInContext(env.context, function, "dead");
+                c.LLVMPositionBuilderAtEnd(env.builder, dead_bb);
+            }
+        } else if (is_block_start[instruction_index + 1]) {
             _ = c.LLVMBuildBr(env.builder, blocks[instruction_index + 1].?);
         }
     }
@@ -2645,7 +2646,9 @@ const RegisterValue = struct {
     };
 };
 
-const type_info_base_id: u64 = 1000;
+// User-defined type IDs start at this offset to avoid colliding with builtin type IDs (1-31).
+// Must match USER_TYPE_ID_OFFSET in rt/core.zig.
+const type_info_base_id: u64 = 0x10000;
 
 fn typeIdFromTypeTextLlvm(name: []const u8) u64 {
     if (std.mem.eql(u8, name, "bool")) return 1;

@@ -48,7 +48,6 @@ pub const Opcode = enum(u8) {
     ret_multi,
     ret_void,
     tuple_extract,
-    alloc_local,
     load,
     store,
     load_ptr,

@@ -864,11 +864,9 @@ const GenContext = struct {
         if (std.mem.eql(u8, name, "enum_values_as_enum") or
             std.mem.eql(u8, name, "enum_values_as_s64") or std.mem.eql(u8, name, "enum_names"))
         {
-            for (call_args) |arg_idx| _ = try ctx.genExpr(@intCast(arg_idx), diag);
-            const view = ctx.proc.num_registers;
-            ctx.proc.num_registers += 1;
-            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = view, .arg1 = 16, .source_node = call_expr });
-            return view;
+            if (call_args.len != 1) return null;
+            const arg_node: NodeIndex = @intCast(call_args[0]);
+            return try ctx.emitEnumValuesView(arg_node, name, call_expr, diag);
         }
         if (std.mem.eql(u8, name, "enum_range")) {
             if (call_args.len != 1) return null;
@@ -1074,7 +1072,11 @@ const GenContext = struct {
         if (ast.tag(rhs_node) != .binary_expr) return null;
         const op = ast.tokens[ast.mainToken(rhs_node)].tag;
         if (!isCompoundAssignmentOp(op)) return null;
-        if (ctx.tryEmitCompoundAssignOperatorOverload(rhs_node, op, diag) catch false) return 0;
+        if (ctx.tryEmitCompoundAssignOperatorOverload(rhs_node, op, diag) catch |err| return switch (err) {
+            error.GenFailed => error.GenFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => error.Overflow,
+        }) return 0;
         return try ctx.emitCompoundAssignment(lhs, ast.data(rhs_node).rhs, op, source_node, diag);
     }
 
@@ -1098,16 +1100,51 @@ const GenContext = struct {
         return try ctx.emitCompoundAssignment(lhs, ast.data(rhs_node).rhs, compound_op, source_node, diag);
     }
 
+    const OperatorMatch = union(enum) {
+        by_name: []const u8,
+        by_bracket: void,
+        by_bracket_assign: void,
+        by_star_bracket: void,
+        by_token_tag: TokenTag,
+    };
+
+    fn findOperatorOverloadProc(ctx: *GenContext, base_name: []const u8, match: OperatorMatch, expected_params: u32) !?NodeIndex {
+        const ast = ctx.ast;
+        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
+        for (root_decls) |decl_idx| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (ast.tag(decl) != .proc_decl) continue;
+            const mt = ast.mainToken(decl);
+            const matches_op = switch (match) {
+                .by_name => |name| std.mem.eql(u8, ast.tokenSlice(mt), name),
+                .by_bracket => isOperatorBracketDecl(ast, mt),
+                .by_bracket_assign => isOperatorBracketAssignDecl(ast, mt),
+                .by_star_bracket => isOperatorStarBracketDecl(ast, mt),
+                .by_token_tag => |tag| ast.tokens[mt].tag == tag,
+            };
+            if (!matches_op) continue;
+            const sig = procSignature(ast, decl) orelse continue;
+            const params = ast.extraSlice(sig.params_extra);
+            if (params.len != expected_params) continue;
+            const p0: NodeIndex = @intCast(params[0]);
+            const p0_type_node = ast.data(p0).lhs;
+            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
+            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
+            if (!std.mem.eql(u8, firstTypeWord(p0_full_type), base_name)) continue;
+            return decl;
+        }
+        return null;
+    }
+
     fn tryEmitOperatorOverload(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
         const ast = ctx.ast;
         if (ast.tag(expr) != .binary_expr) return null;
-        const op_tok = ast.mainToken(expr);
-        const op_name = ast.tokenSlice(op_tok);
+        const op_name = ast.tokenSlice(ast.mainToken(expr));
         if (!isOperatorIdentifierName(op_name)) return null;
         const lhs_type = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return null;
-        const lhs_name = firstTypeWord(stripPointerText(lhs_type));
+        const lhs_name = firstTypeWord(lhs_type);
         const rhs_type = typeTextForExpr(ctx, ast.data(expr).rhs, diag) orelse return null;
-        const rhs_name = firstTypeWord(stripPointerText(rhs_type));
+        const rhs_name = firstTypeWord(rhs_type);
         const lhs_is_struct = (try structTypeNodeByName(ctx, lhs_name)) != null;
         const rhs_is_struct = (try structTypeNodeByName(ctx, rhs_name)) != null;
         if (!lhs_is_struct and !rhs_is_struct) return null;
@@ -1115,8 +1152,7 @@ const GenContext = struct {
         for (root_decls) |decl_idx| {
             const decl: NodeIndex = @intCast(decl_idx);
             if (ast.tag(decl) != .proc_decl) continue;
-            const decl_name = ast.tokenSlice(ast.mainToken(decl));
-            if (!std.mem.eql(u8, decl_name, op_name)) continue;
+            if (!std.mem.eql(u8, ast.tokenSlice(ast.mainToken(decl)), op_name)) continue;
             const sig = procSignature(ast, decl) orelse continue;
             const params = ast.extraSlice(sig.params_extra);
             if (params.len != 2) continue;
@@ -1137,82 +1173,44 @@ const GenContext = struct {
     }
 
     fn tryEmitIndexOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
-        const ast = ctx.ast;
         const base_type = typeTextForExpr(ctx, base, diag) orelse return null;
-        const base_name = firstTypeWord(stripPointerText(base_type));
+        const base_name = firstTypeWord(base_type);
         if (base_name.len == 0) return null;
-        if ((try structTypeNodeByName(ctx, base_name)) == null) return null;
-        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
-            const decl: NodeIndex = @intCast(decl_idx);
-            if (ast.tag(decl) != .proc_decl) continue;
-            const mt = ast.mainToken(decl);
-            if (!isOperatorBracketDecl(ast, mt)) continue;
-            const sig = procSignature(ast, decl) orelse continue;
-            const params = ast.extraSlice(sig.params_extra);
-            if (params.len != 2) continue;
-            const p0_type = paramTypeText(ctx, @intCast(params[0]));
-            if (p0_type == null) continue;
-            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_type.?)), base_name)) continue;
-            const args = [_]u32{ base, index };
-            return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
-        }
-        return null;
+        const decl = (try ctx.findOperatorOverloadProc(base_name, .by_bracket, 2)) orelse return null;
+        const args = [_]u32{ base, index };
+        return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
     }
 
     fn tryEmitIndexAssignOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, value_reg: Bytecode.Register, value_node: NodeIndex, source_node: NodeIndex, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }!bool {
-        const ast = ctx.ast;
         const base_type = typeTextForExpr(ctx, base, diag) orelse return false;
-        const base_name = firstTypeWord(stripPointerText(base_type));
+        const base_name = firstTypeWord(base_type);
         if (base_name.len == 0) return false;
-        if ((structTypeNodeByName(ctx, base_name) catch return false) == null) return false;
-        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
-            const decl: NodeIndex = @intCast(decl_idx);
-            if (ast.tag(decl) != .proc_decl) continue;
-            const mt = ast.mainToken(decl);
-            if (!isOperatorBracketAssignDecl(ast, mt)) continue;
-            const sig = procSignature(ast, decl) orelse continue;
-            const params = ast.extraSlice(sig.params_extra);
-            if (params.len != 3) continue;
-            const p0: NodeIndex = @intCast(params[0]);
-            const p0_type_node = ast.data(p0).lhs;
-            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
-            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
-            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), base_name)) continue;
-            const args = [_]u32{ base, index, value_node };
-            if (ctx.tryInlineProcCall(decl, &args, source_node, diag) catch null) |_| {
-                _ = value_reg;
-                return true;
-            }
+        const decl = (ctx.findOperatorOverloadProc(base_name, .by_bracket_assign, 3) catch |err| return switch (err) {
+            error.GenFailed => error.GenFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => error.Overflow,
+            else => error.GenFailed,
+        }) orelse return false;
+        const args = [_]u32{ base, index, value_node };
+        if (ctx.tryInlineProcCall(decl, &args, source_node, diag) catch |err| return switch (err) {
+            error.GenFailed => error.GenFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => error.Overflow,
+            else => error.GenFailed,
+        }) |_| {
+            _ = value_reg;
+            return true;
         }
         return false;
     }
 
     fn tryEmitStarBracketOperatorOverload(ctx: *GenContext, base: NodeIndex, index: NodeIndex, source_node: NodeIndex, diag: Diagnostic) !?Bytecode.Register {
-        const ast = ctx.ast;
         const base_type = typeTextForExpr(ctx, base, diag) orelse return null;
-        const base_name = firstTypeWord(stripPointerText(base_type));
+        const base_name = firstTypeWord(base_type);
         if (base_name.len == 0) return null;
-        if ((try structTypeNodeByName(ctx, base_name)) == null) return null;
-        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
-            const decl: NodeIndex = @intCast(decl_idx);
-            if (ast.tag(decl) != .proc_decl) continue;
-            const mt = ast.mainToken(decl);
-            if (!isOperatorStarBracketDecl(ast, mt)) continue;
-            const sig = procSignature(ast, decl) orelse continue;
-            const params = ast.extraSlice(sig.params_extra);
-            if (params.len != 2) continue;
-            const p0: NodeIndex = @intCast(params[0]);
-            const p0_type_node = ast.data(p0).lhs;
-            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
-            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
-            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), base_name)) continue;
-            const args = [_]u32{ base, index };
-            return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
-        }
-        return null;
+        const decl = (try ctx.findOperatorOverloadProc(base_name, .by_star_bracket, 2)) orelse return null;
+        const args = [_]u32{ base, index };
+        return try ctx.tryInlineProcCall(decl, &args, source_node, diag);
     }
 
     fn tryEmitCompoundAssignOperatorOverload(ctx: *GenContext, expr: NodeIndex, op: TokenTag, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }!bool {
@@ -1220,26 +1218,21 @@ const GenContext = struct {
         const lhs = ast.data(expr).lhs;
         const rhs = ast.data(expr).rhs;
         const lhs_type = typeTextForExpr(ctx, lhs, diag) orelse return false;
-        const lhs_name = firstTypeWord(stripPointerText(lhs_type));
+        const lhs_name = firstTypeWord(lhs_type);
         if (lhs_name.len == 0) return false;
-        if ((structTypeNodeByName(ctx, lhs_name) catch return false) == null) return false;
-        const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-        for (root_decls) |decl_idx| {
-            const decl: NodeIndex = @intCast(decl_idx);
-            if (ast.tag(decl) != .proc_decl) continue;
-            const mt = ast.mainToken(decl);
-            if (ast.tokens[mt].tag != op) continue;
-            const sig = procSignature(ast, decl) orelse continue;
-            const params = ast.extraSlice(sig.params_extra);
-            if (params.len != 2) continue;
-            const p0: NodeIndex = @intCast(params[0]);
-            const p0_type_node = ast.data(p0).lhs;
-            if (p0_type_node == @import("Ast.zig").null_node or p0_type_node >= ast.node_tags.items.len) continue;
-            const p0_full_type = std.mem.trim(u8, ctx.nodeSource(p0_type_node), " \t\r\n");
-            if (!std.mem.eql(u8, firstTypeWord(stripPointerText(p0_full_type)), lhs_name)) continue;
-            const args = [_]u32{ lhs, rhs };
-            if (ctx.tryInlineProcCall(decl, &args, expr, diag) catch null) |_| return true;
-        }
+        const decl = (ctx.findOperatorOverloadProc(lhs_name, .{ .by_token_tag = op }, 2) catch |err| return switch (err) {
+            error.GenFailed => error.GenFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => error.Overflow,
+            else => error.GenFailed,
+        }) orelse return false;
+        const args = [_]u32{ lhs, rhs };
+        if (ctx.tryInlineProcCall(decl, &args, expr, diag) catch |err| return switch (err) {
+            error.GenFailed => error.GenFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => error.Overflow,
+            else => error.GenFailed,
+        }) |_| return true;
         return false;
     }
 
@@ -1362,7 +1355,7 @@ const GenContext = struct {
 
     fn emitAggregateToStruct(ctx: *GenContext, aggregate: NodeIndex, dest: Bytecode.Register, type_text: []const u8, source_node: NodeIndex, diag: Diagnostic) !void {
         const ast = ctx.ast;
-        const type_name = firstTypeWord(stripPointerText(type_text));
+        const type_name = firstTypeWord(type_text);
         const type_node = try structTypeNodeByName(ctx, type_name) orelse return;
         const elems = if (ast.tag(aggregate) == .typed_aggregate_literal) blk: {
             const payload = ast.extraSlice(ast.data(aggregate).lhs);
@@ -1879,7 +1872,7 @@ const GenContext = struct {
                 const first_param: NodeIndex = @intCast(target_params[0]);
                 const param_type_node = ast.data(first_param).lhs;
                 if (param_type_node != @import("Ast.zig").null_node) {
-                    const param_type_text = firstTypeWord(stripPointerText(std.mem.trim(u8, ctx.nodeSource(param_type_node), " \t\r\n")));
+                    const param_type_text = firstTypeWord(std.mem.trim(u8, ctx.nodeSource(param_type_node), " \t\r\n"));
                     const iterated_type_word = firstTypeWord(typeTextForExpr(ctx, iterated, diag) orelse "");
                     if (!std.mem.eql(u8, param_type_text, iterated_type_word) and iterated_type_word.len > 0) return false;
                 }
@@ -2402,7 +2395,7 @@ const GenContext = struct {
             switch (value) {
                 .type_text => |type_text| {
                     try ctx.ensureTypeInfoForText(type_text, diag);
-                    const type_name = firstTypeWord(stripPointerText(type_text));
+                    const type_name = firstTypeWord(type_text);
                     if (ctx.program.typeInfoIndexByName(type_name)) |info_index| {
                         const info = ctx.program.type_infos.items[info_index];
                         _ = try program.addTypeInfo(info.name, info.tag, info.members);
@@ -3641,6 +3634,97 @@ const GenContext = struct {
         return hdr_reg;
     }
 
+    fn emitEnumValuesView(ctx: *GenContext, arg_node: NodeIndex, name: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const ast = ctx.ast;
+        _ = try ctx.genExpr(arg_node, diag);
+        const type_name = std.mem.trim(u8, ctx.nodeSource(arg_node), " \t\r\n");
+
+        const enum_node = blk: {
+            if (ctx.resolved.lookup(type_name)) |sym| switch (sym) {
+                .const_value => |node| {
+                    if (node != @import("Ast.zig").null_node and node < ast.node_tags.items.len and
+                        ast.tag(node) == .enum_type)
+                        break :blk node;
+                },
+                else => {},
+            };
+            for (ast.node_tags.items, 0..) |tag, ni| {
+                if (tag != .enum_type) continue;
+                if (ni == 0) continue;
+                const parent: NodeIndex = @intCast(ni);
+                const decl_tok = ast.mainToken(parent);
+                if (decl_tok > 0 and ast.tokens[decl_tok - 1].tag == .identifier) {
+                    if (std.mem.eql(u8, ast.tokenSlice(decl_tok - 1), type_name)) break :blk parent;
+                }
+            }
+            return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "{s}: could not find enum type '{s}'", .{ name, type_name });
+        };
+
+        var names_list: std.ArrayList([]const u8) = .empty;
+        defer names_list.deinit(ctx.program.allocator);
+        var values_list: std.ArrayList(i64) = .empty;
+        defer values_list.deinit(ctx.program.allocator);
+
+        var tok = ast.mainToken(enum_node);
+        while (tok < ast.tokens.len and ast.tokens[tok].tag != .l_brace) tok += 1;
+        if (tok < ast.tokens.len) tok += 1;
+        var sequential_value: i64 = 0;
+        var depth: u32 = 1;
+        while (tok < ast.tokens.len and depth != 0) : (tok += 1) {
+            switch (ast.tokens[tok].tag) {
+                .l_brace => depth += 1,
+                .r_brace => depth -= 1,
+                .identifier => if (depth == 1) {
+                    const member_name = ast.tokenSlice(tok);
+                    var value = sequential_value;
+                    if (tok + 1 < ast.tokens.len and ast.tokens[tok + 1].tag == .colon_colon) {
+                        if (tok + 2 < ast.tokens.len and ast.tokens[tok + 2].tag == .integer_literal) {
+                            value = parseEnumIntLiteral(ast.tokenSlice(tok + 2));
+                        }
+                    }
+                    try names_list.append(ctx.program.allocator, member_name);
+                    try values_list.append(ctx.program.allocator, value);
+                    sequential_value = value + 1;
+                },
+                else => {},
+            }
+        }
+
+        const count = names_list.items.len;
+
+        if (std.mem.eql(u8, name, "enum_names")) {
+            const data_reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            const total_size: u32 = @intCast(@max(count * 16, 1));
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = data_reg, .arg1 = total_size, .source_node = source_node });
+
+            for (names_list.items, 0..) |member_name, i| {
+                const str_reg = try ctx.emitString(source_node, member_name);
+                const elem_addr = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = elem_addr, .arg1 = data_reg, .arg2 = @intCast(i * 16), .source_node = source_node });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = elem_addr, .arg1 = str_reg, .source_node = source_node });
+            }
+
+            return try ctx.wrapStaticArrayAsView(data_reg, count, source_node);
+        } else {
+            const data_reg = ctx.proc.num_registers;
+            ctx.proc.num_registers += 1;
+            const total_size: u32 = @intCast(@max(count * 8, 1));
+            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = data_reg, .arg1 = total_size, .source_node = source_node });
+
+            for (values_list.items, 0..) |value, i| {
+                const val_reg = try ctx.emitInt(source_node, value);
+                const elem_addr = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ptr_offset, .dest = elem_addr, .arg1 = data_reg, .arg2 = @intCast(i * 8), .source_node = source_node });
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .store_ptr, .dest = elem_addr, .arg1 = val_reg, .source_node = source_node });
+            }
+
+            return try ctx.wrapStaticArrayAsView(data_reg, count, source_node);
+        }
+    }
+
     fn materializeStringLocal(ctx: *GenContext, base_node: NodeIndex, str_reg: Bytecode.Register, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         _ = diag;
         const decl = if (ctx.ast.tag(base_node) == .identifier) ctx.resolved.local_values.get(base_node) else null;
@@ -4239,7 +4323,7 @@ const GenContext = struct {
                     const init_is_code_node = if (init_type_text) |text| isCodeNodeTypeText(text) else false;
                     const init_is_compiler_message = if (init_type_text) |text| isCompilerMessageTypeText(text) else false;
                     const init_is_type_info_handle = if (init_type_text) |text| blk: {
-                        const handle_name = firstTypeWord(stripPointerText(text));
+                        const handle_name = firstTypeWord(text);
                         break :blk std.mem.eql(u8, handle_name, "Type_Info_Struct") or std.mem.eql(u8, handle_name, "Type_Info_Pointer") or std.mem.eql(u8, handle_name, "Type_Info_Struct_Member");
                     } else false;
                     const init_is_plain_identifier_value = if (init_type_text) |text| blk: {
@@ -4595,7 +4679,7 @@ const GenContext = struct {
                     const elem_is_array = if (elem_text) |text| isStaticArrayTypeText(text) else false;
                     const elem_is_string = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(text), "string") else false;
                     const elem_is_float = if (elem_text) |text| (std.mem.eql(u8, firstTypeWord(text), "float") or std.mem.eql(u8, firstTypeWord(text), "float32") or std.mem.eql(u8, firstTypeWord(text), "float64")) else false;
-                    const elem_is_type_info_member = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(stripPointerText(text)), "Type_Info_Struct_Member") else false;
+                    const elem_is_type_info_member = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(text), "Type_Info_Struct_Member") else false;
                     const is_view = iterated_text_opt != null and isViewArrayTypeText(iterated_text_opt.?);
                     const is_string_iter = iterated_text_opt != null and std.mem.eql(u8, firstTypeWord(iterated_text_opt.?), "string");
                     const is_dynamic = iterated_text_opt != null and isDynamicArrayTypeText(iterated_text_opt.?);
@@ -4639,7 +4723,7 @@ const GenContext = struct {
                     }
 
                     const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
-                    if (is_dynamic and !iterable_reverse) {
+                    if (is_dynamic and !is_view and !iterable_reverse) {
                         try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = array_slot, .arg3 = @intCast(elem_size), .arg5 = 0, .source_node = stmt });
                     }
                     const cond_reg = ctx.proc.num_registers;
@@ -4941,7 +5025,7 @@ const GenContext = struct {
     }
 
     fn emitContainerGeneratedInitializers(ctx: *GenContext, dest: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, diag: Diagnostic) anyerror!void {
-        const type_name = firstTypeWord(stripPointerText(raw_type));
+        const type_name = firstTypeWord(raw_type);
         if (ctx.polymorph_types.get(type_name)) |actual_type| {
             try ctx.emitContainerGeneratedInitializers(dest, actual_type, source_node, diag);
             return;
@@ -5247,7 +5331,7 @@ const GenContext = struct {
     }
 
     fn ensureTypeInfoForText(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !void {
-        const type_name = firstTypeWord(stripPointerText(raw_type));
+        const type_name = firstTypeWord(raw_type);
         if (type_name.len == 0 or ctx.program.typeInfoIndexByName(type_name) != null) return;
         if (ensureBuiltinTypeInfo(ctx.program, type_name)) return;
         const type_node = try structTypeNodeByName(ctx, type_name) orelse return;
@@ -5342,7 +5426,7 @@ const GenContext = struct {
                 if (ast.tokens[ast.mainToken(expr)].tag != .keyword_type_info) return null;
                 const operand = ast.data(expr).lhs;
                 if (operand == @import("Ast.zig").null_node or operand >= ast.node_tags.items.len) return null;
-                return firstTypeWord(stripPointerText(ctx.nodeSource(operand)));
+                return firstTypeWord(ctx.nodeSource(operand));
             },
             else => return null,
         }
@@ -5356,7 +5440,7 @@ const GenContext = struct {
             const parsed = parseFieldSegment(segment) orelse continue;
             if (!parsed.is_as) continue;
             const field_type = try parsedFieldTypeText(ctx, parsed, diag);
-            const parent_name = firstTypeWord(stripPointerText(field_type));
+            const parent_name = firstTypeWord(field_type);
             if (std.mem.eql(u8, parent_name, target_name)) return true;
             if (try ctx.typeHasAsSubclass(parent_name, target_name, diag)) return true;
         }
@@ -5417,7 +5501,7 @@ const GenContext = struct {
             },
             .type_of_expr => {
                 if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
-                    const type_text = firstTypeWord(stripPointerText(ctx.nodeSource(ast.data(expr).lhs)));
+                    const type_text = firstTypeWord(ctx.nodeSource(ast.data(expr).lhs));
                     try ctx.ensureTypeInfoForText(type_text, diag);
                     const str_idx = try program.addString(type_text);
                     const reg = proc.num_registers;
@@ -5428,7 +5512,7 @@ const GenContext = struct {
                 const type_of_text = declaredTypeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse typeTextForExpr(ctx, ast.data(expr).lhs, diag);
                 if (type_of_text) |type_text| {
                     const clean_type = std.mem.trim(u8, type_text, " \t\r\n");
-                    const type_name = firstTypeWord(stripPointerText(clean_type));
+                    const type_name = firstTypeWord(clean_type);
                     if (!isBuiltinTypeName(type_name) and (try structTypeNodeByName(ctx, type_name)) != null) {
                         return try ctx.emitTypeText(expr, try displayTypeTextForTypeOf(ctx, clean_type, diag), diag);
                     }
@@ -5874,7 +5958,7 @@ const GenContext = struct {
                         .proc_decl => {
                             const reg = proc.num_registers;
                             proc.num_registers += 1;
-                            const pidx = ctx.procIndexForNode(decl) orelse 0;
+                            const pidx = ctx.procIndexForNode(decl) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "cannot resolve procedure address for '{s}'", .{ast.tokenSlice(ast.mainToken(expr))});
                             try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                             return reg;
                         },
@@ -5931,7 +6015,7 @@ const GenContext = struct {
             .proc_decl => {
                 const reg = proc.num_registers;
                 proc.num_registers += 1;
-                const pidx = ctx.procIndexForNode(expr) orelse 0;
+                const pidx = ctx.procIndexForNode(expr) orelse return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "cannot resolve procedure address for '{s}'", .{ast.tokenSlice(ast.mainToken(expr))});
                 try proc.instructions.append(program.allocator, .{ .opcode = .proc_addr, .dest = reg, .arg1 = pidx, .source_node = expr });
                 return reg;
             },
@@ -6244,7 +6328,7 @@ const GenContext = struct {
                 }
                 const base_reg = try ctx.genExpr(ast.data(expr).lhs, diag);
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text| {
-                    const base_name = firstTypeWord(stripPointerText(base_text));
+                    const base_name = firstTypeWord(base_text);
                     if (std.mem.eql(u8, base_name, "Apollo_Time")) {
                         if (std.mem.eql(u8, field_name, "high")) return try ctx.emitInt(expr, 0);
                         if (!std.mem.eql(u8, field_name, "low")) return diag.failAt(ast.tokens[ast.data(expr).rhs].start, "unsupported Apollo_Time field '{s}'", .{field_name});
@@ -6309,7 +6393,7 @@ const GenContext = struct {
                     }
                 }
                 if (typeTextForExpr(ctx, ast.data(expr).lhs, diag)) |base_text_for_note| {
-                    if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_text_for_note)), "Code_Note") and std.mem.eql(u8, field_name, "text")) {
+                    if (std.mem.eql(u8, firstTypeWord(base_text_for_note), "Code_Note") and std.mem.eql(u8, field_name, "text")) {
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
                         try proc.instructions.append(program.allocator, .{
@@ -6409,7 +6493,7 @@ const GenContext = struct {
                         }
                     }
                     if (dynamicArrayElementText(base_text)) |elem_text| {
-                        if (std.mem.eql(u8, firstTypeWord(stripPointerText(elem_text)), "Type_Info_Struct_Member")) {
+                        if (std.mem.eql(u8, firstTypeWord(elem_text), "Type_Info_Struct_Member")) {
                             if (std.mem.eql(u8, field_name, "count")) {
                                 const field_idx = try program.addString("count");
                                 const reg = proc.num_registers;
@@ -6585,7 +6669,7 @@ const GenContext = struct {
                     if (dynamicArrayElementText(base_text)) |elem_text| {
                         const elem_size = try typeTextSize(ctx, elem_text, diag);
                         const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_text, diag);
-                        const elem_is_type_info_member = std.mem.eql(u8, firstTypeWord(stripPointerText(elem_text)), "Type_Info_Struct_Member");
+                        const elem_is_type_info_member = std.mem.eql(u8, firstTypeWord(elem_text), "Type_Info_Struct_Member");
                         const elem_is_float = std.mem.eql(u8, firstTypeWord(elem_text), "float") or std.mem.eql(u8, firstTypeWord(elem_text), "float32") or std.mem.eql(u8, firstTypeWord(elem_text), "float64");
                         const elem_kind: u32 = if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else if (elem_is_float) 3 else 0;
                         const is_view = isViewArrayTypeText(base_text);
@@ -7014,7 +7098,7 @@ const GenContext = struct {
                     const pool_ptr = try ctx.genExpr(@intCast(args[0]), diag);
                     const size_reg = try ctx.genExpr(@intCast(args[1]), diag);
                     const kind: u32 = if (typeTextForExpr(ctx, @intCast(args[0]), diag)) |arg_type|
-                        if (std.mem.eql(u8, firstTypeWord(stripPointerText(arg_type)), "Flat_Pool")) 1 else 0
+                        if (std.mem.eql(u8, firstTypeWord(arg_type), "Flat_Pool")) 1 else 0
                     else
                         0;
                     const reg = proc.num_registers;
@@ -7773,11 +7857,8 @@ const GenContext = struct {
                 if (std.mem.eql(u8, name, "enum_values_as_s64") or std.mem.eql(u8, name, "enum_names") or std.mem.eql(u8, name, "enum_values_as_enum")) {
                     const args2 = ast.extraSlice(ast.data(expr).rhs);
                     if (args2.len != 1) return diag.failAt(ast.tokens[ast.mainToken(expr)].start, "{s} expects one argument", .{name});
-                    _ = try ctx.genExpr(@intCast(args2[0]), diag);
-                    const eview = ctx.proc.num_registers;
-                    ctx.proc.num_registers += 1;
-                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = eview, .arg1 = 16, .source_node = expr });
-                    return eview;
+                    const arg_node: NodeIndex = @intCast(args2[0]);
+                    return try ctx.emitEnumValuesView(arg_node, name, expr, diag);
                 }
                 if (std.mem.eql(u8, name, "formatStruct")) {
                     const args = ast.extraSlice(ast.data(expr).rhs);
@@ -7906,7 +7987,7 @@ const GenContext = struct {
     fn isPoolArgType(ctx: *GenContext, args: []const u32, diag: Diagnostic) ?bool {
         if (args.len == 0) return null;
         const arg_type = typeTextForExpr(ctx, @intCast(args[0]), diag) orelse return null;
-        const base = firstTypeWord(stripPointerText(arg_type));
+        const base = firstTypeWord(arg_type);
         if (std.mem.eql(u8, base, "Pool")) return false;
         if (std.mem.eql(u8, base, "Flat_Pool")) return true;
         return null;
@@ -9100,10 +9181,7 @@ const GenContext = struct {
 
     fn genTypedPlaceholderValue(ctx: *GenContext, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         if (ctx.typed) |typed| return ctx.genPlaceholderForType(typed.typeOf(source_node), source_node, diag);
-        const reg = ctx.proc.num_registers;
-        ctx.proc.num_registers += 1;
-        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = reg, .arg1 = 0, .source_node = source_node });
-        return reg;
+        return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "cannot generate value for unresolved expression", .{});
     }
 
     fn genPlaceholderForType(ctx: *GenContext, ty: Type, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
@@ -10231,7 +10309,7 @@ fn displayTypeArgumentValue(raw_value: []const u8) []const u8 {
 }
 
 fn asFieldInfoForConversion(ctx: *GenContext, source_type: []const u8, target_type: []const u8, diag: Diagnostic) !?FieldInfo {
-    const type_name = firstTypeWord(stripPointerText(source_type));
+    const type_name = firstTypeWord(source_type);
     if (type_name.len == 0) return null;
     const type_node = try structTypeNodeByName(ctx, type_name) orelse {
         if (ctx.type_context_parent) |parent| return try asFieldInfoForConversion(parent, source_type, target_type, diag);
@@ -10627,7 +10705,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (ast.tokens[ast.mainToken(expr)].tag == .keyword_type_info) {
                 const operand = ast.data(expr).lhs;
                 if (operand != @import("Ast.zig").null_node and operand < ast.node_tags.items.len) {
-                    const type_name = firstTypeWord(stripPointerText(ctx.nodeSource(operand)));
+                    const type_name = firstTypeWord(ctx.nodeSource(operand));
                     const is_struct = if (structTypeNodeByName(ctx, type_name)) |type_node|
                         type_node != null
                     else |_|
@@ -10691,7 +10769,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 const type_node = if (ast.tag(decl) == .var_decl) ast.data(decl).lhs else @import("Ast.zig").null_node;
                 if (type_node != @import("Ast.zig").null_node) {
                     const declared = ctx.nodeSource(type_node);
-                    const declared_name = firstTypeWord(stripPointerText(declared));
+                    const declared_name = firstTypeWord(declared);
                     if (ctx.polymorph_types.get(declared_name)) |actual| {
                         if (std.mem.startsWith(u8, std.mem.trim(u8, declared, " \t\r\n"), "*")) {
                             return ctx.ownedTypeTextFmt("*{s}", .{actual}) catch actual;
@@ -10741,7 +10819,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "value_type") or std.mem.eql(u8, field_name, "_s64")) return "int";
                 if (std.mem.eql(u8, field_name, "_string")) return "string";
             }
-            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Code_Note")) {
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Code_Note")) {
                 if (std.mem.eql(u8, field_name, "text")) return "string";
             }
             if (isCodeArgumentTypeText(base_ty)) {
@@ -10754,7 +10832,7 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
             if (std.mem.eql(u8, firstTypeWord(base_ty), "Calendar")) {
                 if (isCalendarFieldName(field_name)) return "int";
             }
-            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Struct")) {
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Type_Info_Struct")) {
                 if (std.mem.eql(u8, field_name, "type")) return "int";
                 if (std.mem.eql(u8, field_name, "name")) return "string";
                 if (std.mem.eql(u8, field_name, "members")) return "[..] Type_Info_Struct_Member";
@@ -10765,11 +10843,11 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, field_name, "pointer_to")) return "Type";
                 if (std.mem.eql(u8, field_name, "notes")) return "string";
             }
-            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Pointer")) {
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Type_Info_Pointer")) {
                 if (std.mem.eql(u8, field_name, "type")) return "int";
                 if (std.mem.eql(u8, field_name, "pointer_to")) return "Type";
             }
-            if (std.mem.eql(u8, firstTypeWord(stripPointerText(base_ty)), "Type_Info_Struct_Member")) {
+            if (std.mem.eql(u8, firstTypeWord(base_ty), "Type_Info_Struct_Member")) {
                 if (std.mem.eql(u8, field_name, "name")) return "string";
                 if (std.mem.eql(u8, field_name, "type")) return "*Type";
                 if (std.mem.eql(u8, field_name, "flags") or std.mem.eql(u8, field_name, "offset_in_bytes")) return "int";
@@ -10957,6 +11035,8 @@ fn typeTextForExpr(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) ?[]const
                 if (std.mem.eql(u8, name, "make_location")) return "Source_Code_Location";
                 if (std.mem.eql(u8, name, "split")) return "[..] string";
                 if (std.mem.eql(u8, name, "get_command_line_arguments")) return "[..] string";
+                if (std.mem.eql(u8, name, "enum_values_as_s64") or std.mem.eql(u8, name, "enum_values_as_enum")) return "[] s64";
+                if (std.mem.eql(u8, name, "enum_names")) return "[] string";
                 if (std.mem.eql(u8, name, "New") and args.len >= 1) {
                     const type_arg: NodeIndex = @intCast(args[0]);
                     const type_text = ctx.nodeSource(type_arg);
@@ -11005,7 +11085,7 @@ fn typeTextForDecl(ctx: *GenContext, decl: NodeIndex, diag: Diagnostic) ?[]const
             const type_node = ast.data(decl).lhs;
             if (type_node != @import("Ast.zig").null_node and type_node < ast.node_tags.items.len) {
                 const declared = ctx.nodeSource(type_node);
-                const name = firstTypeWord(stripPointerText(declared));
+                const name = firstTypeWord(declared);
                 if (ctx.polymorph_types.get(name)) |actual| {
                     if (std.mem.startsWith(u8, std.mem.trim(u8, declared, " \t\r\n"), "*")) {
                         break :blk ctx.ownedTypeTextFmt("*{s}", .{actual}) catch actual;
@@ -11120,7 +11200,7 @@ fn isTypeInfoTagContext(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) boo
     if (expr == @import("Ast.zig").null_node or expr >= ast.node_tags.items.len or ast.tag(expr) != .field_access) return false;
     if (!std.mem.eql(u8, ast.tokenSlice(ast.data(expr).rhs), "type")) return false;
     const base_ty = typeTextForExpr(ctx, ast.data(expr).lhs, diag) orelse return false;
-    const base_name = firstTypeWord(stripPointerText(base_ty));
+    const base_name = firstTypeWord(base_ty);
     return std.mem.eql(u8, firstTypeWord(base_ty), "Type") or
         std.mem.eql(u8, base_name, "Type_Info_Pointer") or
         std.mem.eql(u8, base_name, "Type_Info_Struct");
@@ -11314,7 +11394,7 @@ fn optimizationTypeValue(name: []const u8) ?i64 {
 }
 
 fn isCompilerMessageTypeText(raw: []const u8) bool {
-    const first = firstTypeWord(stripPointerText(raw));
+    const first = firstTypeWord(raw);
     return std.mem.eql(u8, first, "Message") or
         std.mem.eql(u8, first, "Message_File") or
         std.mem.eql(u8, first, "Message_Import") or
@@ -11496,7 +11576,7 @@ fn integerMemoryAccessFlags(raw: []const u8, size: u64) u32 {
 }
 
 fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8, diag: Diagnostic) anyerror!?FieldInfo {
-    const type_name = firstTypeWord(stripPointerText(raw_type));
+    const type_name = firstTypeWord(raw_type);
     if (type_name.len == 0) {
         if (isViewArrayTypeText(raw_type)) {
             if (std.mem.eql(u8, field_name, "count")) return .{ .offset = 0, .type_text = "int" };
@@ -11505,7 +11585,7 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
         return null;
     }
     if (ctx.polymorph_types.get(type_name)) |actual_type| {
-        if (!std.mem.eql(u8, actual_type, raw_type) and !std.mem.eql(u8, firstTypeWord(stripPointerText(actual_type)), type_name))
+        if (!std.mem.eql(u8, actual_type, raw_type) and !std.mem.eql(u8, firstTypeWord(actual_type), type_name))
             return try fieldInfoFromTypeText(ctx, actual_type, field_name, diag);
     }
     if (anonymousContainerBodyText(raw_type)) |body| return try containerFieldInfoFromBody(ctx, body, field_name, diag);
@@ -11550,7 +11630,7 @@ fn typeTextIsStruct(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) !b
     const type_name = firstTypeWord(stripped);
     if (type_name.len == 0) return false;
     if (ctx.polymorph_types.get(type_name)) |actual_type| {
-        if (!std.mem.eql(u8, firstTypeWord(stripPointerText(actual_type)), type_name)) return try typeTextIsStruct(ctx, actual_type, diag);
+        if (!std.mem.eql(u8, firstTypeWord(actual_type), type_name)) return try typeTextIsStruct(ctx, actual_type, diag);
     }
     if (anonymousContainerBodyText(raw_type) != null) return true;
     if (std.mem.eql(u8, type_name, "Allocator") or std.mem.eql(u8, type_name, "Pool") or std.mem.eql(u8, type_name, "Flat_Pool")) return true;
@@ -12054,7 +12134,7 @@ fn compoundAssignmentOpcode(ctx: *GenContext, lhs: NodeIndex, rhs: NodeIndex, op
 fn exprUsesFloatArithmetic(ctx: *GenContext, expr: NodeIndex, diag: Diagnostic) bool {
     if (ctx.typed != null and ctx.typed.?.typeOf(expr).isFloat()) return true;
     const type_text = typeTextForExpr(ctx, expr, diag) orelse return false;
-    const name = firstTypeWord(stripPointerText(std.mem.trim(u8, type_text, " \t\r\n")));
+    const name = firstTypeWord(std.mem.trim(u8, type_text, " \t\r\n"));
     return std.mem.eql(u8, name, "float") or
         std.mem.eql(u8, name, "float32") or
         std.mem.eql(u8, name, "float64");
@@ -12424,7 +12504,7 @@ fn procHasSourceLocationAbi(ast: *const Ast, proc: NodeIndex) bool {
 }
 
 fn isCompileTimeOnlyHostTypeText(text: []const u8) bool {
-    const name = firstTypeWord(stripPointerText(text));
+    const name = firstTypeWord(text);
     return std.mem.eql(u8, name, "Code") or
         std.mem.startsWith(u8, name, "Code_") or
         std.mem.eql(u8, name, "Source_Code_Location") or
@@ -12435,7 +12515,7 @@ fn isCompileTimeOnlyHostTypeText(text: []const u8) bool {
 }
 
 fn typeTextCanUseDirectCall(text: []const u8) bool {
-    const name = firstTypeWord(stripPointerText(text));
+    const name = firstTypeWord(text);
     return std.mem.eql(u8, name, "Source_Code_Location") or
         std.mem.eql(u8, name, "Build_Options") or
         std.mem.eql(u8, name, "Build_Options_LLVM_Options");
@@ -12545,7 +12625,7 @@ fn nodeContainsCompileTimeOnlyCompilerApi(ast: *const Ast, node: NodeIndex, seen
         .unary_expr => {
             if (ast.tokens[ast.mainToken(node)].tag == .keyword_cast and data.rhs != @import("Ast.zig").null_node) {
                 const target: NodeIndex = @intCast(data.rhs & 0x7fffffff);
-                const target_name = firstTypeWord(stripPointerText(nodeSourceText(ast, target)));
+                const target_name = firstTypeWord(nodeSourceText(ast, target));
                 if (std.mem.startsWith(u8, target_name, "Type_Info")) return true;
             }
             return nodeContainsCompileTimeOnlyCompilerApi(ast, data.lhs, seen);
@@ -12839,7 +12919,7 @@ fn explicitContainerArgValue(args_text: []const u8, param_name: []const u8, posi
 }
 
 fn containerParameterValueText(ctx: *GenContext, raw_type: []const u8, field_name: []const u8) !?[]const u8 {
-    const type_name = firstTypeWord(stripPointerText(raw_type));
+    const type_name = firstTypeWord(raw_type);
     if (type_name.len == 0) return null;
     const type_node = try structTypeNodeByName(ctx, type_name) orelse return null;
     const params_text = containerTypeParameterText(ctx.ast, type_node) orelse return null;
@@ -13833,7 +13913,9 @@ fn alignForward(value: u64, alignment: u64) u64 {
     return if (remainder == 0) value else value + alignment - remainder;
 }
 
-fn firstTypeWord(text: []const u8) []const u8 {
+fn firstTypeWord(raw: []const u8) []const u8 {
+    var text = std.mem.trim(u8, raw, " \t\r\n");
+    while (std.mem.startsWith(u8, text, "*")) text = std.mem.trim(u8, text[1..], " \t\r\n");
     var end: usize = 0;
     while (end < text.len) : (end += 1) {
         const c = text[end];
@@ -14440,7 +14522,7 @@ fn emitFormattedStructValue(ctx: *GenContext, base_reg: Bytecode.Register, raw_t
 }
 
 fn emitFormattedStructValueWithOptions(ctx: *GenContext, base_reg: Bytecode.Register, raw_type: []const u8, source_node: NodeIndex, options: FormatStructPrintOptions, diag: Diagnostic) anyerror!void {
-    const type_name = firstTypeWord(stripPointerText(raw_type));
+    const type_name = firstTypeWord(raw_type);
     if (ctx.polymorph_types.get(type_name)) |actual_type| {
         try emitFormattedStructValueWithOptions(ctx, base_reg, actual_type, source_node, options, diag);
         return;
@@ -14521,7 +14603,7 @@ fn builderSlotArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.
         if (ctx.resolved.local_values.get(arg)) |decl| {
             if (decl != @import("Ast.zig").null_node) {
                 if (typeTextForExpr(ctx, arg, diag)) |ty| {
-                    if (std.mem.eql(u8, firstTypeWord(stripPointerText(ty)), "String_Builder")) {
+                    if (std.mem.eql(u8, firstTypeWord(ty), "String_Builder")) {
                         if (std.mem.startsWith(u8, std.mem.trim(u8, ty, " \t\r\n"), "*")) {
                             if (ctx.decl_registers.get(decl)) |reg| return reg;
                         }
@@ -14529,7 +14611,7 @@ fn builderSlotArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.
                     }
                 }
             } else if (ctx.external_types.get(name)) |ty| {
-                if (std.mem.eql(u8, firstTypeWord(stripPointerText(ty)), "String_Builder")) {
+                if (std.mem.eql(u8, firstTypeWord(ty), "String_Builder")) {
                     if (std.mem.startsWith(u8, std.mem.trim(u8, ty, " \t\r\n"), "*")) {
                         if (ctx.external_registers.get(name)) |reg| return reg;
                     }
@@ -14538,7 +14620,7 @@ fn builderSlotArg(ctx: *GenContext, arg: NodeIndex, diag: Diagnostic) !Bytecode.
             }
         } else {
             if (ctx.external_types.get(name)) |ty| {
-                if (std.mem.eql(u8, firstTypeWord(stripPointerText(ty)), "String_Builder")) {
+                if (std.mem.eql(u8, firstTypeWord(ty), "String_Builder")) {
                     if (std.mem.startsWith(u8, std.mem.trim(u8, ty, " \t\r\n"), "*")) {
                         if (ctx.external_registers.get(name)) |reg| return reg;
                     }

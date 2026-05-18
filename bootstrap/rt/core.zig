@@ -1,5 +1,8 @@
 const std = @import("std");
 
+// Must match type_info_base_id in codegen/llvm.zig.
+const USER_TYPE_ID_OFFSET: usize = 0x10000;
+
 var debug_state: enum(u8) { unchecked, off, on } = .unchecked;
 
 fn isDebugEnabled() bool {
@@ -346,8 +349,8 @@ export fn __openjai_print_type(type_id: u64) void {
     };
     if (text) |t| {
         writeAll(t);
-    } else if (type_id >= 1000) {
-        const idx = type_id - 1000;
+    } else if (type_id >= USER_TYPE_ID_OFFSET) {
+        const idx = type_id - USER_TYPE_ID_OFFSET;
         if (type_info_table) |table| {
             if (idx < type_info_count) {
                 const entry = table[idx];
@@ -355,16 +358,19 @@ export fn __openjai_print_type(type_id: u64) void {
                 return;
             }
         }
-        writeAll("<unknown type>");
+        writeAll("runtime error: print_type called with unknown type_id\n");
+        oj_rt_exit(1);
     } else if (type_info_table) |table| {
         if (type_id < type_info_count) {
             const entry = table[type_id];
             writeAll(entry.name_ptr[0..entry.name_len]);
         } else {
-            writeAll("<unknown type>");
+            writeAll("runtime error: print_type called with unknown type_id\n");
+            oj_rt_exit(1);
         }
     } else {
-        writeAll("<unknown type>");
+        writeAll("runtime error: print_type called with unknown type_id (no type table)\n");
+        oj_rt_exit(1);
     }
 }
 
@@ -1697,14 +1703,17 @@ export fn __openjai_set_type_info_table(table: [*]const TypeInfoEntry, count: us
 fn resolveTypeInfoIndex(type_id: i64) ?usize {
     if (type_id < 0) return null;
     const raw: usize = @intCast(type_id);
-    const idx: usize = if (raw >= 1000) raw - 1000 else raw;
+    const idx: usize = if (raw >= USER_TYPE_ID_OFFSET) raw - USER_TYPE_ID_OFFSET else raw;
     if (idx >= type_info_count) return null;
     return idx;
 }
 
 export fn __openjai_type_info_name(type_id: i64) ?*OpenJaiRuntimeString {
     if (builtinTypeName(@intCast(@as(u64, @bitCast(type_id))))) |name| return makeRuntimeString(name);
-    const idx = resolveTypeInfoIndex(type_id) orelse return makeRuntimeString("<?>");
+    const idx = resolveTypeInfoIndex(type_id) orelse {
+        writeAll("runtime error: type_info_name called with unknown type_id\n");
+        oj_rt_exit(1);
+    };
     const entry = type_info_table.?[idx];
     return makeRuntimeString(entry.name_ptr[0..entry.name_len]);
 }
