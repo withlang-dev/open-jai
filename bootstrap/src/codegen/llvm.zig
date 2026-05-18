@@ -2333,9 +2333,7 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 const cond = try valueAsBool(env, registers[inst.arg1], diag);
                 const then_val = registers[inst.arg2];
                 const else_val = registers[inst.arg3];
-                if ((then_val.kind == .int or then_val.kind == .uint) and (else_val.kind == .int or else_val.kind == .uint)) {
-                    try setIntResult(env, registers, inst.dest, c.LLVMBuildSelect(env.builder, cond, then_val.llvm_value, else_val.llvm_value, "ifx"));
-                } else if ((then_val.kind == .bool or then_val.kind == .bool_addr) and (else_val.kind == .bool or else_val.kind == .bool_addr)) {
+                if ((then_val.kind == .bool or then_val.kind == .bool_addr) and (else_val.kind == .bool or else_val.kind == .bool_addr)) {
                     try setBoolResult(env, registers, inst.dest, c.LLVMBuildSelect(env.builder, cond, try valueAsBool(env, then_val, diag), try valueAsBool(env, else_val, diag), "ifx"));
                 } else if (isStringValue(then_val) and isStringValue(else_val)) {
                     const then_string = try runtimeStringValue(env, then_val, diag);
@@ -2346,7 +2344,9 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                     const else_float = try valueAsFloat(env, else_val, diag);
                     try setFloatResult(env, registers, inst.dest, c.LLVMBuildSelect(env.builder, cond, then_float, else_float, "ifx"));
                 } else {
-                    registers[inst.dest] = then_val;
+                    const then_int = try valueAsInt(env, then_val, diag);
+                    const else_int = try valueAsInt(env, else_val, diag);
+                    try setIntResult(env, registers, inst.dest, c.LLVMBuildSelect(env.builder, cond, then_int, else_int, "ifx"));
                 }
             },
             .assert_true => {
