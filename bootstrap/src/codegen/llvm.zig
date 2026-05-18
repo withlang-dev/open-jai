@@ -3093,22 +3093,11 @@ fn emitBuilderAppendValue(env: *LlvmEnv, builder_slot_value: RegisterValue, arg:
 }
 
 fn emitPrintPointerOrNull(env: *LlvmEnv, int_value: c.LLVMValueRef) !void {
-    const func = c.LLVMGetBasicBlockParent(c.LLVMGetInsertBlock(env.builder));
-    const is_null = c.LLVMBuildICmp(env.builder, c.LLVMIntEQ, int_value, c.LLVMConstInt(env.llvm_i64, 0, 0), "ptr_is_null");
-    const then_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_null");
-    const else_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_nonnull");
-    const merge_bb = c.LLVMAppendBasicBlockInContext(env.context, func, "ptr_merge");
-    _ = c.LLVMBuildCondBr(env.builder, is_null, then_bb, else_bb);
-    c.LLVMPositionBuilderAtEnd(env.builder, then_bb);
-    const null_str = c.LLVMBuildGlobalStringPtr(env.builder, "null", "null_str");
-    var null_args = [_]c.LLVMValueRef{ null_str, c.LLVMConstInt(env.llvm_i64, 4, 0) };
-    _ = c.LLVMBuildCall2(env.builder, env.print_fn_ty, env.print_fn, &null_args, null_args.len, "");
-    _ = c.LLVMBuildBr(env.builder, merge_bb);
-    c.LLVMPositionBuilderAtEnd(env.builder, else_bb);
-    var hex_args = [_]c.LLVMValueRef{ int_value, c.LLVMConstInt(env.llvm_i64, 16, 0), c.LLVMConstInt(env.llvm_i64, 0, 0) };
-    _ = c.LLVMBuildCall2(env.builder, env.print_format_int_fn_ty, env.print_format_int_fn, &hex_args, hex_args.len, "");
-    _ = c.LLVMBuildBr(env.builder, merge_bb);
-    c.LLVMPositionBuilderAtEnd(env.builder, merge_bb);
+    const params = [_]c.LLVMTypeRef{env.llvm_i64};
+    const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+    const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_print_pointer") orelse c.LLVMAddFunction(env.module, "__openjai_print_pointer", fn_ty);
+    var args = [_]c.LLVMValueRef{int_value};
+    _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
 }
 
 fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {

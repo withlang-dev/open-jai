@@ -222,6 +222,48 @@ export fn __openjai_print_format_int(value: i64, base: i64, minimum_digits: i64)
     writeAll(buf[0..out_len]);
 }
 
+export fn __openjai_print_pointer(value: u64) void {
+    if (value == 0) {
+        writeAll("null");
+        return;
+    }
+    const digits = "0123456789abcdef";
+    var tmp: [16]u8 = undefined;
+    var n = value;
+    var len: usize = 0;
+    while (true) {
+        tmp[tmp.len - 1 - len] = digits[@intCast(n % 16)];
+        len += 1;
+        n /= 16;
+        if (n == 0) break;
+    }
+    // Insert underscores every 4 hex digits from the right.
+    var buf: [32]u8 = undefined;
+    var out_len: usize = 0;
+    var hex_count: usize = 0;
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (hex_count > 0 and hex_count % 4 == 0) {
+            buf[out_len] = '_';
+            out_len += 1;
+        }
+        buf[out_len] = tmp[tmp.len - len + (len - 1 - i)];
+        out_len += 1;
+        hex_count += 1;
+    }
+    // Reverse the output since we built it from LSB.
+    var lo: usize = 0;
+    var hi: usize = out_len - 1;
+    while (lo < hi) {
+        const t = buf[lo];
+        buf[lo] = buf[hi];
+        buf[hi] = t;
+        lo += 1;
+        hi -= 1;
+    }
+    writeAll(buf[0..out_len]);
+}
+
 export fn __openjai_print_float(value: f64) void {
     if (writeLargeFloat32IntegerText(value)) return;
     var buf: [128]u8 = undefined;
