@@ -728,7 +728,15 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
             },
             .load_type_text => {
                 if (inst.dest >= registers.len or inst.arg1 >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend type-text load out of range", .{});
-                registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
+                const type_name = env.program.strings.items[inst.arg1];
+                const builtin_id = typeIdFromTypeTextLlvm(type_name);
+                if (builtin_id != 0) {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, builtin_id, 0), .kind = .type_id };
+                } else if (env.program.typeInfoIndexByName(type_name)) |idx| {
+                    registers[inst.dest] = .{ .llvm_value = c.LLVMConstInt(env.llvm_i64, type_info_base_id + idx, 0), .kind = .type_id };
+                } else {
+                    registers[inst.dest] = try staticStringRegister(env, inst.arg1, diag);
+                }
             },
             .type_to_string => {
                 if (inst.dest >= registers.len or inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend type_to_string register out of range", .{});
@@ -2605,6 +2613,24 @@ const RegisterValue = struct {
     };
 };
 
+const type_info_base_id: u64 = 1000;
+
+fn typeIdFromTypeTextLlvm(name: []const u8) u64 {
+    if (std.mem.eql(u8, name, "bool")) return 1;
+    if (std.mem.eql(u8, name, "s32") or std.mem.eql(u8, name, "u32")) return 4;
+    if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "s64") or std.mem.eql(u8, name, "u64")) return 5;
+    if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "s8")) return 7;
+    if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "s16")) return 8;
+    if (std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "float32")) return 12;
+    if (std.mem.eql(u8, name, "float64")) return 13;
+    if (std.mem.eql(u8, name, "string")) return 14;
+    if (std.mem.eql(u8, name, "Type")) return 15;
+    if (std.mem.eql(u8, name, "Any")) return 16;
+    if (std.mem.eql(u8, name, "Vector3")) return 17;
+    if (std.mem.eql(u8, name, "Vector4")) return 22;
+    return 0;
+}
+
 fn staticStringRegister(env: *LlvmEnv, string_idx: Bytecode.StringIndex, diag: Diagnostic) !RegisterValue {
     if (string_idx >= env.program.strings.items.len) return diag.failAt(0, "LLVM backend string index out of range", .{});
     const bytes = env.program.strings.items[string_idx];
@@ -3106,7 +3132,14 @@ fn emitPrintValue(env: *LlvmEnv, arg: RegisterValue, diag: Diagnostic) !void {
             var args = [_]c.LLVMValueRef{try valueAsBool(env, arg, diag)};
             _ = c.LLVMBuildCall2(env.builder, env.print_bool_fn_ty, env.print_bool_fn, &args, args.len, "");
         },
-        .tuple => return diag.failAt(0, "LLVM backend cannot print an undestructured multi-return value", .{}),
+        .tuple => |types| {
+            if (types.len == 0) return;
+            const first = c.LLVMBuildExtractValue(env.builder, arg.llvm_value, 0, "print_tuple_first");
+            const first_type = types[0];
+            var first_reg = RegisterValue{ .llvm_value = first, .kind = .unset };
+            try setTypedResult(env, @as(*[1]RegisterValue, &first_reg), 0, first, first_type);
+            try emitPrintValue(env, first_reg, diag);
+        },
         .unset => return diag.failAt(0, "LLVM backend print argument register was not initialized", .{}),
     }
 }

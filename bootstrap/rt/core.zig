@@ -325,7 +325,7 @@ export fn __openjai_print_bool(value: bool) void {
 }
 
 export fn __openjai_print_type(type_id: u64) void {
-    const text = switch (type_id) {
+    const text: ?[]const u8 = switch (type_id) {
         1 => "bool",
         4 => "s32",
         5 => "s64",
@@ -342,9 +342,30 @@ export fn __openjai_print_type(type_id: u64) void {
         21 => "float",
         30 => "procedure (s64, s64, s64) -> s64",
         31 => "procedure ()",
-        else => "<unknown type>",
+        else => null,
     };
-    writeAll(text);
+    if (text) |t| {
+        writeAll(t);
+    } else if (type_id >= 1000) {
+        const idx = type_id - 1000;
+        if (type_info_table) |table| {
+            if (idx < type_info_count) {
+                const entry = table[idx];
+                writeAll(entry.name_ptr[0..entry.name_len]);
+                return;
+            }
+        }
+        writeAll("<unknown type>");
+    } else if (type_info_table) |table| {
+        if (type_id < type_info_count) {
+            const entry = table[type_id];
+            writeAll(entry.name_ptr[0..entry.name_len]);
+        } else {
+            writeAll("<unknown type>");
+        }
+    } else {
+        writeAll("<unknown type>");
+    }
 }
 
 export fn __openjai_alloc(size: usize) ?*anyopaque {
