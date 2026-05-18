@@ -4911,6 +4911,14 @@ const GenContext = struct {
                     const size_reg = try ctx.emitInt(source_node, @intCast(elem_size));
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = value_reg, .arg2 = size_reg, .source_node = source_node });
                 }
+            } else if (isStaticArrayTypeText(elem_text)) {
+                if (isArrayLiteralNode(ast, value_node)) {
+                    try ctx.emitStaticArrayLiteralIntoAddress(addr, value_node, elem_text, source_node, diag);
+                } else {
+                    const value_reg = try ctx.genExpr(value_node, diag);
+                    const size_reg = try ctx.emitInt(source_node, @intCast(elem_size));
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = value_reg, .arg2 = size_reg, .source_node = source_node });
+                }
             } else {
                 const value_reg = try ctx.genExpr(value_node, diag);
                 const opcode: Bytecode.Opcode = if (elem_size == 1)
