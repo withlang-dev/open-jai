@@ -5564,6 +5564,7 @@ const GenContext = struct {
             .string_literal => {
                 const token_tag = ast.tokens[ast.mainToken(expr)].tag;
                 if (token_tag == .directive_file) return try ctx.emitString(expr, std.fs.path.basename(diag.file_path));
+                if (token_tag == .directive_procedure_name) return try ctx.emitString(expr, ctx.proc.name);
                 if (token_tag == .directive_filepath) {
                     const source_path = try canonicalSourcePath(program.allocator, diag.file_path);
                     defer program.allocator.free(source_path);
