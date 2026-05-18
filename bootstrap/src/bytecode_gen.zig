@@ -5293,7 +5293,7 @@ const GenContext = struct {
             }
         }
         const struct_notes = try extractStructNotes(ctx, type_node);
-        const tag: u32 = if (ctx.ast.tag(type_node) == .union_type) typeInfoTagValue("UNION").? else typeInfoTagValue("STRUCT").?;
+        const tag: u32 = if (ctx.ast.tag(type_node) == .enum_type) typeInfoTagValue("ENUM").? else if (ctx.ast.tag(type_node) == .union_type) typeInfoTagValue("UNION").? else typeInfoTagValue("STRUCT").?;
         const idx = try ctx.program.addTypeInfo(type_name, tag, members.items);
         ctx.program.type_infos.items[idx].notes = struct_notes;
     }
@@ -11575,7 +11575,7 @@ fn structTypeNodeByName(ctx: *GenContext, name: []const u8) !?NodeIndex {
             if (!std.mem.eql(u8, alias, name)) return try structTypeNodeByName(ctx, alias);
             return null;
         }
-        if (ast.tag(local_type_node) == .struct_type or ast.tag(local_type_node) == .union_type) return local_type_node;
+        if (ast.tag(local_type_node) == .struct_type or ast.tag(local_type_node) == .union_type or ast.tag(local_type_node) == .enum_type) return local_type_node;
         if (ast.tag(local_type_node) == .call_expr) {
             const called = ast.data(local_type_node).lhs;
             if (ast.tag(called) == .identifier or ast.tag(called) == .type_expr) {
@@ -11594,7 +11594,7 @@ fn structTypeNodeByName(ctx: *GenContext, name: []const u8) !?NodeIndex {
     if (decl == @import("Ast.zig").null_node or decl >= ast.node_tags.items.len) return null;
     const type_node = if (ast.tag(decl) == .const_decl) ast.data(decl).lhs else decl;
     if (ast.tag(type_node) == .identifier or ast.tag(type_node) == .type_expr) return try structTypeNodeByName(ctx, ast.tokenSlice(ast.mainToken(type_node)));
-    if (ast.tag(type_node) != .struct_type and ast.tag(type_node) != .union_type) return null;
+    if (ast.tag(type_node) != .struct_type and ast.tag(type_node) != .union_type and ast.tag(type_node) != .enum_type) return null;
     return type_node;
 }
 
