@@ -3621,7 +3621,22 @@ const GenContext = struct {
                 }
                 return false;
             },
-            .if_stmt, .while_stmt, .for_stmt, .defer_stmt, .expr_stmt, .return_stmt, .var_decl, .const_decl, .unary_expr, .field_access, .index_expr, .meta_expr, .meta_stmt, .run_expr, .ifx_expr => {
+            .if_stmt => {
+                const data = ast.data(node);
+                if (try ctx.nodeAssignsDeclInner(data.lhs, decl, visited)) return true;
+                for (ast.extraSlice(data.rhs)) |child| {
+                    if (try ctx.nodeAssignsDeclInner(@intCast(child), decl, visited)) return true;
+                }
+                return false;
+            },
+            .for_stmt => {
+                const data = ast.data(node);
+                for (ast.extraSlice(data.lhs)) |child| {
+                    if (try ctx.nodeAssignsDeclInner(@intCast(child), decl, visited)) return true;
+                }
+                return try ctx.nodeAssignsDeclInner(data.rhs, decl, visited);
+            },
+            .while_stmt, .defer_stmt, .expr_stmt, .return_stmt, .var_decl, .const_decl, .unary_expr, .field_access, .index_expr, .meta_expr, .meta_stmt, .run_expr, .ifx_expr => {
                 const data = ast.data(node);
                 return try ctx.nodeAssignsDeclInner(data.lhs, decl, visited) or try ctx.nodeAssignsDeclInner(data.rhs, decl, visited);
             },
