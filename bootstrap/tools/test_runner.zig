@@ -227,11 +227,17 @@ fn extractExpected(source: []const u8, allocator: std.mem.Allocator, out: *std.A
         const before = line[0..pos];
         if (std.mem.indexOf(u8, before, "//") != null) continue;
         const after_marker = line[pos + marker.len ..];
-        // Strip exactly one leading space if present.
-        const text = if (after_marker.len > 0 and after_marker[0] == ' ')
+        // Strip exactly one leading space if present, and trim trailing whitespace.
+        const raw_text = if (after_marker.len > 0 and after_marker[0] == ' ')
             after_marker[1..]
         else
             after_marker;
+        // Strip trailing inline comments (e.g., "32 // (bytes)" → "32")
+        const stripped_text = if (std.mem.indexOf(u8, raw_text, " //")) |comment_pos|
+            raw_text[0..comment_pos]
+        else
+            raw_text;
+        const text = std.mem.trimEnd(u8, stripped_text, &[_]u8{ ' ', '\t', '\r' });
         // Skip empty annotations and Error: annotations (compile-time error docs).
         if (text.len == 0) continue;
         if (std.mem.startsWith(u8, text, "Error:")) continue;
