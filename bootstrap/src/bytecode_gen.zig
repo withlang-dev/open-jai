@@ -271,6 +271,7 @@ const GenContext = struct {
         result_type: NodeIndex = @import("Ast.zig").null_node,
         defer_depth: usize = 0,
         patches: std.ArrayList(usize) = .empty,
+        named_return_decls: []const NodeIndex = &.{},
     };
 
     const AllocatorBinding = struct {
@@ -1624,6 +1625,14 @@ const GenContext = struct {
         ctx.current_proc_node = proc_node;
         defer ctx.current_proc_node = previous_proc_node;
         const stmts = ast.extraSlice(ast.data(ast.data(proc_node).lhs).lhs);
+        // Detect named return var_decls prepended by the parser
+        const named_ret_count = countNamedReturnDecls(ast, sig.return_type, stmts);
+        var named_ret_buf: [8]NodeIndex = undefined;
+        if (named_ret_count > 0 and named_ret_count <= named_ret_buf.len) {
+            for (0..named_ret_count) |i| named_ret_buf[i] = @intCast(stmts[i]);
+            frame.named_return_decls = named_ret_buf[0..named_ret_count];
+        }
+
         for (stmts) |stmt_idx| try ctx.genStmt(@intCast(stmt_idx), diag);
         const end_index: u32 = @intCast(ctx.proc.instructions.items.len);
         for (frame.patches.items) |patch| ctx.proc.instructions.items[patch].arg1 = end_index;
@@ -4411,6 +4420,26 @@ const GenContext = struct {
             .return_stmt => {
                 const value = ast.data(stmt).lhs;
                 if (ctx.inline_return) |frame| {
+                    // Bare `return;` with named return variables: load their values into result_regs
+                    if (value == @import("Ast.zig").null_node and frame.named_return_decls.len > 0) {
+                        if (frame.result_regs.len > 0) {
+                            for (frame.named_return_decls, 0..) |decl, i| {
+                                if (i >= frame.result_regs.len) break;
+                                if (ctx.decl_registers.get(decl)) |reg| {
+                                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_regs[i], .arg1 = reg, .source_node = stmt });
+                                }
+                            }
+                        } else if (frame.named_return_decls.len > 0) {
+                            if (ctx.decl_registers.get(frame.named_return_decls[0])) |reg| {
+                                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_reg, .arg1 = reg, .source_node = stmt });
+                            }
+                        }
+                        try ctx.emitDeferred(frame.defer_depth, diag);
+                        const patch_idx = ctx.proc.instructions.items.len;
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump, .arg1 = 0, .source_node = stmt });
+                        try frame.patches.append(ctx.program.allocator, patch_idx);
+                        return;
+                    }
                     if (value != @import("Ast.zig").null_node) {
                         if (frame.result_regs.len != 0 and ast.tag(value) == .stmt_list) {
                             const returns = ast.extraSlice(ast.data(value).lhs);
@@ -4443,6 +4472,15 @@ const GenContext = struct {
                         } else if (frame.result_regs.len != 0) {
                             const reg = try ctx.genExpr(value, diag);
                             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_regs[0], .arg1 = reg, .source_node = stmt });
+                            // Fill remaining result_regs from named return variables
+                            if (frame.named_return_decls.len > 1) {
+                                var ri: usize = 1;
+                                while (ri < frame.result_regs.len and ri < frame.named_return_decls.len) : (ri += 1) {
+                                    if (ctx.decl_registers.get(frame.named_return_decls[ri])) |named_reg| {
+                                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load, .dest = frame.result_regs[ri], .arg1 = named_reg, .source_node = stmt });
+                                    }
+                                }
+                            }
                         } else if (frame.result_type != @import("Ast.zig").null_node) {
                             if (ast.tag(value) == .stmt_list) {
                                 const returns = ast.extraSlice(ast.data(value).lhs);
@@ -4494,8 +4532,42 @@ const GenContext = struct {
                     return;
                 }
                 if (value == @import("Ast.zig").null_node) {
-                    try ctx.emitDeferred(0, diag);
-                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret_void, .source_node = stmt });
+                    var named_ret_result = findNamedReturnDeclsBuf(ctx);
+                    const named_decls = named_ret_result.slice();
+                    if (named_decls.len > 0) {
+                        var regs = std.ArrayList(Bytecode.Register).empty;
+                        var type_ids = std.ArrayList(u32).empty;
+                        defer regs.deinit(ctx.program.allocator);
+                        defer type_ids.deinit(ctx.program.allocator);
+                        for (named_decls) |decl| {
+                            const reg = ctx.decl_registers.get(decl) orelse continue;
+                            try regs.append(ctx.program.allocator, reg);
+                            const decl_type = ast.data(decl).lhs;
+                            const tid: u32 = if (decl_type != @import("Ast.zig").null_node)
+                                typeIdFromTypeExpr(ast, decl_type, diag) catch 5
+                            else
+                                5;
+                            try type_ids.append(ctx.program.allocator, tid);
+                        }
+                        if (regs.items.len > 0) {
+                            if (ctx.proc.return_types.items.len == 0)
+                                try ctx.proc.return_types.appendSlice(ctx.program.allocator, type_ids.items);
+                            const reg_start = try ctx.program.addCallArgs(regs.items);
+                            try ctx.emitDeferred(0, diag);
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{
+                                .opcode = .ret_multi,
+                                .arg1 = reg_start,
+                                .arg2 = @intCast(regs.items.len),
+                                .source_node = stmt,
+                            });
+                        } else {
+                            try ctx.emitDeferred(0, diag);
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret_void, .source_node = stmt });
+                        }
+                    } else {
+                        try ctx.emitDeferred(0, diag);
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret_void, .source_node = stmt });
+                    }
                 } else if (ast.tag(value) == .stmt_list) {
                     const returns = ast.extraSlice(ast.data(value).lhs);
                     var regs = std.ArrayList(Bytecode.Register).empty;
@@ -4560,8 +4632,43 @@ const GenContext = struct {
                         }
                         break :blk try ctx.genExpr(value, diag);
                     };
-                    try ctx.emitDeferred(0, diag);
-                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret, .arg1 = reg, .source_node = stmt });
+                    // Single-value return in a multi-return proc: fill remaining from named return vars
+                    var named_ret_single = findNamedReturnDeclsBuf(ctx);
+                    const named_decls_single = named_ret_single.slice();
+                    if (named_decls_single.len > 1) {
+                        var multi_regs = std.ArrayList(Bytecode.Register).empty;
+                        var multi_tids = std.ArrayList(u32).empty;
+                        defer multi_regs.deinit(ctx.program.allocator);
+                        defer multi_tids.deinit(ctx.program.allocator);
+                        try multi_regs.append(ctx.program.allocator, reg);
+                        const first_type = ast.data(named_decls_single[0]).lhs;
+                        try multi_tids.append(ctx.program.allocator, if (first_type != @import("Ast.zig").null_node) typeIdFromTypeExpr(ast, first_type, diag) catch 5 else 5);
+                        for (named_decls_single[1..]) |nd| {
+                            if (ctx.decl_registers.get(nd)) |nr| {
+                                try multi_regs.append(ctx.program.allocator, nr);
+                                const dt = ast.data(nd).lhs;
+                                try multi_tids.append(ctx.program.allocator, if (dt != @import("Ast.zig").null_node) typeIdFromTypeExpr(ast, dt, diag) catch 5 else 5);
+                            }
+                        }
+                        if (multi_regs.items.len > 1) {
+                            if (ctx.proc.return_types.items.len == 0)
+                                try ctx.proc.return_types.appendSlice(ctx.program.allocator, multi_tids.items);
+                            const multi_start = try ctx.program.addCallArgs(multi_regs.items);
+                            try ctx.emitDeferred(0, diag);
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{
+                                .opcode = .ret_multi,
+                                .arg1 = multi_start,
+                                .arg2 = @intCast(multi_regs.items.len),
+                                .source_node = stmt,
+                            });
+                        } else {
+                            try ctx.emitDeferred(0, diag);
+                            try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret, .arg1 = reg, .source_node = stmt });
+                        }
+                    } else {
+                        try ctx.emitDeferred(0, diag);
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .ret, .arg1 = reg, .source_node = stmt });
+                    }
                 }
             },
             .if_stmt => {
@@ -12434,6 +12541,73 @@ fn procHeaderEnd(ast: *const Ast, proc: NodeIndex) usize {
 fn procHasReturnValue(ast: *const Ast, proc: NodeIndex) bool {
     const sig = procSignature(ast, proc) orelse return false;
     return sig.return_type != @import("Ast.zig").null_node;
+}
+
+fn countNamedReturnDecls(ast: *const Ast, return_type: NodeIndex, stmts: []const u32) usize {
+    if (return_type == @import("Ast.zig").null_node) return 0;
+    // Scan source from just before the return_type token back to find "->",
+    // then forward to "{" to get the full return spec text including names.
+    const ret_tok_start = ast.tokens[ast.mainToken(return_type)].start;
+    var arrow_pos: usize = if (ret_tok_start >= 2) ret_tok_start - 1 else 0;
+    while (arrow_pos > 0) : (arrow_pos -= 1) {
+        if (arrow_pos + 1 < ast.source.len and ast.source[arrow_pos] == '-' and ast.source[arrow_pos + 1] == '>') break;
+    }
+    const scan_start = if (arrow_pos + 2 < ast.source.len and ast.source[arrow_pos] == '-' and ast.source[arrow_pos + 1] == '>') arrow_pos + 2 else ret_tok_start;
+    var scan_end = scan_start;
+    var depth: usize = 0;
+    while (scan_end < ast.source.len) : (scan_end += 1) {
+        switch (ast.source[scan_end]) {
+            '(' => depth += 1,
+            ')' => if (depth > 0) { depth -= 1; },
+            '{' => if (depth == 0) break,
+            '#' => if (depth == 0) break,
+            else => {},
+        }
+    }
+    const ret_spec = std.mem.trim(u8, ast.source[scan_start..scan_end], " \t\r\n");
+    if (ret_spec.len == 0) return 0;
+    var named_count: usize = 0;
+    var cursor: usize = 0;
+    while (nextTopLevelCommaSegment(ret_spec, &cursor)) |seg| {
+        const trimmed = std.mem.trim(u8, seg, " \t\r\n");
+        if (std.mem.indexOfScalar(u8, trimmed, ':') != null) named_count += 1;
+    }
+    if (named_count == 0) return 0;
+    var count: usize = 0;
+    for (stmts) |stmt_idx| {
+        if (count >= named_count) break;
+        const s: NodeIndex = @intCast(stmt_idx);
+        if (ast.tag(s) != .var_decl) break;
+        count += 1;
+    }
+    return count;
+}
+
+const NamedReturnResult = struct {
+    buf: [8]NodeIndex = undefined,
+    len: usize = 0,
+    fn slice(self: *const NamedReturnResult) []const NodeIndex {
+        return self.buf[0..self.len];
+    }
+};
+
+fn findNamedReturnDeclsBuf(ctx: *GenContext) NamedReturnResult {
+    var result = NamedReturnResult{};
+    const ast = ctx.ast;
+    const proc_node = ctx.current_proc_node;
+    if (proc_node == @import("Ast.zig").null_node or proc_node >= ast.node_tags.items.len) return result;
+    if (ast.tag(proc_node) != .proc_decl) return result;
+    const sig = procSignature(ast, proc_node) orelse return result;
+    if (sig.return_type == @import("Ast.zig").null_node) return result;
+    const body = ast.data(proc_node).lhs;
+    if (body == @import("Ast.zig").null_node) return result;
+    if (ast.tag(body) != .block) return result;
+    const stmts = ast.extraSlice(ast.data(body).lhs);
+    const count = countNamedReturnDecls(ast, sig.return_type, stmts);
+    if (count == 0 or count > result.buf.len) return result;
+    for (0..count) |i| result.buf[i] = @intCast(stmts[i]);
+    result.len = count;
+    return result;
 }
 
 fn procSignatureContainsPolymorphicType(ctx: *GenContext, sig: ProcSig) bool {
