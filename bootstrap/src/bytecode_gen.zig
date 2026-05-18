@@ -4048,6 +4048,12 @@ const GenContext = struct {
                     }
                 }
                 if (ctx.resolved.local_values.get(lhs)) |decl| {
+                    if (try genUsingFallbackFieldAddress(ctx, lhs, decl, diag)) |addr| {
+                        const info = (try usingFallbackFieldInfoForIdentifier(ctx, lhs, decl, diag)).?;
+                        const clean_type = std.mem.trim(u8, info.type_text, " \t\r\n");
+                        try emitStoreToAddressForType(ctx, addr, rhs, clean_type, stmt, diag);
+                        return;
+                    }
                     if (ctx.isTopLevelVarDecl(decl)) {
                         const type_node = ast.data(decl).lhs;
                         const type_text = if (type_node != @import("Ast.zig").null_node) ctx.nodeSource(type_node) else typeTextForExpr(ctx, lhs, diag) orelse "int";
@@ -12416,6 +12422,13 @@ fn phase3SizeOf(ctx: *GenContext, operand: NodeIndex, diag: Diagnostic) !u64 {
     }
     if (ast.tag(operand) == .type_of_expr and ast.tag(ast.data(operand).lhs) == .field_access) {
         if (try structFieldSizeFromAccess(ctx, ast.data(operand).lhs, diag)) |size| return size;
+    }
+    if (ast.tag(operand) == .type_of_expr) {
+        const inner = ast.data(operand).lhs;
+        if (typeTextForExpr(ctx, inner, diag)) |type_text| {
+            const size = typeTextSize(ctx, type_text, diag) catch 0;
+            if (size > 0) return size;
+        }
     }
     const type_id = switch (ast.tag(operand)) {
         .type_expr => try typeIdFromToken(ast, ast.mainToken(operand), diag),
