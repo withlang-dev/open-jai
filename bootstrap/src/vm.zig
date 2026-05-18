@@ -1230,6 +1230,10 @@ pub const VM = struct {
                             if (offset + elem_size > bytes.len) return diag.failAt(0, "VM array_index out of bounds", .{});
                             regs[inst.dest] = if (inst.arg4 == 1)
                                 .{ .bytes = bytes[offset .. offset + elem_size] }
+                            else if (inst.arg4 == 3 and elem_size == 4)
+                                .{ .float = @as(f64, @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[offset..][0..4], .little))))) }
+                            else if (inst.arg4 == 3)
+                                .{ .float = @bitCast(readIntLittle(bytes[offset .. offset + 8])) }
                             else if (elem_size == 1)
                                 .{ .int = bytes[offset] }
                             else
@@ -1246,6 +1250,10 @@ pub const VM = struct {
                                 .{ .ptr = item }
                             else if (inst.arg4 == 2)
                                 return diag.failAt(0, "VM array_index cannot load string elements from an untracked raw pointer", .{})
+                            else if (inst.arg4 == 3 and elem_size == 4)
+                                .{ .float = @as(f64, @floatCast(try vm.loadF32(item, diag))) }
+                            else if (inst.arg4 == 3)
+                                .{ .float = @bitCast(try vm.loadU64(item, diag)) }
                             else if (elem_size == 1)
                                 .{ .int = try vm.loadByte(item, diag) }
                             else
@@ -3767,8 +3775,9 @@ pub const VM = struct {
         const value = array.elems.items[index];
         if (elem_kind == 3) {
             return switch (value) {
-                .type_info_member => |member| .{ .type_info_member = member },
-                else => diag.failAt(0, "VM dynamic array Type_Info member index found {s} element", .{@tagName(value)}),
+                .float => |f| .{ .float = f },
+                .int => |i| .{ .float = @floatFromInt(i) },
+                else => diag.failAt(0, "VM dynamic array float index found {s} element", .{@tagName(value)}),
             };
         }
         if (elem_kind == 2) {

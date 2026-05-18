@@ -1621,6 +1621,12 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 switch (inst.arg4) {
                     1 => try setPointerResult(env, registers, inst.dest, item_ptr),
                     2 => try setStringResult(env, registers, inst.dest, item_ptr),
+                    3 => if (inst.arg3 == 4) {
+                        const loaded = c.LLVMBuildLoad2(env.builder, env.llvm_f32, item_ptr, "array_f32");
+                        try setFloatResult(env, registers, inst.dest, c.LLVMBuildFPExt(env.builder, loaded, env.llvm_f64, "array_f32_ext"));
+                    } else {
+                        try setFloatResult(env, registers, inst.dest, c.LLVMBuildLoad2(env.builder, env.llvm_f64, item_ptr, "array_f64"));
+                    },
                     else => if (inst.arg3 == 1) {
                         const byte = c.LLVMBuildLoad2(env.builder, c.LLVMInt8TypeInContext(env.context), item_ptr, "array_u8");
                         try setIntResult(env, registers, inst.dest, c.LLVMBuildZExt(env.builder, byte, env.llvm_i64, "array_u8_zext"));

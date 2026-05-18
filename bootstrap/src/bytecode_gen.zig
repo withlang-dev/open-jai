@@ -4594,6 +4594,7 @@ const GenContext = struct {
                     const elem_is_struct = if (elem_text) |text| try typeTextIsEmbeddedStruct(ctx, text, diag) else false;
                     const elem_is_array = if (elem_text) |text| isStaticArrayTypeText(text) else false;
                     const elem_is_string = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(text), "string") else false;
+                    const elem_is_float = if (elem_text) |text| (std.mem.eql(u8, firstTypeWord(text), "float") or std.mem.eql(u8, firstTypeWord(text), "float32") or std.mem.eql(u8, firstTypeWord(text), "float64")) else false;
                     const elem_is_type_info_member = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(stripPointerText(text)), "Type_Info_Struct_Member") else false;
                     const is_view = iterated_text_opt != null and isViewArrayTypeText(iterated_text_opt.?);
                     const is_string_iter = iterated_text_opt != null and std.mem.eql(u8, firstTypeWord(iterated_text_opt.?), "string");
@@ -4671,7 +4672,7 @@ const GenContext = struct {
                             .arg1 = array_slot,
                             .arg2 = index_reg,
                             .arg3 = @intCast(elem_size),
-                            .arg4 = if (iterable_by_pointer) 1 else if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (elem_is_array) 1 else if (elem_is_string) 2 else 0,
+                            .arg4 = if (iterable_by_pointer) 1 else if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (elem_is_array) 1 else if (elem_is_string) 2 else if (elem_is_float) 3 else 0,
                             .arg5 = if (static_count != null) 1 else if (is_view) 2 else 0,
                             .source_node = stmt,
                         });
@@ -4920,10 +4921,17 @@ const GenContext = struct {
                     try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .memcpy, .dest = addr, .arg1 = value_reg, .arg2 = size_reg, .source_node = source_node });
                 }
             } else {
-                const value_reg = try ctx.genExpr(value_node, diag);
+                var value_reg = try ctx.genExpr(value_node, diag);
+                const elem_is_float = std.mem.eql(u8, firstTypeWord(elem_text), "float") or std.mem.eql(u8, firstTypeWord(elem_text), "float32") or std.mem.eql(u8, firstTypeWord(elem_text), "float64");
+                if (elem_is_float and (ast.tag(value_node) == .integer_literal or (ast.tag(value_node) == .unary_expr and ast.tag(ast.data(value_node).lhs) == .integer_literal))) {
+                    const float_reg = ctx.proc.num_registers;
+                    ctx.proc.num_registers += 1;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .float_cast, .dest = float_reg, .arg1 = value_reg, .source_node = source_node });
+                    value_reg = float_reg;
+                }
                 const opcode: Bytecode.Opcode = if (elem_size == 1)
                     .store_ptr_byte
-                else if (std.mem.eql(u8, firstTypeWord(elem_text), "float") or std.mem.eql(u8, firstTypeWord(elem_text), "float32") or std.mem.eql(u8, firstTypeWord(elem_text), "float64"))
+                else if (elem_is_float)
                     .store_ptr_float
                 else
                     .store_ptr;
@@ -6555,7 +6563,9 @@ const GenContext = struct {
                             .load_ptr_float
                         else
                             .load_ptr;
-                        const load_width: u32 = if (opcode == .load_ptr and isIntegerTypeText(elem_text))
+                        const load_width: u32 = if (opcode == .load_ptr_float)
+                            @intCast(elem_size)
+                        else if (opcode == .load_ptr and isIntegerTypeText(elem_text))
                             integerMemoryAccessFlags(elem_text, elem_size)
                         else
                             0;
@@ -6566,7 +6576,8 @@ const GenContext = struct {
                         const elem_size = try typeTextSize(ctx, elem_text, diag);
                         const elem_is_struct = try typeTextIsEmbeddedStruct(ctx, elem_text, diag);
                         const elem_is_type_info_member = std.mem.eql(u8, firstTypeWord(stripPointerText(elem_text)), "Type_Info_Struct_Member");
-                        const elem_kind: u32 = if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else 0;
+                        const elem_is_float = std.mem.eql(u8, firstTypeWord(elem_text), "float") or std.mem.eql(u8, firstTypeWord(elem_text), "float32") or std.mem.eql(u8, firstTypeWord(elem_text), "float64");
+                        const elem_kind: u32 = if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (std.mem.eql(u8, firstTypeWord(elem_text), "string")) 2 else if (elem_is_float) 3 else 0;
                         const is_view = isViewArrayTypeText(base_text);
                         const reg = proc.num_registers;
                         proc.num_registers += 1;
@@ -6601,7 +6612,8 @@ const GenContext = struct {
                             .load_ptr_float
                         else
                             .load_ptr;
-                        try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = addr, .source_node = expr });
+                        const lw: u32 = if (opcode == .load_ptr_float) @intCast(elem_size) else 0;
+                        try proc.instructions.append(program.allocator, .{ .opcode = opcode, .dest = reg, .arg1 = addr, .arg2 = lw, .source_node = expr });
                         return reg;
                     }
                 }
@@ -11179,6 +11191,8 @@ fn anyArrayElementTextForArg(ctx: *GenContext, arg: NodeIndex, source_node: Node
 fn dynamicArrayElementKind(ctx: *GenContext, elem_ty: []const u8, diag: Diagnostic) !u32 {
     if (try typeTextIsEmbeddedStruct(ctx, elem_ty, diag)) return 1;
     if (std.mem.eql(u8, firstTypeWord(elem_ty), "string")) return 2;
+    const fw = firstTypeWord(elem_ty);
+    if (std.mem.eql(u8, fw, "float") or std.mem.eql(u8, fw, "float32") or std.mem.eql(u8, fw, "float64")) return 3;
     return 0;
 }
 
