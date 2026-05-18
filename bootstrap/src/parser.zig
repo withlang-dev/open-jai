@@ -1465,6 +1465,9 @@ const Parser = struct {
             _ = try p.expect(.r_paren, "expected ')' after type_info operand", .{});
             return p.ast.addNode(.type_of_expr, tok, .{ .lhs = operand });
         }
+        if (p.match(.directive_this)) |tok| {
+            return p.ast.addNode(.type_expr, tok, .{});
+        }
         const has_dollar = p.matchDiscard(.dollar) or p.matchDiscard(.dollar_dollar);
         const tok = p.index;
         if ((has_dollar and p.match(.identifier) != null) or p.match(.identifier) != null or p.match(.keyword_void) != null) {

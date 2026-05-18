@@ -4944,6 +4944,19 @@ const GenContext = struct {
                 @floatCast(std.fmt.parseFloat(f32, default_text) catch return diag.failAt(ctx.ast.tokens[ctx.ast.mainToken(source_node)].start, "unsupported float field default '{s}'", .{default_text}));
             return try ctx.emitFloat(source_node, value);
         }
+        if (std.mem.indexOf(u8, default_text, ".{") != null) {
+            const struct_name = blk: {
+                const brace = std.mem.indexOf(u8, default_text, ".{") orelse break :blk default_text;
+                break :blk std.mem.trim(u8, default_text[0..brace], " \t\r\n");
+            };
+            if (struct_name.len > 0 and (try typeTextIsStruct(ctx, struct_name, diag) or try structTypeNodeByName(ctx, struct_name) != null)) {
+                const size = try typeTextSize(ctx, struct_name, diag);
+                const reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .alloc_local_bytes, .dest = reg, .arg1 = @intCast(@max(size, 1)), .source_node = source_node });
+                return reg;
+            }
+        }
         if (isIntegerTypeText(raw_type) or std.mem.eql(u8, type_name, "bool")) {
             const value = std.fmt.parseInt(i64, default_text, 0) catch blk: {
                 if (std.mem.indexOfScalar(u8, default_text, '.')) |dot| {
@@ -5100,6 +5113,11 @@ const GenContext = struct {
         if (ensureBuiltinTypeInfo(ctx.program, type_name)) return;
         const type_node = try structTypeNodeByName(ctx, type_name) orelse return;
         const body = containerBodySource(ctx.ast, type_node) orelse return;
+        const old_this = ctx.polymorph_types.get("#this");
+        try ctx.polymorph_types.put(ctx.program.allocator, "#this", type_name);
+        defer {
+            if (old_this) |old| ctx.polymorph_types.put(ctx.program.allocator, "#this", old) catch {} else _ = ctx.polymorph_types.remove("#this");
+        }
         var members = std.ArrayList(Bytecode.TypeInfoMember).empty;
         defer members.deinit(ctx.program.allocator);
         var pending_notes = std.ArrayList([]const u8).empty;
@@ -11290,6 +11308,11 @@ fn fieldInfoFromTypeText(ctx: *GenContext, raw_type: []const u8, field_name: []c
         restoreContainerTypeArgs(ctx, restores.items) catch {};
         restores.deinit(ctx.program.allocator);
     }
+    const old_this = ctx.polymorph_types.get("#this");
+    try ctx.polymorph_types.put(ctx.program.allocator, "#this", type_name);
+    defer {
+        if (old_this) |old| ctx.polymorph_types.put(ctx.program.allocator, "#this", old) catch {} else _ = ctx.polymorph_types.remove("#this");
+    }
     return try containerFieldInfoFromSource(ctx, type_node, field_name, diag);
 }
 
@@ -12412,6 +12435,11 @@ fn structSizeFromTypeText(ctx: *GenContext, raw_type: []const u8, diag: Diagnost
         restoreContainerTypeArgs(ctx, restores.items) catch {};
         restores.deinit(ctx.program.allocator);
     }
+    const old_this = ctx.polymorph_types.get("#this");
+    try ctx.polymorph_types.put(ctx.program.allocator, "#this", type_name);
+    defer {
+        if (old_this) |old| ctx.polymorph_types.put(ctx.program.allocator, "#this", old) catch {} else _ = ctx.polymorph_types.remove("#this");
+    }
     return try containerSizeFromSource(ctx, type_node.?, diag);
 }
 
@@ -13122,7 +13150,11 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
         };
     }
     var type_text = std.mem.trim(u8, clean[colon + 1 ..], " \t\r\n");
-    if (std.mem.indexOfScalar(u8, type_text, '#')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
+    if (std.mem.indexOfScalar(u8, type_text, '#')) |pos| {
+        if (!std.mem.startsWith(u8, type_text[pos..], "#this")) {
+            type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
+        }
+    }
     if (std.mem.indexOfScalar(u8, type_text, '=')) |pos| type_text = std.mem.trim(u8, type_text[0..pos], " \t\r\n");
     if (type_text.len == 0) return null;
     return .{ .names_text = names, .type_text = type_text, .name_count = countFieldNames(names), .is_using = is_using, .is_as = is_as };
@@ -13130,7 +13162,14 @@ fn parseFieldSegment(segment: []const u8) ?ParsedFieldSegment {
 
 fn parsedFieldTypeText(ctx: *GenContext, parsed: ParsedFieldSegment, diag: Diagnostic) ![]const u8 {
     if (!parsed.is_inferred) {
-        const trimmed = std.mem.trim(u8, parsed.type_text, " \t\r\n");
+        var trimmed = std.mem.trim(u8, parsed.type_text, " \t\r\n");
+        if (std.mem.indexOf(u8, trimmed, "#this") != null) {
+            if (ctx.polymorph_types.get("#this")) |struct_name| {
+                const prefix = trimmed[0..std.mem.indexOf(u8, trimmed, "#this").?];
+                const suffix = trimmed[std.mem.indexOf(u8, trimmed, "#this").? + 5 ..];
+                trimmed = ctx.ownedTypeTextFmt("{s}{s}{s}", .{ prefix, struct_name, suffix }) catch trimmed;
+            }
+        }
         const type_name = firstTypeWord(trimmed);
         if (ctx.polymorph_types.get(type_name)) |actual_type| return actual_type;
         if (dynamicArrayElementText(trimmed)) |elem| {
