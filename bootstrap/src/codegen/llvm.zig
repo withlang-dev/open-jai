@@ -2334,7 +2334,16 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 terminates_block = true;
             },
             .call => {
-                if (inst.arg1 >= env.proc_functions.len or env.proc_functions[inst.arg1] == null or env.proc_function_tys[inst.arg1] == null) return diag.failAt(0, "LLVM backend call target out of range", .{});
+                if (inst.arg1 >= env.proc_functions.len or env.proc_functions[inst.arg1] == null or env.proc_function_tys[inst.arg1] == null) {
+                    if (env.program.main_proc != null and inst.arg1 == env.program.main_proc.?) {
+                        if (inst.dest < registers.len) {
+                            try setIntResult(env, registers, inst.dest, c.LLVMConstInt(env.llvm_i64, 0, 0));
+                        }
+                        continue;
+                    }
+                    const name = if (inst.arg1 < env.program.procs.items.len) env.program.procs.items[inst.arg1].name else "?";
+                    return diag.failAt(0, "LLVM backend call target out of range: proc[{d}] '{s}' (total={d}, fn={any}, ty={any}) from '{s}'", .{ inst.arg1, name, env.proc_functions.len, inst.arg1 < env.proc_functions.len and env.proc_functions[inst.arg1] != null, inst.arg1 < env.proc_function_tys.len and env.proc_function_tys[inst.arg1] != null, env.current_proc_name });
+                }
                 const target_proc = &env.program.procs.items[inst.arg1];
                 if (inst.arg2 != target_proc.param_types.items.len) {
                     if (inst.dest < registers.len) {

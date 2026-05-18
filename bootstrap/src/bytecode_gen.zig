@@ -30,12 +30,11 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         try addReachableProc(allocator, ast, resolved, &reachable_runtime_procs, &seen, main_proc);
     }
     const root_decls = ast.extraSlice(ast.data(ast.root).lhs);
-    for (root_decls, 0..) |decl_idx, i| {
+    for (root_decls) |decl_idx| {
         const decl: NodeIndex = @intCast(decl_idx);
         if (ast.tag(decl) != .proc_decl) continue;
         if (typed.main_proc != null and !reachable_runtime_procs.contains(decl)) continue;
-        const next_decl: NodeIndex = if (i + 1 < root_decls.len) @intCast(root_decls[i + 1]) else @import("Ast.zig").null_node;
-        if (procHasExpandModifier(ast, decl, next_decl)) continue;
+        if (procHasExpandModifierLocal(ast, decl)) continue;
         if (procHasForeignModifierLocal(ast, decl)) continue;
         if (!procHasBody(ast, decl)) continue;
         if (procIsCompileTimeOnlyHost(ast, decl)) continue;
@@ -69,8 +68,8 @@ pub fn generate(allocator: std.mem.Allocator, ast: *const Ast, typed: *const Typ
         try ctx.bindProcParams(main_proc, proc.param_count, diag);
         try ctx.genBlock(ast.data(main_proc).lhs, diag);
         try proc.instructions.append(allocator, .{ .opcode = .ret_void });
-        _ = try program.addProc(proc, main_proc);
-        program.main_proc = main_idx;
+        const actual_main_idx = try program.addProc(proc, main_proc);
+        program.main_proc = actual_main_idx;
     }
     return program;
 }
@@ -2593,6 +2592,31 @@ const GenContext = struct {
         };
         defer child_ctx.deinit();
         try ctx.exportVisibleValueNames(&child_ctx, diag);
+        const root_decls = if (inserted_ast.root != @import("Ast.zig").null_node) inserted_ast.extraSlice(inserted_ast.data(inserted_ast.root).lhs) else &[_]u32{};
+        for (root_decls, 0..) |decl_idx, di| {
+            const decl: NodeIndex = @intCast(decl_idx);
+            if (inserted_ast.tag(decl) != .proc_decl) continue;
+            if (inserted_resolved.main_proc != null and decl == inserted_resolved.main_proc.?) continue;
+            const next_decl: NodeIndex = if (di + 1 < root_decls.len) @intCast(root_decls[di + 1]) else @import("Ast.zig").null_node;
+            if (procHasExpandModifier(&inserted_ast, decl, next_decl) and !procHasReturnValue(&inserted_ast, decl)) continue;
+            if (procHasForeignModifierLocal(&inserted_ast, decl)) continue;
+            if (!procHasBody(&inserted_ast, decl)) continue;
+            if (procSignature(&inserted_ast, decl)) |sig| {
+                if (procSignatureContainsPolymorphicType(&child_ctx, sig)) continue;
+            }
+            const raw_name = inserted_ast.tokenSlice(inserted_ast.mainToken(decl));
+            const name_idx = try ctx.program.addString(raw_name);
+            var helper = Bytecode.ProcBytecode{ .name = ctx.program.strings.items[name_idx] };
+            try initProcBytecodeSignature(allocator, &inserted_ast, decl, &helper, insert_diag);
+            const helper_index: u32 = @intCast(ctx.program.procs.items.len);
+            var helper_ctx = GenContext{ .ast = &inserted_ast, .program = ctx.program, .proc = &helper, .resolved = &inserted_resolved, .typed = null, .allow_root_proc_calls = true, .current_proc_node = decl, .current_proc_index = helper_index };
+            defer helper_ctx.deinit();
+            helper_ctx.return_type_node = if (procSignature(&inserted_ast, decl)) |sig| sig.return_type else @import("Ast.zig").null_node;
+            try helper_ctx.bindProcParams(decl, helper.param_count, insert_diag);
+            try helper_ctx.genBlock(inserted_ast.data(decl).lhs, insert_diag);
+            try helper.instructions.append(allocator, .{ .opcode = .ret_void });
+            _ = try ctx.program.addProc(helper, decl);
+        }
         try child_ctx.genBlock(inserted_ast.data(main_proc).lhs, insert_diag);
         try ctx.importInsertedLocals(&child_ctx, main_proc, diag);
     }
@@ -2658,6 +2682,23 @@ const GenContext = struct {
             try out.appendSlice(ctx.program.allocator, decl_source);
             try out.appendSlice(ctx.program.allocator, "\n");
         }
+        if (ctx.current_proc_node != @import("Ast.zig").null_node and ctx.current_proc_node < ast.node_tags.items.len) {
+            const body = ast.data(ctx.current_proc_node).lhs;
+            if (body != @import("Ast.zig").null_node and body < ast.node_tags.items.len and ast.tag(body) == .block) {
+                for (ast.extraSlice(ast.data(body).lhs)) |stmt_idx| {
+                    const stmt: NodeIndex = @intCast(stmt_idx);
+                    if (stmt >= ast.node_tags.items.len or ast.tag(stmt) != .proc_decl) continue;
+                    if (!procHasSourceBody(ast, stmt)) continue;
+                    const name = ast.tokenSlice(ast.mainToken(stmt));
+                    if (name.len == 0 or (!std.ascii.isAlphabetic(name[0]) and name[0] != '_')) continue;
+                    if (!identifierAppearsInText(insert_code, name)) continue;
+                    const decl_source = topLevelDeclSourceText(ast, stmt);
+                    if (std.mem.indexOfScalar(u8, decl_source, '{') == null) continue;
+                    try out.appendSlice(ctx.program.allocator, decl_source);
+                    try out.appendSlice(ctx.program.allocator, "\n");
+                }
+            }
+        }
     }
 
     fn procHasSourceBody(ast: *const Ast, decl: NodeIndex) bool {
@@ -2697,7 +2738,10 @@ const GenContext = struct {
 
     fn emitParsedInsertedExpression(ctx: *GenContext, code: []const u8, source_node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
         const allocator = ctx.program.allocator;
-        const source = try std.fmt.allocPrint(allocator, "main :: () {{\n__openjai_insert_value := ({s});\n}}\n", .{std.mem.trim(u8, code, " \t\r\n;")});
+        var visible_procs = std.ArrayList(u8).empty;
+        defer visible_procs.deinit(allocator);
+        try ctx.appendVisibleInsertedProcSources(&visible_procs, code);
+        const source = try std.fmt.allocPrint(allocator, "{s}\nmain :: () {{\n__openjai_insert_value := ({s});\n}}\n", .{ visible_procs.items, std.mem.trim(u8, code, " \t\r\n;") });
         defer allocator.free(source);
 
         const lexer = @import("lexer.zig");
@@ -2825,7 +2869,7 @@ const GenContext = struct {
             const decl = entry.key_ptr.*;
             if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
             switch (ctx.ast.tag(decl)) {
-                .var_decl, .const_decl, .placeholder_decl => {},
+                .var_decl, .const_decl, .placeholder_decl, .proc_decl => {},
                 .for_stmt => {
                     const range = ctx.ast.extraSlice(ctx.ast.data(decl).lhs);
                     const iterator_name = forStmtIteratorName(ctx.ast, range) orelse continue;
@@ -2939,7 +2983,7 @@ const GenContext = struct {
             const decl = entry.key_ptr.*;
             if (decl == @import("Ast.zig").null_node or decl >= ctx.ast.node_tags.items.len) continue;
             switch (ctx.ast.tag(decl)) {
-                .var_decl, .const_decl, .placeholder_decl => {
+                .var_decl, .const_decl, .placeholder_decl, .proc_decl => {
                     try out.append(ctx.program.allocator, externalNameForSourceName(ctx.ast.tokenSlice(ctx.ast.mainToken(decl))));
                 },
                 .for_stmt => {
@@ -13716,7 +13760,16 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
                 try emitFormattedValueForType(ctx, arg_reg, arg_type, arg_node, false, diag);
             } else if (staticArrayElementText(arg_type)) |elem_type| {
                 const elem_name = firstTypeWord(elem_type);
-                const count = try staticArrayCountFromText(ctx, arg_type, diag) orelse return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "formatted static array output requires a known element count", .{});
+                const count = try staticArrayCountFromText(ctx, arg_type, diag) orelse {
+                    const arg_reg = try genCallArg(ctx, arg_node, diag);
+                    try proc.instructions.append(program.allocator, .{ .opcode = .format_print, .arg1 = arg_reg, .source_node = arg_node });
+                    if (next_start + 1 < fmt.len and fmt[next_start] == ' ' and fmt[next_start + 1] == '\n') {
+                        start = next_start + 1;
+                    } else {
+                        start = next_start;
+                    }
+                    continue;
+                };
                 const arg_reg = try genCallArg(ctx, arg_node, diag);
                 if (try typeTextIsEmbeddedStruct(ctx, elem_type, diag)) {
                     const elem_size = try typeTextSize(ctx, elem_type, diag);
@@ -13731,7 +13784,7 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
                     }
                     try emitLiteralPrint(program, proc, "]", arg_node);
                 } else {
-                    const opcode: Bytecode.Opcode = if (std.mem.eql(u8, elem_name, "int") or std.mem.eql(u8, elem_name, "s64") or std.mem.eql(u8, elem_name, "u8") or std.mem.eql(u8, elem_name, "s8") or std.mem.eql(u8, elem_name, "u16") or std.mem.eql(u8, elem_name, "s16") or std.mem.eql(u8, elem_name, "u32") or std.mem.eql(u8, elem_name, "s32") or std.mem.eql(u8, elem_name, "u64"))
+                    const maybe_opcode: ?Bytecode.Opcode = if (std.mem.eql(u8, elem_name, "int") or std.mem.eql(u8, elem_name, "s64") or std.mem.eql(u8, elem_name, "u8") or std.mem.eql(u8, elem_name, "s8") or std.mem.eql(u8, elem_name, "u16") or std.mem.eql(u8, elem_name, "s16") or std.mem.eql(u8, elem_name, "u32") or std.mem.eql(u8, elem_name, "s32") or std.mem.eql(u8, elem_name, "u64"))
                         .format_static_int_array
                     else if (std.mem.eql(u8, elem_name, "float") or std.mem.eql(u8, elem_name, "float64") or std.mem.eql(u8, elem_name, "float32"))
                         .format_static_float_array
@@ -13740,9 +13793,23 @@ fn emitFormattedPrint(ctx: *GenContext, fmt_node: NodeIndex, arg_nodes: []const 
                     else if (std.mem.eql(u8, elem_name, "bool"))
                         .format_static_bool_array
                     else
-                        return diag.failAt(ast.tokens[ast.mainToken(arg_node)].start, "formatted static array output does not support element type '{s}'", .{elem_type});
-                    const elem_size = try typeTextSize(ctx, elem_type, diag);
-                    try proc.instructions.append(program.allocator, .{ .opcode = opcode, .arg1 = arg_reg, .arg2 = @intCast(count), .arg3 = @intCast(elem_size), .source_node = arg_node });
+                        null;
+                    if (maybe_opcode) |opcode| {
+                        const elem_size = try typeTextSize(ctx, elem_type, diag);
+                        try proc.instructions.append(program.allocator, .{ .opcode = opcode, .arg1 = arg_reg, .arg2 = @intCast(count), .arg3 = @intCast(elem_size), .source_node = arg_node });
+                    } else {
+                        const elem_size = try typeTextSize(ctx, elem_type, diag);
+                        try emitLiteralPrint(program, proc, "[", arg_node);
+                        var idx: u64 = 0;
+                        while (idx < count) : (idx += 1) {
+                            if (idx > 0) try emitLiteralPrint(program, proc, ", ", arg_node);
+                            const elem_reg = ctx.proc.num_registers;
+                            ctx.proc.num_registers += 1;
+                            try proc.instructions.append(program.allocator, .{ .opcode = .ptr_offset, .dest = elem_reg, .arg1 = arg_reg, .arg2 = @intCast(idx * @max(elem_size, 1)), .source_node = arg_node });
+                            try emitFormattedValueForType(ctx, elem_reg, elem_type, arg_node, false, diag);
+                        }
+                        try emitLiteralPrint(program, proc, "]", arg_node);
+                    }
                 }
             } else if (dynamicArrayElementText(arg_type)) |elem_type| {
                 const elem_name = firstTypeWord(elem_type);
