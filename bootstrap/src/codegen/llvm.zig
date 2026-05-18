@@ -1025,12 +1025,28 @@ fn emitProcInstructions(env: *LlvmEnv, proc: *const Bytecode.ProcBytecode, regis
                 };
                 _ = c.LLVMBuildCall2(env.builder, env.print_static_int_array_fn_ty, env.print_static_int_array_fn, &args, args.len, "");
             },
-            .format_static_float_array, .format_static_string_array, .format_static_bool_array => {
+            .format_static_float_array => {
+                if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend static array print register out of range", .{});
+                const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64, env.llvm_i64 };
+                const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
+                const fn_ref = c.LLVMGetNamedFunction(env.module, "__openjai_print_static_float_array") orelse c.LLVMAddFunction(env.module, "__openjai_print_static_float_array", fn_ty);
+                const count_val = if (inst.arg5 == 1 and inst.arg2 < registers.len)
+                    try valueAsInt(env, registers[inst.arg2], diag)
+                else
+                    c.LLVMConstInt(env.llvm_i64, inst.arg2, 0);
+                const elem_size = c.LLVMConstInt(env.llvm_i64, @max(inst.arg3, 1), 0);
+                var args = [_]c.LLVMValueRef{
+                    try pointerValue(env, registers[inst.arg1], diag, "static array print"),
+                    count_val,
+                    elem_size,
+                };
+                _ = c.LLVMBuildCall2(env.builder, fn_ty, fn_ref, &args, args.len, "");
+            },
+            .format_static_string_array, .format_static_bool_array => {
                 if (inst.arg1 >= registers.len) return diag.failAt(0, "LLVM backend static array print register out of range", .{});
                 const params = [_]c.LLVMTypeRef{ env.ptr_ty, env.llvm_i64 };
                 const fn_ty = c.LLVMFunctionType(c.LLVMVoidTypeInContext(env.context), @constCast(&params), params.len, 0);
                 const fn_name = switch (inst.opcode) {
-                    .format_static_float_array => "__openjai_print_static_float_array",
                     .format_static_bool_array => "__openjai_print_static_bool_array",
                     else => "__openjai_print_static_string_array",
                 };

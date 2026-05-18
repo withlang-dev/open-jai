@@ -132,17 +132,22 @@ export fn __openjai_print_static_int_array(data: ?*const anyopaque, count: usize
     writeAll("]");
 }
 
-export fn __openjai_print_static_float_array(data: ?*const anyopaque, count: usize) void {
-    const base = data orelse {
+export fn __openjai_print_static_float_array(data: ?*const anyopaque, count: usize, elem_size: usize) void {
+    const base: [*]const u8 = @ptrCast(data orelse {
         writeAll("[]");
         return;
-    };
-    const floats: [*]const f64 = @ptrCast(@alignCast(base));
+    });
     writeAll("[");
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (i != 0) writeAll(", ");
-        __openjai_print_float(floats[i]);
+        if (elem_size == 4) {
+            const f32_ptr: *const f32 = @ptrCast(@alignCast(base + i * 4));
+            __openjai_print_float(@floatCast(f32_ptr.*));
+        } else {
+            const f64_ptr: *const f64 = @ptrCast(@alignCast(base + i * 8));
+            __openjai_print_float(f64_ptr.*);
+        }
     }
     writeAll("]");
 }
