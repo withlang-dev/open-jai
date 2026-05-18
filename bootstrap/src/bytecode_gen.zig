@@ -4974,7 +4974,15 @@ const GenContext = struct {
                         }
                     }
                     const old_iter_type = ctx.type_overrides.get(stmt);
-                    if (elem_text) |text| try ctx.type_overrides.put(ctx.program.allocator, stmt, text);
+                    var ptr_type_buf: [256]u8 = undefined;
+                    if (elem_text) |text| {
+                        if (iterable_by_pointer) {
+                            const ptr_type = std.fmt.bufPrint(&ptr_type_buf, "*{s}", .{text}) catch text;
+                            try ctx.type_overrides.put(ctx.program.allocator, stmt, ptr_type);
+                        } else {
+                            try ctx.type_overrides.put(ctx.program.allocator, stmt, text);
+                        }
+                    }
                     defer {
                         if (old_iter_type) |text| {
                             ctx.type_overrides.put(ctx.program.allocator, stmt, text) catch {};
