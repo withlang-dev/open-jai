@@ -330,6 +330,32 @@ const GenContext = struct {
 
     /// Coerce a register value to bool if the node's type is not already bool.
     fn coerceToBool(ctx: *GenContext, reg: Bytecode.Register, node: NodeIndex) !Bytecode.Register {
+        return ctx.coerceToBoolDiag(reg, node, .{ .file_source = "", .file_name = "" });
+    }
+
+    fn coerceToBoolDiag(ctx: *GenContext, reg: Bytecode.Register, node: NodeIndex, diag: Diagnostic) !Bytecode.Register {
+        const type_text = typeTextForExpr(ctx, node, diag);
+        if (type_text) |tt| {
+            const is_view = isViewArrayTypeText(tt);
+            const is_dynamic = isDynamicArrayTypeText(tt);
+            const is_static = staticArrayElementText(tt) != null;
+            if (is_view or is_dynamic or is_static) {
+                const elem_text = dynamicArrayElementText(tt) orelse staticArrayElementText(tt) orelse "int";
+                const elem_size: u32 = @intCast(typeTextSize(ctx, elem_text, diag) catch 8);
+                const count_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                if (is_static) {
+                    const count = staticArrayCountFromText(ctx, tt, diag) catch null orelse 0;
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .load_int, .dest = count_reg, .arg1 = @intCast(count), .source_node = node });
+                } else {
+                    try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = reg, .arg3 = elem_size, .arg5 = if (is_view) @as(u32, 1) else @as(u32, 0), .source_node = node });
+                }
+                const bool_reg = ctx.proc.num_registers;
+                ctx.proc.num_registers += 1;
+                try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .int_to_bool_cast, .dest = bool_reg, .arg1 = count_reg, .source_node = node });
+                return bool_reg;
+            }
+        }
         if (ctx.typed) |typed| {
             const ty = typed.typeOf(node);
             if (!ty.isBool()) {
@@ -1247,6 +1273,7 @@ const GenContext = struct {
             for (stmts) |stmt_idx| try ctx.genStmt(@intCast(stmt_idx), diag);
             const end_index: u32 = @intCast(ctx.proc.instructions.items.len);
             for (frame.patches.items) |patch| ctx.proc.instructions.items[patch].arg1 = end_index;
+            for (stmts) |stmt_idx| ctx.removeBodyDeclAddresses(@intCast(stmt_idx));
             return result;
         };
         const params = ast.extraSlice(sig.params_extra);
@@ -1440,6 +1467,7 @@ const GenContext = struct {
         for (stmts) |stmt_idx| try ctx.genStmt(@intCast(stmt_idx), diag);
         const end_index: u32 = @intCast(ctx.proc.instructions.items.len);
         for (frame.patches.items) |patch| ctx.proc.instructions.items[patch].arg1 = end_index;
+        for (stmts) |stmt_idx| ctx.removeBodyDeclAddresses(@intCast(stmt_idx));
         if (sig.return_type != @import("Ast.zig").null_node) {
             var ret_text = ctx.nodeSource(sig.return_type);
             if (ctx.polymorph_types.get(ret_text)) |actual| ret_text = actual;
@@ -3532,12 +3560,30 @@ const GenContext = struct {
                 std.mem.eql(u8, type_name, "int") or
                 std.mem.eql(u8, type_name, "s64") or
                 std.mem.eql(u8, type_name, "u64") or
+                std.mem.eql(u8, type_name, "string") or
                 std.mem.startsWith(u8, std.mem.trim(u8, type_text, " \t\r\n"), "*"))) continue;
             const addr = ctx.proc.num_registers;
             ctx.proc.num_registers += 1;
             try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .addr_of_local, .dest = addr, .arg1 = entry.value_ptr.*, .source_node = source_node });
             try ctx.decl_addresses.put(ctx.program.allocator, decl, addr);
             try ctx.pointer_addrs.put(ctx.program.allocator, addr, decl);
+        }
+    }
+
+    fn removeBodyDeclAddresses(ctx: *GenContext, node: NodeIndex) void {
+        if (node == @import("Ast.zig").null_node or node >= ctx.ast.node_tags.items.len) return;
+        switch (ctx.ast.tag(node)) {
+            .var_decl => {
+                _ = ctx.decl_addresses.remove(node);
+            },
+            .block, .stmt_list => {
+                for (ctx.ast.extraSlice(ctx.ast.data(node).lhs)) |child| ctx.removeBodyDeclAddresses(@intCast(child));
+            },
+            .if_stmt, .while_stmt, .for_stmt => {
+                ctx.removeBodyDeclAddresses(ctx.ast.data(node).lhs);
+                ctx.removeBodyDeclAddresses(ctx.ast.data(node).rhs);
+            },
+            else => {},
         }
     }
 
@@ -4191,7 +4237,7 @@ const GenContext = struct {
             },
             .if_stmt => {
                 const cond_raw = try ctx.genExpr(ast.data(stmt).lhs, diag);
-                const cond = try ctx.coerceToBool(cond_raw, ast.data(stmt).lhs);
+                const cond = try ctx.coerceToBoolDiag(cond_raw, ast.data(stmt).lhs, diag);
                 const jumps = ast.extraSlice(ast.data(stmt).rhs);
                 const jump_if_index = ctx.proc.instructions.items.len;
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump_if_false, .arg1 = cond, .arg2 = 0, .source_node = stmt });
@@ -4203,6 +4249,7 @@ const GenContext = struct {
                 ctx.proc.instructions.items[jump_end_index].arg1 = @intCast(ctx.proc.instructions.items.len);
             },
             .while_stmt => {
+                try ctx.materializeMutableLocalsForLoop(stmt, diag);
                 const cond_node = ast.data(stmt).lhs;
                 const real_cond = if (ast.tag(cond_node) == .var_decl) ast.data(cond_node).rhs else cond_node;
                 // Get label name for named while.
@@ -4212,7 +4259,7 @@ const GenContext = struct {
                     "";
                 const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
                 const cond_raw = try ctx.genExpr(real_cond, diag);
-                const cond = try ctx.coerceToBool(cond_raw, real_cond);
+                const cond = try ctx.coerceToBoolDiag(cond_raw, real_cond, diag);
                 const jump_if_index = ctx.proc.instructions.items.len;
                 try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .jump_if_false, .arg1 = cond, .arg2 = 0, .source_node = stmt });
                 // Push loop frame.
@@ -4304,6 +4351,7 @@ const GenContext = struct {
                     const elem_is_type_info_member = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(stripPointerText(text)), "Type_Info_Struct_Member") else false;
                     const is_view = iterated_text_opt != null and isViewArrayTypeText(iterated_text_opt.?);
                     const is_string_iter = iterated_text_opt != null and std.mem.eql(u8, firstTypeWord(iterated_text_opt.?), "string");
+                    const is_dynamic = iterated_text_opt != null and isDynamicArrayTypeText(iterated_text_opt.?);
 
                     const count_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
@@ -4344,6 +4392,9 @@ const GenContext = struct {
                     }
 
                     const loop_start: u32 = @intCast(ctx.proc.instructions.items.len);
+                    if (is_dynamic and !iterable_reverse) {
+                        try ctx.proc.instructions.append(ctx.program.allocator, .{ .opcode = .array_count, .dest = count_reg, .arg1 = array_slot, .arg3 = @intCast(elem_size), .arg5 = 0, .source_node = stmt });
+                    }
                     const cond_reg = ctx.proc.num_registers;
                     ctx.proc.num_registers += 1;
                     if (iterable_reverse) {

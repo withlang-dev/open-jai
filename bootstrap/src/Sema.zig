@@ -677,7 +677,7 @@ fn analyzeNode(ast: *const Ast, resolved: *const Resolved, typed: *Typed, node: 
         .if_stmt => blk: {
             const cond_ty = try analyzeNode(ast, resolved, typed, ast.data(node).lhs, diag);
             // Allow integer, string, and pointer as conditions (truthiness coercion).
-            if (!cond_ty.isBool() and !cond_ty.isInteger() and !cond_ty.isString() and !cond_ty.isPointer() and !cond_ty.isFloat() and !cond_ty.isVoid() and !cond_ty.isAny()) {
+            if (!cond_ty.isBool() and !cond_ty.isInteger() and !cond_ty.isString() and !cond_ty.isPointer() and !cond_ty.isFloat() and !cond_ty.isVoid() and !cond_ty.isAny() and !cond_ty.isArray()) {
                 return diag.failAt(ast.tokens[ast.mainToken(ast.data(node).lhs)].start, "if condition must be bool-coercible", .{});
             }
             const blocks = ast.extraSlice(ast.data(node).rhs);
