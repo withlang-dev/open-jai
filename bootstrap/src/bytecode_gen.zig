@@ -4592,6 +4592,7 @@ const GenContext = struct {
                         null;
                     const elem_size = if (elem_text) |text| try typeTextSize(ctx, text, diag) else 8;
                     const elem_is_struct = if (elem_text) |text| try typeTextIsEmbeddedStruct(ctx, text, diag) else false;
+                    const elem_is_array = if (elem_text) |text| isStaticArrayTypeText(text) else false;
                     const elem_is_string = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(text), "string") else false;
                     const elem_is_type_info_member = if (elem_text) |text| std.mem.eql(u8, firstTypeWord(stripPointerText(text)), "Type_Info_Struct_Member") else false;
                     const is_view = iterated_text_opt != null and isViewArrayTypeText(iterated_text_opt.?);
@@ -4670,7 +4671,7 @@ const GenContext = struct {
                             .arg1 = array_slot,
                             .arg2 = index_reg,
                             .arg3 = @intCast(elem_size),
-                            .arg4 = if (iterable_by_pointer) 1 else if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (elem_is_string) 2 else 0,
+                            .arg4 = if (iterable_by_pointer) 1 else if (elem_is_type_info_member) 1 else if (elem_is_struct) 1 else if (elem_is_array) 1 else if (elem_is_string) 2 else 0,
                             .arg5 = if (static_count != null) 1 else if (is_view) 2 else 0,
                             .source_node = stmt,
                         });
@@ -5414,6 +5415,9 @@ const GenContext = struct {
                     const type_name = firstTypeWord(stripPointerText(clean_type));
                     if (!isBuiltinTypeName(type_name) and (try structTypeNodeByName(ctx, type_name)) != null) {
                         return try ctx.emitTypeText(expr, try displayTypeTextForTypeOf(ctx, clean_type, diag), diag);
+                    }
+                    if (isStaticArrayTypeText(clean_type) or isDynamicArrayTypeText(clean_type) or isViewArrayTypeText(clean_type)) {
+                        return try ctx.emitTypeText(expr, try canonicalArrayTypeDisplay(ctx, clean_type, diag), diag);
                     }
                 }
                 const type_id = if (type_of_text) |type_text| typeIdFromTypeText(type_text) else try ctx.phase2TypeId(ast.data(expr).lhs, diag);
@@ -10148,6 +10152,46 @@ fn displayTypeTextForTypeOf(ctx: *GenContext, raw_type: []const u8, diag: Diagno
     try ctx.owned_type_texts.append(ctx.program.allocator, text);
     _ = diag;
     return text;
+}
+
+fn canonicalArrayTypeDisplay(ctx: *GenContext, raw_type: []const u8, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }![]const u8 {
+    const clean = std.mem.trim(u8, raw_type, " \t\r\n");
+    if (isDynamicArrayTypeText(clean)) {
+        const elem = dynamicArrayElementText(clean) orelse return clean;
+        const elem_display = try canonicalElementDisplay(ctx, elem, diag);
+        const text = try std.fmt.allocPrint(ctx.program.allocator, "[..] {s}", .{elem_display});
+        try ctx.owned_type_texts.append(ctx.program.allocator, text);
+        return text;
+    }
+    if (isViewArrayTypeText(clean)) {
+        const elem = std.mem.trim(u8, clean[2..], " \t\r\n");
+        const elem_display = try canonicalElementDisplay(ctx, elem, diag);
+        const text = try std.fmt.allocPrint(ctx.program.allocator, "[] {s}", .{elem_display});
+        try ctx.owned_type_texts.append(ctx.program.allocator, text);
+        return text;
+    }
+    if (isStaticArrayTypeText(clean)) {
+        const count = staticArrayCountFromTypeText(clean) orelse return clean;
+        const elem = staticArrayElementText(clean) orelse return clean;
+        const elem_display = try canonicalElementDisplay(ctx, elem, diag);
+        const text = try std.fmt.allocPrint(ctx.program.allocator, "[{d}] {s}", .{ count, elem_display });
+        try ctx.owned_type_texts.append(ctx.program.allocator, text);
+        return text;
+    }
+    return clean;
+}
+
+fn canonicalElementDisplay(ctx: *GenContext, raw_elem: []const u8, diag: Diagnostic) error{ OutOfMemory, Overflow, GenFailed }![]const u8 {
+    const elem = std.mem.trim(u8, raw_elem, " \t\r\n");
+    if (isStaticArrayTypeText(elem) or isDynamicArrayTypeText(elem) or isViewArrayTypeText(elem))
+        return canonicalArrayTypeDisplay(ctx, elem, diag);
+    return canonicalScalarTypeDisplay(elem);
+}
+
+fn canonicalScalarTypeDisplay(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "int")) return "s64";
+    if (std.mem.eql(u8, name, "float")) return "float32";
+    return name;
 }
 
 fn displayTypeArgumentValue(raw_value: []const u8) []const u8 {
