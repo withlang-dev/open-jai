@@ -8,7 +8,10 @@ const c = @cImport({
     @cInclude("llvm-c/Target.h");
     @cInclude("llvm-c/TargetMachine.h");
     @cInclude("llvm-c/BitWriter.h");
+    @cInclude("llvm-c/Transforms/PassBuilder.h");
 });
+
+pub const OptLevel = enum { none, release_debug, release };
 
 const LlvmEnv = struct {
     allocator: std.mem.Allocator,
@@ -202,7 +205,7 @@ const LlvmEnv = struct {
     current_instruction_index: usize = 0,
 };
 
-pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program, output_obj: []const u8, diag: Diagnostic) !void {
+pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program, output_obj: []const u8, opt_level: OptLevel, diag: Diagnostic) !void {
     c.LLVMInitializeAArch64TargetInfo();
     c.LLVMInitializeAArch64Target();
     c.LLVMInitializeAArch64TargetMC();
@@ -542,8 +545,29 @@ pub fn emitObject(allocator: std.mem.Allocator, program: *const Bytecode.Program
         std.debug.print("LLVM target lookup failed: {s}\n", .{err_msg});
         return error.LlvmTargetFailed;
     }
-    const tm = c.LLVMCreateTargetMachine(target_ref, triple_z.ptr, "", "", c.LLVMCodeGenLevelNone, c.LLVMRelocDefault, c.LLVMCodeModelDefault) orelse return error.LlvmTargetFailed;
+    const codegen_level: c_uint = switch (opt_level) {
+        .none => c.LLVMCodeGenLevelNone,
+        .release_debug => c.LLVMCodeGenLevelDefault,
+        .release => c.LLVMCodeGenLevelAggressive,
+    };
+    const tm = c.LLVMCreateTargetMachine(target_ref, triple_z.ptr, "", "", codegen_level, c.LLVMRelocDefault, c.LLVMCodeModelDefault) orelse return error.LlvmTargetFailed;
     defer c.LLVMDisposeTargetMachine(tm);
+
+    if (opt_level != .none) {
+        const passes = switch (opt_level) {
+            .release_debug => "default<O1>",
+            .release => "default<O2>",
+            .none => unreachable,
+        };
+        const pb_opts = c.LLVMCreatePassBuilderOptions();
+        defer c.LLVMDisposePassBuilderOptions(pb_opts);
+        const pass_err = c.LLVMRunPasses(module, passes, tm, pb_opts);
+        if (pass_err != null) {
+            defer c.LLVMDisposeErrorMessage(c.LLVMGetErrorMessage(pass_err));
+            std.debug.print("LLVM optimization passes failed\n", .{});
+            return error.LlvmOptFailed;
+        }
+    }
 
     const obj_z = try allocator.dupeZ(u8, output_obj);
     defer allocator.free(obj_z);

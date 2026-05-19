@@ -125,7 +125,7 @@ fn runTest(
     // Compile.
     {
         const compile_result = try std.process.run(allocator, io, .{
-            .argv = &.{ compiler, jai_path, "-o", bin_path, "--runtime", runtime },
+            .argv = &.{ compiler, jai_path, "-exe", bin_path, "-runtime", runtime },
         });
         defer allocator.free(compile_result.stdout);
         defer allocator.free(compile_result.stderr);
@@ -238,6 +238,8 @@ fn extractExpected(source: []const u8, allocator: std.mem.Allocator, out: *std.A
         else
             raw_text;
         var text = std.mem.trimEnd(u8, stripped_text, &[_]u8{ ' ', '\t', '\r' });
+        // Strip trailing semicolons — Jai annotations ignore them.
+        while (text.len > 0 and text[text.len - 1] == ';') text = std.mem.trimEnd(u8, text[0 .. text.len - 1], &[_]u8{ ' ', '\t' });
         // Strip trailing ellipsis (wildcard suffix in expected output).
         if (std.mem.endsWith(u8, text, "...")) text = std.mem.trimEnd(u8, text[0 .. text.len - 3], &[_]u8{ ' ', '\t' });
         // Skip empty annotations and Error: annotations (compile-time error docs).

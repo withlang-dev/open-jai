@@ -46,14 +46,14 @@ pub fn build(b: *std.Build) void {
     addTokenizedArgs(link_exe, llvm_link_flags);
     addCxxRuntimeLinkArgs(link_exe, target);
     link_exe.addArg("-o");
-    const linked_exe = link_exe.addOutputFileArg("openjai");
+    const linked_exe = link_exe.addOutputFileArg("openjai-macos");
     const llvm_libdir = std.mem.trim(
         u8,
         b.run(&.{ llvm_config, "--libdir" }),
         " \t\r\n",
     );
     link_exe.addArg(b.fmt("-Wl,-rpath,{s}", .{llvm_libdir}));
-    const install_exe = b.addInstallBinFile(linked_exe, "openjai");
+    const install_exe = b.addInstallBinFile(linked_exe, "openjai-macos");
     b.getInstallStep().dependOn(&install_exe.step);
 
     const runtime_mod = createRuntimeModule(b, target, optimize, "rt/runtime.zig");

@@ -20,6 +20,32 @@ pub const Options = struct {
     runtime_path: []const u8 = "zig-out/lib/openjai_runtime.manifest",
     check_only: bool = false,
     command_line: []const []const u8 = &.{},
+    add_codes: []const []const u8 = &.{},
+    context_size: ?u32 = null,
+    debugger: bool = false,
+    debug_for: bool = false,
+    import_dirs: []const []const u8 = &.{},
+    use_llvm: bool = true,
+    msvc_format: bool = false,
+    natvis: bool = false,
+    no_backtrace_on_crash: bool = false,
+    no_color: bool = false,
+    no_dce: bool = false,
+    no_split: bool = false,
+    no_cwd: bool = false,
+    no_check: bool = false,
+    no_check_bindings: bool = false,
+    no_inline: bool = false,
+    output_dir: ?[]const u8 = null,
+    plugins: []const []const u8 = &.{},
+    quiet: bool = false,
+    release: bool = false,
+    release_debug: bool = false,
+    report_poly: bool = false,
+    run_codes: []const []const u8 = &.{},
+    verbose: bool = false,
+    very_debug: bool = false,
+    use_x64: bool = false,
 };
 
 pub const Compilation = struct {
@@ -39,6 +65,13 @@ pub const Compilation = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) Compilation {
         return .{ .allocator = allocator, .io = io, .options = options };
+    }
+
+    fn makeDiag(comp: *Compilation, file_path: []const u8, source: []const u8) Diagnostic {
+        var d = Diagnostic.init(comp.allocator, file_path, source);
+        d.msvc_format = comp.options.msvc_format;
+        d.no_color = comp.options.no_color;
+        return d;
     }
 
     fn sourceBaseDir(comp: *Compilation) []const u8 {
@@ -208,6 +241,87 @@ pub const Compilation = struct {
 
         var source = try comp.loadSourceWithLoads(comp.options.input_path);
         defer comp.allocator.free(source);
+
+        if (comp.options.verbose) {
+            const output_dir = std.fs.path.dirname(comp.options.output_path) orelse ".";
+            const exe_name = std.fs.path.basename(comp.options.output_path);
+            std.debug.print("options.output_path = \"{s}/\";\n", .{output_dir});
+            std.debug.print("options.output_executable_name = \"{s}\";\n", .{exe_name});
+        }
+
+        const saved_output_path = comp.options.output_path;
+        const saved_runtime_path = comp.options.runtime_path;
+        var abs_output_path: ?[]const u8 = null;
+        var abs_runtime_path: ?[]const u8 = null;
+        defer {
+            if (abs_output_path) |p| {
+                comp.options.output_path = saved_output_path;
+                comp.allocator.free(p);
+            }
+            if (abs_runtime_path) |p| {
+                comp.options.runtime_path = saved_runtime_path;
+                comp.allocator.free(p);
+            }
+        }
+
+        if (!comp.options.no_cwd) {
+            const input_dir = std.fs.path.dirname(comp.options.input_path);
+            if (input_dir) |dir| {
+                if (dir.len > 0) {
+                    if (!std.fs.path.isAbsolute(comp.options.output_path)) {
+                        abs_output_path = try resolveToAbsolute(comp.allocator, comp.options.output_path);
+                        comp.options.output_path = abs_output_path.?;
+                    }
+                    if (!std.fs.path.isAbsolute(comp.options.runtime_path)) {
+                        abs_runtime_path = try resolveToAbsolute(comp.allocator, comp.options.runtime_path);
+                        comp.options.runtime_path = abs_runtime_path.?;
+                    }
+                    const dir_z = try comp.allocator.dupeZ(u8, dir);
+                    defer comp.allocator.free(dir_z);
+                    if (comp.options.verbose) std.debug.print("Changing working directory to '{s}'.\n", .{dir});
+                    _ = std.c.chdir(dir_z.ptr);
+                }
+            }
+        }
+
+        if (comp.options.verbose) {
+            std.debug.print("Input files: [\"{s}\"]\n", .{comp.options.input_path});
+            if (comp.options.add_codes.len > 0) {
+                std.debug.print("Add strings: [", .{});
+                for (comp.options.add_codes, 0..) |code, i| {
+                    if (i > 0) std.debug.print(", ", .{});
+                    std.debug.print("\"{s}\"", .{code});
+                }
+                std.debug.print("]\n", .{});
+            }
+            if (comp.options.run_codes.len > 0) {
+                std.debug.print("Run strings: [", .{});
+                for (comp.options.run_codes, 0..) |code, i| {
+                    if (i > 0) std.debug.print(", ", .{});
+                    std.debug.print("\"{s}\"", .{code});
+                }
+                std.debug.print("]\n", .{});
+            }
+        }
+
+        if (comp.options.add_codes.len > 0 or comp.options.run_codes.len > 0) {
+            var extended = std.ArrayList(u8).empty;
+            defer extended.deinit(comp.allocator);
+            try extended.appendSlice(comp.allocator, source);
+            for (comp.options.add_codes) |code| {
+                try extended.append(comp.allocator, '\n');
+                try extended.appendSlice(comp.allocator, code);
+            }
+            for (comp.options.run_codes) |code| {
+                try extended.append(comp.allocator, '\n');
+                try extended.appendSlice(comp.allocator, "#run ");
+                try extended.appendSlice(comp.allocator, code);
+                try extended.appendSlice(comp.allocator, ";");
+            }
+            comp.allocator.free(source);
+            source = try extended.toOwnedSlice(comp.allocator);
+        }
+
         var applied_current_workspace_sources = std.ArrayList([]const u8).empty;
         defer {
             for (applied_current_workspace_sources.items) |value| comp.allocator.free(value);
@@ -217,12 +331,13 @@ pub const Compilation = struct {
         var pass: usize = 0;
         while (true) {
             pass += 1;
-            const diag = Diagnostic.init(comp.allocator, comp.options.input_path, source);
+            const diag = comp.makeDiag(comp.options.input_path, source);
             if (pass > 16) return diag.failAt(0, "compile-time add_build_string did not reach a fixed point after {d} passes", .{pass - 1});
             if (source.len == 0 and !comp.options.check_only) return diag.failAt(0, "source file is empty", .{});
 
             var tokens = try lexer.tokenize(comp.allocator, source, diag);
             defer tokens.deinit(comp.allocator);
+            if (comp.options.verbose) std.debug.print("verbose: lexed {s} ({d} tokens)\n", .{ comp.options.input_path, tokens.len });
 
             const token_slice = tokens.slice();
             var ast = try parser.parse(comp.allocator, source, token_slice.items(.tag), token_slice.items(.start), token_slice.items(.end), diag);
@@ -230,6 +345,7 @@ pub const Compilation = struct {
                 comp.allocator.free(ast.tokens);
                 ast.deinit();
             }
+            if (comp.options.verbose) std.debug.print("verbose: parsed {d} nodes\n", .{ast.node_tags.items.len});
 
             const require_main = !comp.options.check_only and !hasTopLevelExecutableRun(&ast);
             var resolved = try resolve_mod.resolve(comp.allocator, &ast, diag, require_main, &.{});
@@ -269,11 +385,13 @@ pub const Compilation = struct {
                 // will produce a diagnostic.
                 std.Io.Dir.createDirPath(std.Io.Dir.cwd(), comp.io, object_dir) catch {};
             }
-            try llvm.emitObject(comp.allocator, &bytecode, object_path, diag);
+            const opt_level: llvm.OptLevel = if (comp.options.release) .release else if (comp.options.release_debug) .release_debug else .none;
+            try llvm.emitObject(comp.allocator, &bytecode, object_path, opt_level, diag);
 
             const runtime_path = try comp.resolveRuntimePath();
             defer if (runtime_path.owned) comp.allocator.free(runtime_path.path);
             try link_mod.link(comp.allocator, comp.io, object_path, runtime_path.path, comp.options.output_path, diag);
+            if (comp.options.verbose) std.debug.print("verbose: linked {s}\n", .{comp.options.output_path});
             return;
         }
     }
@@ -301,6 +419,14 @@ pub const Compilation = struct {
             else => return err,
         };
         return true;
+    }
+
+    fn resolveToAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+        var cwd_buf: [4096]u8 = undefined;
+        const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return allocator.dupe(u8, path);
+        const cwd_len = std.mem.len(@as([*:0]const u8, @ptrCast(cwd_ptr)));
+        const cwd = cwd_buf[0..cwd_len];
+        return std.fs.path.join(allocator, &.{ cwd, path });
     }
 
     fn recordRunValue(comp: *Compilation, typed: *sema.Typed, value_node: @import("Ast.zig").NodeIndex, decl_node: @import("Ast.zig").NodeIndex, value: vm_mod.Value, diag: Diagnostic, source_offset: u32) !void {
@@ -936,8 +1062,8 @@ pub const Compilation = struct {
         };
         defer comp.allocator.free(result.stdout);
         defer comp.allocator.free(result.stderr);
-        if (result.stdout.len != 0) std.debug.print("{s}", .{result.stdout});
-        if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
+        if (result.stdout.len != 0 and !comp.options.quiet) std.debug.print("{s}", .{result.stdout});
+        if (result.stderr.len != 0 and !comp.options.quiet) std.debug.print("{s}", .{result.stderr});
         return .{ .int = switch (result.term) {
             .exited => |code| code,
             else => 1,
@@ -945,6 +1071,7 @@ pub const Compilation = struct {
     }
 
     fn executeRunPrint(comp: *Compilation, ast: *const @import("Ast.zig").Ast, typed: *sema.Typed, resolved: *const resolve_mod.Resolved, callee: @import("Ast.zig").NodeIndex, args: []const u32, diag: Diagnostic) !void {
+        if (comp.options.quiet) return;
         if (args.len == 0) return diag.failAt(ast.tokens[ast.mainToken(callee)].start, "print expects at least one argument", .{});
         const first: @import("Ast.zig").NodeIndex = @intCast(args[0]);
         if (ast.tag(first) == .string_literal and args.len > 1) {
@@ -1698,6 +1825,23 @@ pub const Compilation = struct {
             };
             return flat_path;
         }
+        for (comp.options.import_dirs) |dir| {
+            const dir_module_path = try std.fs.path.join(comp.allocator, &.{ dir, name, "module.jai" });
+            if (std.Io.Dir.cwd().access(comp.io, dir_module_path, .{})) {
+                return dir_module_path;
+            } else |_| {
+                comp.allocator.free(dir_module_path);
+            }
+            const dir_flat_name = try std.fmt.allocPrint(comp.allocator, "{s}.jai", .{name});
+            defer comp.allocator.free(dir_flat_name);
+            const dir_flat_path = try std.fs.path.join(comp.allocator, &.{ dir, dir_flat_name });
+            if (std.Io.Dir.cwd().access(comp.io, dir_flat_path, .{})) {
+                return dir_flat_path;
+            } else |_| {
+                comp.allocator.free(dir_flat_path);
+            }
+        }
+
         const module_path = try std.fs.path.join(comp.allocator, &.{ "modules", name, "module.jai" });
         if (std.Io.Dir.cwd().access(comp.io, module_path, .{})) {
             return module_path;
@@ -1717,16 +1861,16 @@ pub const Compilation = struct {
 
     fn expandModuleSource(comp: *Compilation, source: []const u8, params: []const u8, module_path: []const u8) ![]const u8 {
         if (std.mem.trim(u8, params, " \t\r\n").len == 0) return try comp.stripModuleParameters(source);
-        const mp_idx = std.mem.indexOf(u8, source, "#module_parameters(") orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(0, "parameterized import requires module to declare #module_parameters", .{});
+        const mp_idx = std.mem.indexOf(u8, source, "#module_parameters(") orelse return comp.makeDiag(module_path, source).failAt(0, "parameterized import requires module to declare #module_parameters", .{});
         const mp_start = mp_idx + "#module_parameters(".len;
-        const mp_end_rel = std.mem.indexOfScalar(u8, source[mp_start..], ')') orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "unterminated #module_parameters", .{});
+        const mp_end_rel = std.mem.indexOfScalar(u8, source[mp_start..], ')') orelse return comp.makeDiag(module_path, source).failAt(mp_idx, "unterminated #module_parameters", .{});
         const decls = source[mp_start .. mp_start + mp_end_rel];
-        if (std.mem.indexOf(u8, decls, ":=") == null) return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "#module_parameters currently supports name := default declarations", .{});
+        if (std.mem.indexOf(u8, decls, ":=") == null) return comp.makeDiag(module_path, source).failAt(mp_idx, "#module_parameters currently supports name := default declarations", .{});
         const name = std.mem.trim(u8, decls[0..std.mem.indexOf(u8, decls, ":=").?], " \t\r\n");
-        const eq = std.mem.indexOfScalar(u8, params, '=') orelse return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "parameterized import currently requires name=value", .{});
+        const eq = std.mem.indexOfScalar(u8, params, '=') orelse return comp.makeDiag(module_path, source).failAt(mp_idx, "parameterized import currently requires name=value", .{});
         const override_name = std.mem.trim(u8, params[0..eq], " \t\r\n");
         const override_value = std.mem.trim(u8, params[eq + 1 ..], " \t\r\n");
-        if (!std.mem.eql(u8, name, override_name)) return Diagnostic.init(comp.allocator, module_path, source).failAt(mp_idx, "import parameter does not match module #module_parameters declaration", .{});
+        if (!std.mem.eql(u8, name, override_name)) return comp.makeDiag(module_path, source).failAt(mp_idx, "import parameter does not match module #module_parameters declaration", .{});
         var out = std.ArrayList(u8).empty;
         defer out.deinit(comp.allocator);
         try out.appendSlice(comp.allocator, name);
@@ -1852,9 +1996,9 @@ pub const Compilation = struct {
             const line_end = std.mem.indexOfScalar(u8, rest[idx..], '\n') orelse rest.len - idx;
             const line = rest[idx .. idx + line_end];
             const directive_end = idx + "#import".len;
-            const quote_rel = std.mem.indexOfScalar(u8, rest[directive_end .. idx + line_end], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "expected module string after #import", .{});
+            const quote_rel = std.mem.indexOfScalar(u8, rest[directive_end .. idx + line_end], '"') orelse return comp.makeDiag(path, source).failAt(idx, "expected module string after #import", .{});
             const name_start = directive_end + quote_rel + 1;
-            const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module name", .{});
+            const name_end_rel = std.mem.indexOfScalar(u8, rest[name_start..], '"') orelse return comp.makeDiag(path, source).failAt(idx, "unterminated #import module name", .{});
             const module_name = rest[name_start .. name_start + name_end_rel];
             const after_name = name_start + name_end_rel + 1;
             const line_start = if (std.mem.lastIndexOfScalar(u8, rest[0..idx], '\n')) |newline| newline + 1 else 0;
@@ -1874,7 +2018,7 @@ pub const Compilation = struct {
                     rest = if (idx + line_end < rest.len) rest[idx + line_end + 1 ..] else rest[idx + line_end ..];
                     continue;
                 }
-                const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start_value..], ')') orelse return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #import module parameters", .{});
+                const param_end_rel = std.mem.indexOfScalar(u8, rest[param_start_value..], ')') orelse return comp.makeDiag(path, source).failAt(idx, "unterminated #import module parameters", .{});
                 const params = rest[param_start_value .. param_start_value + param_end_rel];
                 const module_path = comp.findModule(module_name, path) catch {
                     try out.appendSlice(comp.allocator, "#import \"");
@@ -1936,7 +2080,7 @@ pub const Compilation = struct {
             try out.appendSlice(comp.allocator, rest[0..idx]);
             const start = idx + "#load \"".len;
             const end_rel = std.mem.indexOfScalar(u8, rest[start..], '"') orelse {
-                return Diagnostic.init(comp.allocator, path, source).failAt(idx, "unterminated #load path", .{});
+                return comp.makeDiag(path, source).failAt(idx, "unterminated #load path", .{});
             };
             const rel = rest[start .. start + end_rel];
             const full = try std.fs.path.join(comp.allocator, &[_][]const u8{ dir, rel });
@@ -1974,7 +2118,7 @@ pub const Compilation = struct {
     }
 
     fn nextDirectiveIndex(comp: *Compilation, path: []const u8, source: []const u8, tag: Tag) !?usize {
-        const diag = Diagnostic.init(comp.allocator, path, source);
+        const diag = comp.makeDiag(path, source);
         var tokens = try lexer.tokenize(comp.allocator, source, diag);
         defer tokens.deinit(comp.allocator);
         for (tokens.items(.tag), tokens.items(.start)) |token_tag, start| {

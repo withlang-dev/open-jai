@@ -327,7 +327,6 @@ OpenJai -run write_string(\"Hello!\n\") -add "n := 42" -verbose program.OpenJai
 | Flag                     | Description                                |
 |--------------------------|--------------------------------------------|
 | `-release`               | Disable stack traces and enable optimizations (LLVM `-O2`). |
-| `-release_debug`         | Like `-release` but less optimized; keeps user-level stack traces. |
 | `-no_dce`                | Turn off dead code elimination (temporary flag; prefer `Build_Options`). |
 | `-no_check`              | Do not import `modules/Check`; disables augmented error checking (e.g., for `print()` calls). |
 | `-no_check_bindings`     | Disable checking of module bindings when `modules/Check` runs. No effect with `-no_check`. |
@@ -347,7 +346,6 @@ OpenJai -run write_string(\"Hello!\n\") -add "n := 42" -verbose program.OpenJai
 |------------------|----------------------------------------------------|
 | `-version`       | Print the compiler version.                        |
 | `-help` / `-?`   | Print help/usage information.                     |
-| `-report_poly`   | Print the Polymorph Report when compilation is done. |
 | `-no_cwd`        | Turn off the compiler's initial change of working directory (temporary flag). |
 
 **Developer options** (shown via `OpenJai -- help`):
@@ -426,6 +424,255 @@ Output:
 ```
 [Autorun] Running: d:/OpenJai/testing/test
 Hello, Sailor from OpenJai!
+```
+
+#### Behavioral Requirements for CLI Arguments
+
+This section documents the precise behavioral requirements for each CLI
+argument, based on the Jai language specification.
+
+**No arguments:**
+- Print: `You need to provide an argument telling the compiler what to compile! Sorry. Pass -help for help.`
+- Exit with code 1.
+
+**`-version`:**
+- Print the compiler version string and exit immediately (exit code 0).
+- OpenJai format: `OpenJai 0.1.0 (open source implementation of Jai)`
+
+**`-help` / `-?`:**
+- Print the full help text to stdout and exit (exit code 0).
+- The help text lists all available arguments with descriptions.
+
+**`-check`:**
+- NOT a valid Jai CLI argument. Jai rejects `-check` as `Unknown argument`.
+- OpenJai supports `-check` as an extension (compile and type-check without
+  linking or producing an executable).
+
+**`-verbose`:**
+- Prints additional information about the metaprogram's configuration before
+  compilation proceeds. Exact output format:
+  ```
+  options.output_path = "<path>/";
+  options.output_executable_name = "<name>";
+  Changing working directory to '<path>'.
+  Input files: ["<file1>", ...]
+  Add strings: ["<string1>", ...]
+  Run strings: ["<string1>", ...]
+  Plugins:     [<plugin_info>]
+  ```
+- `output_executable_name` is shown only when it was derived from the input
+  file (not when set explicitly via `-exe`).
+- `output_path` is shown only when it was derived (not when set explicitly
+  via `-output_path`).
+- The verbose header appears before any compilation output.
+- `-verbose` and `-quiet` can coexist: verbose header is printed, but
+  statistics are suppressed.
+
+**`-quiet`:**
+- Suppresses all statistics output (the `Stats for Workspace N` block,
+  front-end/llvm/compiler/link/total times).
+- Suppresses the `Running linker:` and `Running dsymutil:` lines.
+- Does NOT suppress error messages, warnings, or compile-time `#run` output.
+- Does NOT suppress `-verbose` header output.
+
+**`-no_color`:**
+- Disables ANSI escape sequences in error/warning output.
+- Without `-no_color`, error messages include color codes when output is a
+  TTY: `\e[0;96m` (cyan for context lines), `\e[1;91m` (bold red for the
+  error highlight), `\e[0m` (reset).
+- With `-no_color`, the same error messages are printed without any escape
+  sequences.
+- When output is piped (not a TTY), colors are already suppressed regardless
+  of this flag.
+
+**`-msvc_format`:**
+- Changes error message location format from `file:line,col:` to
+  `file(line,col):` (Visual Studio compatible).
+- Example without: `/tmp/test.jai:5,15: Error: ...`
+- Example with: `/tmp/test.jai(5,15): Error: ...`
+
+**`-release`:**
+- Sets `Optimization_Type` to `VERY_OPTIMIZED` (LLVM `-O2`).
+- Disables stack traces in the target program.
+- Produces significantly smaller binaries (~64% reduction in test cases).
+- LLVM time increases substantially (optimization passes).
+- Produces a single `.o` file instead of the default split modules (4 `.o`
+  files), same effect as adding `-no_split`.
+- The full `Optimization_Type` enum in `Build_Options`:
+  `DEBUG` (0), `VERY_DEBUG` (1), `OPTIMIZED` (2), `VERY_OPTIMIZED` (3),
+  `OPTIMIZED_SMALL` (4), `OPTIMIZED_VERY_SMALL` (5).
+- `-release` maps to `VERY_OPTIMIZED`. Other levels are set via the
+  metaprogram's `Build_Options`, not CLI flags.
+
+**`-release_debug`:**
+- Builds a release build with less optimization than `-release` and retains
+  user-level stack traces.
+- Maps to `Optimization_Type.OPTIMIZED` (LLVM `-O1` equivalent).
+- Documented in The Way to Jai book.
+
+**`-report_poly`:**
+- Prints the Polymorph Report when compilation is done.
+- Shows statistics about polymorphic function/struct instantiations.
+- Documented in The Way to Jai book.
+
+**`-no_split`:**
+- Disables split modules: produces 1 `.o` file instead of the default 4.
+- Only affects the LLVM backend.
+
+**`-no_dce`:**
+- Disables dead code elimination.
+- LLVM time increases (more code generated).
+- Temporary flag; the preferred way is via `Build_Options`.
+
+**`-no_check`:**
+- Does not import `modules/Check`.
+- Disables augmented error checking (e.g., `print()` argument count
+  validation).
+- Reduces lexer lines processed.
+
+**`-no_check_bindings`:**
+- Disables checking of module bindings when `modules/Check` runs.
+- No visible effect if `-no_check` is also used.
+
+**`-no_inline`:**
+- Disables inlining throughout the program.
+- No visible change in compiler output.
+
+**`-no_backtrace_on_crash`:**
+- Causes less code to be imported at startup (reduces lexer lines by ~500).
+- Crash behavior changes: no automatic stack trace on OS-level exceptions.
+- On some platforms, crashes may appear as silent exits.
+
+**`-no_cwd`:**
+- Prevents the compiler's initial working directory change.
+- By default, the compiler changes the working directory to the directory
+  containing the input file. `-no_cwd` disables this behavior.
+- Temporary flag; the working directory policy is still evolving.
+
+**`-exe name`:**
+- Sets the output executable name.
+- The linker output and `.o` file names use this name.
+- If `-output_path` is also given, the executable is placed at
+  `<output_path>/<name>`.
+- If neither `-exe` nor `-output_path` is given, the executable name is
+  derived from the input file stem and placed in the input file's directory.
+
+**`-output_path dir`:**
+- Sets the directory for output files.
+- The directory must already exist (the compiler does not create it).
+- If `-exe` is also given, the executable is `<dir>/<exe_name>`.
+- If only `-output_path` is given, the executable name is derived from the
+  input file stem: `<dir>/<input_stem>`.
+
+**`-add arg`:**
+- Injects `arg` as source code into the target program at file scope.
+- Declarations made this way are visible to the program.
+- Example: `-add "MY_CONST :: 99;"` makes `MY_CONST` usable in the program.
+- Can be used multiple times: `-add "A :: 1;" -add "B :: 2;"` injects both.
+- Each `-add` adds 1 line to the lexer line count.
+
+**`-run arg`:**
+- Wraps `arg` in a `#run` directive and executes it at compile time.
+- Output from `write_string` in the run code appears in compiler output.
+- Can be used multiple times: `-run "write_string(\"A\")" -run "write_string(\"B\")"`.
+- Execution order of multiple `-run` directives is not guaranteed.
+- Each `-run` adds 1 line to the lexer line count.
+
+**`-import_dir path`:**
+- Adds `path` to the list of directories searched by `#import`.
+- Can be used multiple times to add multiple directories.
+- Searched before the default modules directory.
+
+**`-plug name` / `-plugin name`:**
+- Imports module `name` into the metaprogram as a plugin.
+- Both `-plug` and `-plugin` are accepted.
+- Can be used multiple times for multiple plugins.
+- The Default_Metaprogram scans for `-plug` arguments and initializes them.
+- `+Name` syntax is handled by the Default_Metaprogram, NOT by the
+  compiler's argument parser (the compiler treats `+Name` as a filename).
+
+**`-context_size n`:**
+- Sets the size of `#Context` in bytes.
+- Example: `-context_size 2048`.
+
+**`-debugger`:**
+- Drops into the interactive debugger on a crash during compile-time
+  execution.
+- No visible effect on normal compilation output.
+
+**`-debug_for`:**
+- Enables debugging of `for_expansion` macros.
+- No visible effect on normal compilation output.
+
+**`-very_debug`:**
+- Builds with extra debugging facilities.
+- No visible difference in compiler output for simple programs.
+
+**`-natvis`:**
+- Uses natvis-compatible type names in debug info.
+- No visible difference in compiler output.
+
+**`-llvm`:**
+- Use the LLVM backend (the default). Effectively a no-op.
+
+**`-x64`:**
+- Use the x64 backend.
+- On ARM64 platforms: `Error: The x64 backend supports only x64 CPUs but the CPU target was set to ARM64 (4)`.
+
+**`-` (single dash):**
+- Separates compiler arguments from metaprogram arguments.
+- Everything after `-` is passed to the user metaprogram, not parsed by the
+  compiler.
+
+**`--` (double dash) / `---` (triple dash):**
+- Both `--` and `---` introduce developer/front-end options for the
+  metaprogram. They are interchangeable.
+- NOT the same as `-`. After `--`/`---`, the compiler expects developer
+  options (e.g., `import_dir`, `meta`, `no_jobs`, `randomize`, `seed`,
+  `extra`, `chaos`).
+- `-- meta MetaProgram` replaces the default metaprogram with `MetaProgram`.
+- Unknown tokens after `--` produce: `Unknown developer option '<token>'. Use '-- help' for help.`
+- `-- help` prints: `Developer options: import_dir name, meta metaprogram_name, no_jobs, randomize, seed some_number, extra, chaos.`
+
+**Multiple input files:**
+- Multiple non-flag arguments are accepted as input files. All are added to
+  the target workspace as build files.
+- The first input file determines the default output path and executable name.
+
+**Unknown arguments:**
+- Any unrecognized argument starting with `-` is rejected and the compiler
+  exits immediately.
+
+**Default behavior (no flags):**
+- Backend: LLVM.
+- Output path: the directory containing the input file.
+- Executable name: the input file stem (e.g., `program.jai` → `program`).
+- Working directory: changed to the input file's directory (unless `-no_cwd`).
+- Split modules: enabled (4 `.o` files with LLVM backend).
+- Dead code elimination: enabled.
+- Inlining: enabled.
+- Stack traces: enabled (disabled by `-release`).
+- Optimization: none (debug build).
+- `modules/Check` plugin: imported and run.
+- ANSI colors: enabled when output is a TTY.
+- Error format: `file:line,col:` (not MSVC format).
+- `.build/` directory: created alongside the input file for intermediate
+  object files.
+
+**OpenJai extensions (not in Jai):**
+- `-check`: compile and type-check without linking. Jai rejects this flag.
+- `-runtime path`: set the runtime object/manifest path.
+
+**Statistics output format (shown unless `-quiet`):**
+```
+Stats for Workspace 2 ("Target Program"):
+Lexer lines processed: <n> (<m> including blank lines, comments.)
+Front-end time: <t> seconds.
+llvm      time: <t> seconds.
+
+Compiler  time: <t> seconds.
+Link      time: <t> seconds.
+Total     time: <t> seconds.
 ```
 
 ### Build Philosophy
