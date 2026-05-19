@@ -15,7 +15,7 @@ main :: () {
     // => The value of var is Vector3 and it is of type Type
 
     ti := type_info(Vector3);      // (2)
-    print("Type of ti is: %\n", type_of(ti)); // => Type of infor is: *Type_Info_Struct
+    print("Type of ti is: %\n", type_of(ti)); // => Type of ti is: *Type_Info_Struct
     for member: ti.members      print("% - ", member.name);       // (2B)
     // => x - y - z - xy - yz - component -
 

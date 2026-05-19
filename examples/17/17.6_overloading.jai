@@ -31,6 +31,6 @@ main :: () {
         // => In proc2 - string line (4)
         n: u16 = 12500;
         proc2(n);                 // (9) 
-        // => In proc2 - u16 line (5))
+        // => In proc2 - u16 line (5)
     }
 }
